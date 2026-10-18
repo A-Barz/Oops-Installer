@@ -85,7 +85,7 @@ class InstallConfig:
     # --- Handbook ch. 6: Portage / make.conf ---
     profile: str = "default/linux/amd64/23.0/desktop"
     sync_method: str = "webrsync"  # webrsync, rsync, git
-    binhost: bool = True  # Gentoo official binpackages (getbinpkg)
+    binhost: bool = True  # Gentoo official binpackages (--getbinpkg, not FEATURES)
     binhost_abi: str = "x86-64"  # x86-64 or x86-64-v3
     use_flags: str = "dist-kernel"
     extra_use: list[str] = field(default_factory=list)

@@ -586,8 +586,11 @@ def render_chroot_script(cfg: InstallConfig, devices: dict[str, str]) -> str:
     """
     jobs = cfg.makeopts_jobs or detect.nproc()
     video = detect.detect_gpu() if cfg.video_cards == "auto" else cfg.video_cards
-    use = ["dist-kernel"]
-    use.extend(cfg.extra_use)
+    use = []
+    for token in (cfg.use_flags or "dist-kernel").split():
+        if token and token not in use:
+            use.append(token)
+    use.extend(flag for flag in cfg.extra_use if flag not in use)
     if cfg.window_managers:
         use.append("wayland")
     if cfg.init_system == "systemd":
@@ -614,7 +617,9 @@ def render_chroot_script(cfg: InstallConfig, devices: dict[str, str]) -> str:
         # Prefer the emerge flag over FEATURES=getbinpkg. Do not set FEATURES at all:
         # it is incremental, and leftover binpkg-request-use from an earlier make.conf
         # made Portage print a red !!! warning on every emerge.
-        emerge_opts += " --getbinpkg"
+        # Official replacement for the invalid FEATURES=binpkg-request-use:
+        # fetch binpkgs, and skip a binpkg whose USE flags do not match.
+        emerge_opts += " --getbinpkg --binpkg-respect-use=y"
     binrepo = ""
     if cfg.binhost and cfg.architecture == "amd64":
         binrepo = f"""

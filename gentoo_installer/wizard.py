@@ -286,7 +286,11 @@ def _stage(cfg: InstallConfig) -> None:
         ui.warn("musl stages typically have no KDE/GNOME desktop profiles.")
         cfg.install_type = "server"
     cfg.verify_stage = ui.ask_yes_no("Verify stage3 SHA256 and GPG signature?", True)
-    cfg.testing_keywords = ui.ask_yes_no("Accept testing keywords (*/* ~amd64) for the whole system?", False)
+    kw = "~amd64" if cfg.architecture == "amd64" else "~arm64"
+    cfg.testing_keywords = ui.ask_yes_no(
+        f"Accept testing keywords (*/* {kw}) for the whole system?",
+        False,
+    )
 
 
 def _base(cfg: InstallConfig) -> None:
