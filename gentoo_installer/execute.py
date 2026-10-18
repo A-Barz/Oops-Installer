@@ -511,6 +511,7 @@ def phase_chroot(cfg: InstallConfig, runner: Runner, root: str) -> None:
         ui.ok("Wrote chroot-install.preview.sh in the current directory")
         return
     _repair_chroot_leftovers(cfg, root)
+    _write_make_conf(cfg, root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(script, encoding="utf-8")
     path.chmod(0o700)
@@ -531,15 +532,16 @@ def phase_chroot(cfg: InstallConfig, runner: Runner, root: str) -> None:
     cfg.save(str(Path(root) / "root" / "install-config.json"), include_secrets=False)
     cfg.save(str(Path(root) / "root" / "install-config.yaml"), include_secrets=False)
     # Handbook + wiki "Installation alternatives": LiveCDs leak a messy env.
-    # env -i clears it; bash --login then sources Gentoo /etc/profile.
+    # Do not use bash --login here: that sources /etc/profile *before* the script
+    # can `set +u`, which made later lines (e.g. make.conf CFLAGS) look like
+    # unbound-variable failures at chroot-install.sh:70.
     # https://wiki.gentoo.org/wiki/Installation_alternatives
-    # https://wiki.gentoo.org/wiki/Handbook:AMD64/Installation/Base
     term = os.environ.get("TERM") or "linux"
     runner.shell(
         "env -i "
         f"HOME=/root TERM={shlex.quote(term)} "
         "PATH=/usr/sbin:/usr/bin:/sbin:/bin "
-        f"chroot {shlex.quote(root)} /bin/bash --login /root/chroot-install.sh"
+        f"chroot {shlex.quote(root)} /bin/bash /root/chroot-install.sh"
     )
     if secrets.exists():
         secrets.unlink()
@@ -588,20 +590,11 @@ def _repair_chroot_leftovers(cfg: InstallConfig, root: str) -> None:
     vc.write_text(f"KEYMAP={cfg.keymap}\n", encoding="utf-8")
 
 
-def phase_done(cfg: InstallConfig, runner: Runner, root: str) -> None:
-    ui.ok("Installation phases finished.")
-    ui.info(f"When you are ready: umount -R {root} && reboot")
-    ui.info("Remove the Ubuntu live USB so the machine boots from the Gentoo disk.")
-
-
-def render_chroot_script(cfg: InstallConfig, devices: dict[str, str]) -> str:
-    """Build the bash script that runs *inside* Gentoo (Portage, kernel, bootloader).
-
-    Keep this as bash, not Python: the chroot only has the stage3 toolchain.
-    """
+def _make_conf_text(cfg: InstallConfig) -> str:
+    """Portage make.conf body (written on the host, not via a bash heredoc)."""
     jobs = cfg.makeopts_jobs or detect.nproc()
     video = detect.detect_gpu() if cfg.video_cards == "auto" else cfg.video_cards
-    use = []
+    use: list[str] = []
     for token in (cfg.use_flags or "dist-kernel").split():
         if token and token not in use:
             use.append(token)
@@ -629,12 +622,47 @@ def render_chroot_script(cfg: InstallConfig, devices: dict[str, str]) -> str:
         cflags += " -flto"
     emerge_opts = f"--jobs={max(1, jobs // 2)} --load-average={jobs} --ask=n"
     if cfg.binhost:
-        # Prefer the emerge flag over FEATURES=getbinpkg. Do not set FEATURES at all:
-        # it is incremental, and leftover binpkg-request-use from an earlier make.conf
-        # made Portage print a red !!! warning on every emerge.
-        # Official replacement for the invalid FEATURES=binpkg-request-use:
-        # fetch binpkgs, and skip a binpkg whose USE flags do not match.
         emerge_opts += " --getbinpkg --binpkg-respect-use=y"
+    lines = [
+        f'COMMON_FLAGS="{cflags}"',
+        'CFLAGS="${COMMON_FLAGS}"',
+        'CXXFLAGS="${COMMON_FLAGS}"',
+        'FCFLAGS="${COMMON_FLAGS}"',
+        'FFLAGS="${COMMON_FLAGS}"',
+        f'MAKEOPTS="-j{jobs}"',
+        f'EMERGE_DEFAULT_OPTS="{emerge_opts}"',
+        f'USE="{" ".join(sorted(set(use)))}"',
+        f'ACCEPT_LICENSE="{cfg.accept_license}"',
+        f'VIDEO_CARDS="{video}"',
+        f'GENTOO_MIRRORS="{mirrors}"',
+    ]
+    if grub_plat:
+        lines.append(grub_plat)
+    return "\n".join(lines) + "\n"
+
+
+def _write_make_conf(cfg: InstallConfig, root: str) -> None:
+    text = _make_conf_text(cfg)
+    portage = Path(root) / "etc" / "portage"
+    portage.mkdir(parents=True, exist_ok=True)
+    dest = portage / "make.conf"
+    if dest.is_dir():
+        dest = dest / "99gentoo-live-installer"
+    dest.write_text(text, encoding="utf-8")
+
+
+def phase_done(cfg: InstallConfig, runner: Runner, root: str) -> None:
+    ui.ok("Installation phases finished.")
+    ui.info(f"When you are ready: umount -R {root} && reboot")
+    ui.info("Remove the Ubuntu live USB so the machine boots from the Gentoo disk.")
+
+
+def render_chroot_script(cfg: InstallConfig, devices: dict[str, str]) -> str:
+    """Build the bash script that runs *inside* Gentoo (Portage, kernel, bootloader).
+
+    Keep this as bash, not Python: the chroot only has the stage3 toolchain.
+    """
+    loaders = selected_bootloaders(cfg)
     binrepo = ""
     if cfg.binhost and cfg.architecture == "amd64":
         binrepo = f"""
@@ -886,29 +914,15 @@ SELINUXTYPE={cfg.selinux_policy}
 EOF
 """
 
-    make_conf = f"""
-COMMON_FLAGS="{cflags}"
-CFLAGS="${{COMMON_FLAGS}}"
-CXXFLAGS="${{COMMON_FLAGS}}"
-FCFLAGS="${{COMMON_FLAGS}}"
-FFLAGS="${{COMMON_FLAGS}}"
-MAKEOPTS="-j{jobs}"
-EMERGE_DEFAULT_OPTS="{emerge_opts}"
-USE="{' '.join(sorted(set(use)))}"
-ACCEPT_LICENSE="{cfg.accept_license}"
-VIDEO_CARDS="{video}"
-GENTOO_MIRRORS="{mirrors}"
-{grub_plat}
-"""
-
     overlay_block = _overlay_script(cfg)
     plymouth_block = _plymouth_script(cfg)
 
     return f"""#!/bin/bash
+# gentoo-live-installer chroot script rev 10
+set +u
 set -eo pipefail
-# gentoo-live-installer chroot script rev 9
 # Do not enable `set -u`. Gentoo profile.d/debuginfod.sh reads optional DEBUGINFOD_*.
-# Handbook: env-update && source /etc/profile after make.conf / locale changes.
+# make.conf is written by the host Python (not a heredoc) so CFLAGS lines are not bash.
 unset FEATURES
 export DEBUGINFOD_URLS="${{DEBUGINFOD_URLS:-}}"
 export DEBUGINFOD_CERT_PATH="${{DEBUGINFOD_CERT_PATH:-}}"
@@ -935,7 +949,8 @@ source_profile() {{
   export PS1="(chroot) ${{PS1:-}}"
   purge_bad_features
   unset FEATURES
-  set -e
+  set +u
+  set -eo pipefail
 }}
 
 # eselect/emaint/emerge all load Portage; strip the invalid FEATURES token first
@@ -953,22 +968,8 @@ if [ -d /etc/vconsole.conf ]; then
   rm -rf /etc/vconsole.conf
 fi
 mkdir -p /etc/portage/package.use /etc/portage/package.accept_keywords /etc/portage/package.license /etc/portage/profile
-
-if [ -d /etc/portage/make.conf ]; then
-  cat > /etc/portage/make.conf/99gentoo-live-installer << 'MAKECONF'
-{make_conf.strip()}
-MAKECONF
-else
-  cat > /etc/portage/make.conf << 'MAKECONF'
-{make_conf.strip()}
-MAKECONF
-fi
-# Wiki Chroot: persist profile load for interactive rescue shells.
+# Wiki Chroot: persist profile for rescue shells, but do not recurse into /etc/profile.
 cat > /root/.bashrc << 'BASHRC'
-if [ -f /etc/profile ]; then
-  # shellcheck disable=SC1091
-  . /etc/profile
-fi
 export PS1="(chroot) ${{PS1:-}}"
 BASHRC
 purge_bad_features
