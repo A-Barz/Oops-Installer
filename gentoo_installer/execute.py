@@ -906,7 +906,7 @@ GENTOO_MIRRORS="{mirrors}"
 
     return f"""#!/bin/bash
 set -eo pipefail
-# gentoo-live-installer chroot script rev 8
+# gentoo-live-installer chroot script rev 9
 # Do not enable `set -u`. Gentoo profile.d/debuginfod.sh reads optional DEBUGINFOD_*.
 # Handbook: env-update && source /etc/profile after make.conf / locale changes.
 unset FEATURES
@@ -938,11 +938,16 @@ source_profile() {{
   set -e
 }}
 
-# Hide the one known Portage !!! line if a fragment still mentions the token.
-emerge() {{
+# eselect/emaint/emerge all load Portage; strip the invalid FEATURES token first
+# and hide that one !!! line so overlay enable does not spam it after every repo.
+run_portage() {{
   purge_bad_features
-  command emerge "$@" 2> >(grep -v --line-buffered 'binpkg-request-use' >&2 || true)
+  command "$@" 2> >(grep -v --line-buffered 'binpkg-request-use' >&2 || true)
 }}
+emerge() {{ run_portage emerge "$@"; }}
+eselect() {{ run_portage eselect "$@"; }}
+emaint() {{ run_portage emaint "$@"; }}
+emerge-webrsync() {{ run_portage emerge-webrsync "$@"; }}
 
 if [ -d /etc/vconsole.conf ]; then
   rm -rf /etc/vconsole.conf
@@ -976,7 +981,11 @@ echo 'sys-kernel/linux-firmware @BINARY-REDISTRIBUTABLE' > /etc/portage/package.
 {keywords}
 
 {sync}
+emerge --ask=n --oneshot --verbose sys-apps/portage || true
+source_profile
 {overlay_block}
+emerge --ask=n --oneshot --verbose sys-apps/portage || true
+source_profile
 eselect profile set {shlex.quote(cfg.profile)} || eselect profile set --force {shlex.quote(cfg.profile)} || true
 if command -v mirrorselect >/dev/null 2>&1; then
   mirrorselect -s3 -b10 || true
@@ -1049,8 +1058,12 @@ def _overlay_script(cfg: InstallConfig) -> str:
         "mkdir -p /etc/portage/package.accept_keywords",
     ]
     for ov in overlays:
-        lines.append(f"eselect repository enable {shlex.quote(ov)} || true")
-        lines.append(f"emaint sync --repo {shlex.quote(ov)} || true")
+        qov = shlex.quote(ov)
+        lines.append("purge_bad_features")
+        lines.append(f"eselect repository enable {qov} || true")
+        lines.append("purge_bad_features")
+        lines.append(f"emaint sync --repo {qov} || true")
+        lines.append("purge_bad_features")
         lines.append(f'echo "*/*::{ov} {arch_kw}" >> /etc/portage/package.accept_keywords/overlays')
     return "\n".join(lines) + "\n"
 
