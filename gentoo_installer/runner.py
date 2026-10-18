@@ -58,6 +58,7 @@ class Runner:
             merged.update(env)
         # Portage reads FEATURES from the process environment (even inside chroot).
         merged.pop("FEATURES", None)
+        merged.pop("PORTAGE_FEATURES", None)
         proc = subprocess.run(
             list(argv),
             check=False,
@@ -79,14 +80,19 @@ class Runner:
         return proc
 
     def shell(self, script: str, check: bool = True) -> subprocess.CompletedProcess:
-        """Run a bash -lc snippet. Prefer this for pipelines (cryptsetup | …)."""
+        """Run a bash -c snippet. Prefer this for pipelines (cryptsetup | …).
+
+        Uses non-login bash so /etc/profile cannot export a stale FEATURES into
+        host commands (chroot itself is started with env -i).
+        """
         ui.step(script if len(script) < 200 else script[:200] + "…")
         self.log("$ " + script)
         if self.dry_run:
             return subprocess.CompletedProcess(["bash", "-c", script], 0, "", "")
         env = os.environ.copy()
         env.pop("FEATURES", None)
-        proc = subprocess.run(["bash", "-lc", script], check=False, text=True, env=env)
+        env.pop("PORTAGE_FEATURES", None)
+        proc = subprocess.run(["bash", "-c", script], check=False, text=True, env=env)
         if check and proc.returncode != 0:
             ui.error(f"Shell command failed ({proc.returncode})")
             sys.exit(proc.returncode)

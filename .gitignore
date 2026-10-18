@@ -7,4 +7,5 @@ gentoo-install.yml
 !example-config.yaml
 .install-state
 *.log
+chroot-install.preview.sh
 .venv/

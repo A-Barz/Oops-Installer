@@ -77,6 +77,7 @@ def execute(cfg: InstallConfig) -> None:
     # this process. Portage then prints "Run . /etc/profile". Drop them here so
     # --config/--resume does not require sourcing the profile by hand.
     os.environ.pop("FEATURES", None)
+    os.environ.pop("PORTAGE_FEATURES", None)
     os.environ.pop("USE", None)
 
     runner = Runner(dry_run=cfg.dry_run)
@@ -532,22 +533,35 @@ def phase_chroot(cfg: InstallConfig, runner: Runner, root: str) -> None:
     cfg.save(str(Path(root) / "root" / "install-config.json"), include_secrets=False)
     cfg.save(str(Path(root) / "root" / "install-config.yaml"), include_secrets=False)
     # Handbook + wiki "Installation alternatives": LiveCDs leak a messy env.
-    # Do not use bash --login here: that sources /etc/profile *before* the script
-    # can `set +u`, which made later lines (e.g. make.conf CFLAGS) look like
-    # unbound-variable failures at chroot-install.sh:70.
+    # Do not use bash --login: that sources /etc/profile before the script runs.
+    # Do not run the chroot through `bash -lc` (Runner.shell): the host login
+    # profile can export FEATURES into the wrapper even when env -i is intended.
     # https://wiki.gentoo.org/wiki/Installation_alternatives
     term = os.environ.get("TERM") or "linux"
-    runner.shell(
-        "env -i "
-        f"HOME=/root TERM={shlex.quote(term)} "
-        "PATH=/usr/sbin:/usr/bin:/sbin:/bin "
-        f"chroot {shlex.quote(root)} /bin/bash /root/chroot-install.sh"
+    runner.run(
+        [
+            "env",
+            "-i",
+            "HOME=/root",
+            f"TERM={term}",
+            "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+            "chroot",
+            root,
+            "/bin/bash",
+            "/root/chroot-install.sh",
+        ]
     )
     if secrets.exists():
         secrets.unlink()
 
 
+# Not a Portage FEATURE. Valid relatives: getbinpkg, binpkg-request-signature.
+# --binpkg-respect-use is an emerge option only (EMERGE_DEFAULT_OPTS).
 _BAD_FEATURE = "binpkg-request-use"
+# Incremental: subtract the bogus token, disable the default red warning, drop unknowns.
+_FEATURES_SANITIZE = (
+    'FEATURES="-binpkg-request-use -unknown-features-warn unknown-features-filter"'
+)
 
 
 def _strip_bad_features(path: Path) -> bool:
@@ -555,22 +569,28 @@ def _strip_bad_features(path: Path) -> bool:
     if not path.is_file():
         return False
     text = path.read_text(encoding="utf-8", errors="replace")
-    if _BAD_FEATURE not in text:
+    new = re.sub(rf"\b{_BAD_FEATURE}\b", "", text)
+    if path.name in {"profile.env", "05etc-profile"} or path.parent.name == "env.d":
+        new = re.sub(r"^export FEATURES=.*\n?", "", new, flags=re.MULTILINE)
+        new = re.sub(r"^FEATURES=.*\n?", "", new, flags=re.MULTILINE)
+    if new == text:
         return False
-    path.write_text(text.replace(_BAD_FEATURE, ""), encoding="utf-8")
+    path.write_text(new, encoding="utf-8")
     return True
 
 
 def _repair_chroot_leftovers(cfg: InstallConfig, root: str) -> None:
     """Fix leftovers from earlier installer revisions before the chroot script runs.
 
-    * FEATURES=binpkg-request-use in make.conf / profile.env (not a Portage feature)
+    * FEATURES=binpkg-request-use in make.conf / /etc/make.conf / profile.env
+      (not a Portage feature; Portage also stacks FEATURES from /etc/make.conf)
     * /etc/vconsole.conf created as a directory by `mkdir -p`
     """
     rootp = Path(root)
     cleaned = False
     for path in [
         rootp / "etc" / "portage" / "make.conf",
+        rootp / "etc" / "make.conf",
         rootp / "etc" / "profile.env",
     ]:
         if _strip_bad_features(path):
@@ -631,6 +651,7 @@ def _make_conf_text(cfg: InstallConfig) -> str:
         'FFLAGS="${COMMON_FLAGS}"',
         f'MAKEOPTS="-j{jobs}"',
         f'EMERGE_DEFAULT_OPTS="{emerge_opts}"',
+        _FEATURES_SANITIZE,
         f'USE="{" ".join(sorted(set(use)))}"',
         f'ACCEPT_LICENSE="{cfg.accept_license}"',
         f'VIDEO_CARDS="{video}"',
@@ -649,6 +670,17 @@ def _write_make_conf(cfg: InstallConfig, root: str) -> None:
     if dest.is_dir():
         dest = dest / "99gentoo-live-installer"
     dest.write_text(text, encoding="utf-8")
+    # FEATURES is incremental: a leftover /etc/make.conf would still merge the
+    # unknown token even after /etc/portage/make.conf is clean.
+    legacy = Path(root) / "etc" / "make.conf"
+    if legacy.exists() and not legacy.is_symlink():
+        if legacy.is_dir():
+            (legacy / "99gentoo-live-installer-clear").write_text(_FEATURES_SANITIZE + "\n", encoding="utf-8")
+        else:
+            _strip_bad_features(legacy)
+            extra = legacy.read_text(encoding="utf-8", errors="replace")
+            if "unknown-features-filter" not in extra:
+                legacy.write_text(extra.rstrip() + "\n" + _FEATURES_SANITIZE + "\n", encoding="utf-8")
 
 
 def phase_done(cfg: InstallConfig, runner: Runner, root: str) -> None:
@@ -917,62 +949,68 @@ EOF
     overlay_block = _overlay_script(cfg)
     plymouth_block = _plymouth_script(cfg)
 
+    locale_q = shlex.quote(cfg.locale)
+    locale_short_q = shlex.quote(locale_short)
     return f"""#!/bin/bash
-# gentoo-live-installer chroot script rev 10
-set +u
-set -eo pipefail
+# gentoo-live-installer chroot script rev 11
 # Do not enable `set -u`. Gentoo profile.d/debuginfod.sh reads optional DEBUGINFOD_*.
-# make.conf is written by the host Python (not a heredoc) so CFLAGS lines are not bash.
+# Do not use `set -o pipefail`: a FEATURES warning piped through grep -v used to
+# exit 1 after locale-gen and abort here (bash reported that as "line 70").
+set +u
+set -e
+trap 'echo "chroot-install.sh failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+
 unset FEATURES
+unset PORTAGE_FEATURES
 export DEBUGINFOD_URLS="${{DEBUGINFOD_URLS:-}}"
 export DEBUGINFOD_CERT_PATH="${{DEBUGINFOD_CERT_PATH:-}}"
 export DEBUGINFOD_IMA_CERT_PATH="${{DEBUGINFOD_IMA_CERT_PATH:-}}"
 
-purge_bad_features() {{
+sanitize_portage_files() {{
+  # Portage stacks FEATURES from env, /etc/make.conf, /etc/portage/make.conf,
+  # and /etc/profile.env. The invalid token must not remain in any of them.
   unset FEATURES
-  # make.conf may be a file *or* a directory of fragments.
-  find /etc/portage /etc/env.d /etc/profile.env /usr/share/portage/config \\
-      -type f 2>/dev/null | while read -r f; do
+  unset PORTAGE_FEATURES
+  for f in /etc/portage/make.conf /etc/make.conf /etc/profile.env; do
+    [ -f "$f" ] || continue
     grep -Fq 'binpkg-request-use' "$f" 2>/dev/null || continue
-    sed -i 's/binpkg-request-use//g' "$f" || true
-  done || true
+    sed -i 's/\\bbinpkg-request-use\\b//g' "$f" || true
+  done
+  if [ -d /etc/portage ]; then
+    grep -rlF 'binpkg-request-use' /etc/portage /etc/env.d 2>/dev/null | while read -r f; do
+      [ -f "$f" ] || continue
+      sed -i 's/\\bbinpkg-request-use\\b//g' "$f" || true
+    done || true
+  fi
+  if [ -f /etc/profile.env ]; then
+    sed -i '/^export FEATURES=/d;/^FEATURES=/d' /etc/profile.env || true
+  fi
 }}
 
 source_profile() {{
   # https://wiki.gentoo.org/wiki/Handbook:AMD64/Working/EnvVar
-  # env-update writes /etc/profile.env; source loads it in *this* shell.
   set +e
-  purge_bad_features
-  env-update
+  sanitize_portage_files
+  env-update || true
+  sanitize_portage_files
   # shellcheck disable=SC1091
-  source /etc/profile
+  source /etc/profile || true
   export PS1="(chroot) ${{PS1:-}}"
-  purge_bad_features
   unset FEATURES
+  unset PORTAGE_FEATURES
   set +u
-  set -eo pipefail
+  set -e
 }}
-
-# eselect/emaint/emerge all load Portage; strip the invalid FEATURES token first
-# and hide that one !!! line so overlay enable does not spam it after every repo.
-run_portage() {{
-  purge_bad_features
-  command "$@" 2> >(grep -v --line-buffered 'binpkg-request-use' >&2 || true)
-}}
-emerge() {{ run_portage emerge "$@"; }}
-eselect() {{ run_portage eselect "$@"; }}
-emaint() {{ run_portage emaint "$@"; }}
-emerge-webrsync() {{ run_portage emerge-webrsync "$@"; }}
 
 if [ -d /etc/vconsole.conf ]; then
   rm -rf /etc/vconsole.conf
 fi
 mkdir -p /etc/portage/package.use /etc/portage/package.accept_keywords /etc/portage/package.license /etc/portage/profile
-# Wiki Chroot: persist profile for rescue shells, but do not recurse into /etc/profile.
 cat > /root/.bashrc << 'BASHRC'
+unset FEATURES
 export PS1="(chroot) ${{PS1:-}}"
 BASHRC
-purge_bad_features
+sanitize_portage_files
 source_profile
 
 {binrepo}
@@ -983,15 +1021,16 @@ echo 'sys-kernel/linux-firmware @BINARY-REDISTRIBUTABLE' > /etc/portage/package.
 
 {sync}
 emerge --ask=n --oneshot --verbose sys-apps/portage || true
-source_profile
+unset FEATURES
 {overlay_block}
 emerge --ask=n --oneshot --verbose sys-apps/portage || true
-source_profile
+unset FEATURES
 eselect profile set {shlex.quote(cfg.profile)} || eselect profile set --force {shlex.quote(cfg.profile)} || true
 if command -v mirrorselect >/dev/null 2>&1; then
   mirrorselect -s3 -b10 || true
 fi
 emerge --verbose --update --deep --newuse @world || true
+unset FEATURES
 if command -v cpuid2cpuflags >/dev/null 2>&1 || emerge --ask=n app-portage/cpuid2cpuflags; then
   echo "*/* $(cpuid2cpuflags)" > /etc/portage/package.use/00cpu-flags || true
 fi
@@ -1000,23 +1039,29 @@ echo '{cfg.hostname}' > /etc/hostname
 echo 'hostname="{cfg.hostname}"' > /etc/conf.d/hostname || true
 ln -sf /usr/share/zoneinfo/{cfg.timezone} /etc/localtime
 echo '{cfg.timezone}' > /etc/timezone || true
-sed -i 's/^#\\({cfg.locale}\\)/\\1/' /etc/locale.gen || echo '{cfg.locale} UTF-8' >> /etc/locale.gen
-locale-gen
-eselect locale set {cfg.locale} || eselect locale set {locale_short} || true
+# Only generate the locale we asked for. An uncommented locale.gen makes glibc
+# re-run locale-gen after many merges, which is when the FEATURES warning appeared.
+cat > /etc/locale.gen << 'LOCALEGEN'
+{cfg.locale} UTF-8
+C.UTF-8 UTF-8
+LOCALEGEN
+locale-gen || true
+eselect locale set {locale_q} || eselect locale set {locale_short_q} || true
+export LANG={locale_q}
+export LC_ALL={locale_q}
 echo 'keymap="{cfg.keymap}"' > /etc/conf.d/keymaps || true
 if [ -d /etc/vconsole.conf ]; then
   rm -rf /etc/vconsole.conf
 fi
 printf 'KEYMAP=%s\\n' {shlex.quote(cfg.keymap)} > /etc/vconsole.conf
-purge_bad_features
-env-update || true
-source_profile
+unset FEATURES
 
 cat > /etc/fstab << 'FSTAB'
 {fstab.strip()}
 FSTAB
 {crypttab_block}
 
+unset FEATURES
 emerge --ask=n sys-kernel/{pkgs_kernel} {all_extra}
 
 {swapfile}
@@ -1060,11 +1105,10 @@ def _overlay_script(cfg: InstallConfig) -> str:
     ]
     for ov in overlays:
         qov = shlex.quote(ov)
-        lines.append("purge_bad_features")
+        lines.append("unset FEATURES")
         lines.append(f"eselect repository enable {qov} || true")
-        lines.append("purge_bad_features")
+        lines.append("unset FEATURES")
         lines.append(f"emaint sync --repo {qov} || true")
-        lines.append("purge_bad_features")
         lines.append(f'echo "*/*::{ov} {arch_kw}" >> /etc/portage/package.accept_keywords/overlays')
     return "\n".join(lines) + "\n"
 
