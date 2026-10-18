@@ -89,12 +89,10 @@ Useful options:
       /var/tmp/gentoo-live-installer-state.json are skipped.
 
 You do not need to run ". /etc/profile" on the Ubuntu live USB before
---config or --resume. The installer clears the live-CD environment (env -i)
-and, inside the Gentoo chroot, runs the Handbook sequence:
-
-  env-update && source /etc/profile
-
-(see wiki.gentoo.org Handbook env-update / Installation alternatives).
+--config or --resume. The installer starts every chroot with env -i and
+LANG=C. It never sources /etc/profile during install (that re-exports a
+stale FEATURES and trips debuginfod). Your chosen LANG is written to
+/etc/env.d/02locale for the first real boot.
 
   sudo python3 install.py --save-config ./gentoo-install.yaml --include-secrets
       Write passwords, LUKS, and Wi-Fi keys into the file. Keep that file
@@ -193,11 +191,11 @@ Then, from the same live session if the mounts are still there:
 
   sudo python3 install.py --resume --config ./gentoo-install.yaml
 
-Confirm you copied this revision before you resume. The generated chroot
-script must contain `rev 11`:
+Confirm you copied this revision before you resume. The live terminal must
+print `rev 12` when it writes chroot-install.sh:
 
-  grep "rev 11" gentoo_installer/execute.py
-  grep "rev 11" /mnt/gentoo/root/chroot-install.sh
+  grep "CHROOT_SCRIPT_REV = 12" gentoo_installer/execute.py
+  grep "rev 12" /mnt/gentoo/root/chroot-install.sh
 
 Resume skips phases already marked done. If disks were only half-written,
 do not resume blindly; start a new wipe in a VM, or inspect partitions

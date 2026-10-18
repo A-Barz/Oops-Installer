@@ -27,6 +27,10 @@ from . import catalog, detect, ui
 from .config import InstallConfig, part_name
 from .runner import Runner, State
 
+# Printed by the host and by the generated /root/chroot-install.sh so a stale
+# USB copy is obvious. Bump this whenever the chroot script changes.
+CHROOT_SCRIPT_REV = 12
+
 
 def selected_bootloaders(cfg: InstallConfig) -> list[str]:
     """All loaders to install; always includes primary `cfg.bootloader`."""
@@ -501,8 +505,28 @@ def phase_chroot_mounts(cfg: InstallConfig, runner: Runner, root: str) -> None:
     runner.shell(f"cp /etc/resolv.conf {shlex.quote(root + '/etc/resolv.conf')}")
 
 
+def _chroot_env_argv(*command: str) -> list[str]:
+    """env -i + a command inside the Gentoo tree. Always LANG=C for the installer.
+
+    Exporting the user's locale (en_US.UTF-8) before locale-gen has filled
+    the archive makes localedef and later tools fail. Persist LANG in
+    /etc/env.d/02locale for the *booted* system instead.
+    """
+    term = os.environ.get("TERM") or "linux"
+    return [
+        "env",
+        "-i",
+        "HOME=/root",
+        f"TERM={term}",
+        "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=C",
+        "LC_ALL=C",
+        *command,
+    ]
+
+
 def phase_chroot(cfg: InstallConfig, runner: Runner, root: str) -> None:
-    """Write chroot-install.sh + a 0600 secrets file, chroot, then delete secrets."""
+    """Write config files + chroot-install.sh, generate locales, then chroot."""
     devices = getattr(cfg, "_devices", _map_devices(cfg))
     script = render_chroot_script(cfg, devices)
     path = Path(root) / "root" / "chroot-install.sh"
@@ -513,9 +537,14 @@ def phase_chroot(cfg: InstallConfig, runner: Runner, root: str) -> None:
         return
     _repair_chroot_leftovers(cfg, root)
     _write_make_conf(cfg, root)
+    _write_system_files(cfg, root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(script, encoding="utf-8")
     path.chmod(0o700)
+    ui.ok(f"Wrote {path} (rev {CHROOT_SCRIPT_REV}, {script.count(chr(10)) + 1} lines)")
+    for i, line in enumerate(script.splitlines()[:12], 1):
+        ui.info(f"  {i:3} {line}")
+    _generate_locales(cfg, runner, root)
     secrets = Path(root) / "root" / ".install-secrets"
     secrets.write_text(
         "\n".join(
@@ -533,24 +562,8 @@ def phase_chroot(cfg: InstallConfig, runner: Runner, root: str) -> None:
     cfg.save(str(Path(root) / "root" / "install-config.json"), include_secrets=False)
     cfg.save(str(Path(root) / "root" / "install-config.yaml"), include_secrets=False)
     # Handbook + wiki "Installation alternatives": LiveCDs leak a messy env.
-    # Do not use bash --login: that sources /etc/profile before the script runs.
-    # Do not run the chroot through `bash -lc` (Runner.shell): the host login
-    # profile can export FEATURES into the wrapper even when env -i is intended.
-    # https://wiki.gentoo.org/wiki/Installation_alternatives
-    term = os.environ.get("TERM") or "linux"
-    runner.run(
-        [
-            "env",
-            "-i",
-            "HOME=/root",
-            f"TERM={term}",
-            "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
-            "chroot",
-            root,
-            "/bin/bash",
-            "/root/chroot-install.sh",
-        ]
-    )
+    # Never bash --login / never source /etc/profile in the installer process.
+    runner.run(_chroot_env_argv("chroot", root, "/bin/bash", "/root/chroot-install.sh"))
     if secrets.exists():
         secrets.unlink()
 
@@ -558,10 +571,9 @@ def phase_chroot(cfg: InstallConfig, runner: Runner, root: str) -> None:
 # Not a Portage FEATURE. Valid relatives: getbinpkg, binpkg-request-signature.
 # --binpkg-respect-use is an emerge option only (EMERGE_DEFAULT_OPTS).
 _BAD_FEATURE = "binpkg-request-use"
-# Incremental: subtract the bogus token, disable the default red warning, drop unknowns.
-_FEATURES_SANITIZE = (
-    'FEATURES="-binpkg-request-use -unknown-features-warn unknown-features-filter"'
-)
+# Only valid FEATURE names. Naming binpkg-request-use even with a leading '-'
+# can still trip unknown-features-warn on some Portage builds.
+_FEATURES_SANITIZE = 'FEATURES="-unknown-features-warn unknown-features-filter"'
 
 
 def _strip_bad_features(path: Path) -> bool:
@@ -683,6 +695,95 @@ def _write_make_conf(cfg: InstallConfig, root: str) -> None:
                 legacy.write_text(extra.rstrip() + "\n" + _FEATURES_SANITIZE + "\n", encoding="utf-8")
 
 
+def _safe_timezone(raw: str) -> str:
+    text = (raw or "UTC").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_+\-]+(?:/[A-Za-z0-9_+\-]+)*", text):
+        return "UTC"
+    return text
+
+
+def _locale_gen_lines(cfg: InstallConfig) -> list[str]:
+    """Handbook locale.gen entries. musl does not use glibc locale-gen."""
+    if cfg.stage_variant == "musl":
+        return []
+    seen: list[str] = []
+    for loc in (cfg.locale, "C.UTF-8"):
+        loc = (loc or "").strip()
+        if loc and loc not in seen:
+            seen.append(loc)
+    return [f"{loc} UTF-8" for loc in seen]
+
+
+def _write_system_files(cfg: InstallConfig, root: str) -> None:
+    """Hostname, timezone, keymap, locale.gen, env.d/02locale — written on the host.
+
+    Doing this in Python means chroot-install.sh never has a 'locale-gen' line
+    whose number bash can report as the crash site, and never sources /etc/profile
+    (debuginfod nounset + FEATURES re-export).
+    """
+    rootp = Path(root)
+    etc = rootp / "etc"
+    etc.mkdir(parents=True, exist_ok=True)
+    (etc / "hostname").write_text(cfg.hostname + "\n", encoding="utf-8")
+    confd = etc / "conf.d"
+    confd.mkdir(parents=True, exist_ok=True)
+    (confd / "hostname").write_text(f'hostname="{cfg.hostname}"\n', encoding="utf-8")
+    (confd / "keymaps").write_text(f'keymap="{cfg.keymap}"\n', encoding="utf-8")
+    tz = _safe_timezone(cfg.timezone)
+    (etc / "timezone").write_text(tz + "\n", encoding="utf-8")
+    localtime = etc / "localtime"
+    try:
+        if localtime.exists() or localtime.is_symlink():
+            localtime.unlink()
+        localtime.symlink_to(f"/usr/share/zoneinfo/{tz}")
+    except OSError:
+        ui.warn(f"Could not link /etc/localtime to zoneinfo/{tz}")
+    lines = _locale_gen_lines(cfg)
+    (etc / "locale.gen").write_text(
+        "# generated by gentoo-live-installer\n" + "\n".join(lines) + ("\n" if lines else ""),
+        encoding="utf-8",
+    )
+    envd = etc / "env.d"
+    envd.mkdir(parents=True, exist_ok=True)
+    loc = cfg.locale.strip() or "C.UTF-8"
+    (envd / "02locale").write_text(f'LANG="{loc}"\nLC_COLLATE="C"\n', encoding="utf-8")
+    vc = etc / "vconsole.conf"
+    if vc.is_dir():
+        shutil.rmtree(vc)
+    vc.write_text(f"KEYMAP={cfg.keymap}\n", encoding="utf-8")
+    ui.ok("Wrote hostname, timezone, keymap, locale.gen, and env.d/02locale")
+
+
+def _generate_locales(cfg: InstallConfig, runner: Runner, root: str) -> None:
+    """Run locale-gen inside the chroot with LANG=C. Never abort the installer."""
+    if cfg.stage_variant == "musl":
+        ui.info("musl stage: skipping glibc locale-gen")
+        return
+    ui.chapter("8", "Generating locales (LANG=C)", "https://wiki.gentoo.org/wiki/Handbook:AMD64/Installation/System")
+    runner.run(
+        _chroot_env_argv(
+            "chroot",
+            root,
+            "/bin/bash",
+            "-c",
+            "locale-gen || true",
+        ),
+        check=False,
+    )
+    loc = shlex.quote(cfg.locale)
+    short = shlex.quote(cfg.locale.split(".")[0])
+    runner.run(
+        _chroot_env_argv(
+            "chroot",
+            root,
+            "/bin/bash",
+            "-c",
+            f"eselect locale set {loc} || eselect locale set {short} || true",
+        ),
+        check=False,
+    )
+
+
 def phase_done(cfg: InstallConfig, runner: Runner, root: str) -> None:
     ui.ok("Installation phases finished.")
     ui.info(f"When you are ready: umount -R {root} && reboot")
@@ -727,7 +828,6 @@ emerge --sync
 """,
     }[cfg.sync_method]
 
-    locale_short = cfg.locale.split(".")[0]
     fstab = _fstab(cfg, devices)
     crypttab = _crypttab(cfg, devices)
     crypttab_block = ""
@@ -949,113 +1049,56 @@ EOF
     overlay_block = _overlay_script(cfg)
     plymouth_block = _plymouth_script(cfg)
 
-    locale_q = shlex.quote(cfg.locale)
-    locale_short_q = shlex.quote(locale_short)
     return f"""#!/bin/bash
-# gentoo-live-installer chroot script rev 11
-# Do not enable `set -u`. Gentoo profile.d/debuginfod.sh reads optional DEBUGINFOD_*.
-# Do not use `set -o pipefail`: a FEATURES warning piped through grep -v used to
-# exit 1 after locale-gen and abort here (bash reported that as "line 70").
-set +u
-set -e
-trap 'echo "chroot-install.sh failed at line $LINENO: $BASH_COMMAND" >&2' ERR
-
+# gentoo-live-installer chroot script rev {CHROOT_SCRIPT_REV}
+# Locales, hostname, timezone, keymap, make.conf are written by the host.
+# This script must never `source /etc/profile` (debuginfod nounset + FEATURES).
+# This script must never `export LANG=` to the user locale (archive not ready).
+set +eu
 unset FEATURES
 unset PORTAGE_FEATURES
+export LANG=C
+export LC_ALL=C
 export DEBUGINFOD_URLS="${{DEBUGINFOD_URLS:-}}"
 export DEBUGINFOD_CERT_PATH="${{DEBUGINFOD_CERT_PATH:-}}"
 export DEBUGINFOD_IMA_CERT_PATH="${{DEBUGINFOD_IMA_CERT_PATH:-}}"
+echo "=== gentoo-live-installer chroot rev {CHROOT_SCRIPT_REV} ==="
 
-sanitize_portage_files() {{
-  # Portage stacks FEATURES from env, /etc/make.conf, /etc/portage/make.conf,
-  # and /etc/profile.env. The invalid token must not remain in any of them.
-  unset FEATURES
-  unset PORTAGE_FEATURES
-  for f in /etc/portage/make.conf /etc/make.conf /etc/profile.env; do
-    [ -f "$f" ] || continue
-    grep -Fq 'binpkg-request-use' "$f" 2>/dev/null || continue
-    sed -i 's/\\bbinpkg-request-use\\b//g' "$f" || true
-  done
-  if [ -d /etc/portage ]; then
-    grep -rlF 'binpkg-request-use' /etc/portage /etc/env.d 2>/dev/null | while read -r f; do
-      [ -f "$f" ] || continue
-      sed -i 's/\\bbinpkg-request-use\\b//g' "$f" || true
-    done || true
-  fi
-  if [ -f /etc/profile.env ]; then
-    sed -i '/^export FEATURES=/d;/^FEATURES=/d' /etc/profile.env || true
-  fi
-}}
-
-source_profile() {{
-  # https://wiki.gentoo.org/wiki/Handbook:AMD64/Working/EnvVar
-  set +e
-  sanitize_portage_files
-  env-update || true
-  sanitize_portage_files
-  # shellcheck disable=SC1091
-  source /etc/profile || true
-  export PS1="(chroot) ${{PS1:-}}"
-  unset FEATURES
-  unset PORTAGE_FEATURES
-  set +u
-  set -e
-}}
-
-if [ -d /etc/vconsole.conf ]; then
-  rm -rf /etc/vconsole.conf
-fi
 mkdir -p /etc/portage/package.use /etc/portage/package.accept_keywords /etc/portage/package.license /etc/portage/profile
 cat > /root/.bashrc << 'BASHRC'
 unset FEATURES
 export PS1="(chroot) ${{PS1:-}}"
 BASHRC
-sanitize_portage_files
-source_profile
 
+echo ">> binhost / installkernel"
 {binrepo}
 {installkernel_conf}
 {dracut_luks}
 echo 'sys-kernel/linux-firmware @BINARY-REDISTRIBUTABLE' > /etc/portage/package.license/firmware || true
 {keywords}
 
+echo ">> sync Portage tree"
 {sync}
+unset FEATURES
+echo ">> emerge Portage"
 emerge --ask=n --oneshot --verbose sys-apps/portage || true
 unset FEATURES
 {overlay_block}
 emerge --ask=n --oneshot --verbose sys-apps/portage || true
 unset FEATURES
+echo ">> eselect profile"
 eselect profile set {shlex.quote(cfg.profile)} || eselect profile set --force {shlex.quote(cfg.profile)} || true
 if command -v mirrorselect >/dev/null 2>&1; then
   mirrorselect -s3 -b10 || true
 fi
+echo ">> emerge @world"
 emerge --verbose --update --deep --newuse @world || true
 unset FEATURES
 if command -v cpuid2cpuflags >/dev/null 2>&1 || emerge --ask=n app-portage/cpuid2cpuflags; then
   echo "*/* $(cpuid2cpuflags)" > /etc/portage/package.use/00cpu-flags || true
 fi
 
-echo '{cfg.hostname}' > /etc/hostname
-echo 'hostname="{cfg.hostname}"' > /etc/conf.d/hostname || true
-ln -sf /usr/share/zoneinfo/{cfg.timezone} /etc/localtime
-echo '{cfg.timezone}' > /etc/timezone || true
-# Only generate the locale we asked for. An uncommented locale.gen makes glibc
-# re-run locale-gen after many merges, which is when the FEATURES warning appeared.
-cat > /etc/locale.gen << 'LOCALEGEN'
-{cfg.locale} UTF-8
-C.UTF-8 UTF-8
-LOCALEGEN
-locale-gen || true
-eselect locale set {locale_q} || eselect locale set {locale_short_q} || true
-export LANG={locale_q}
-export LC_ALL={locale_q}
-echo 'keymap="{cfg.keymap}"' > /etc/conf.d/keymaps || true
-if [ -d /etc/vconsole.conf ]; then
-  rm -rf /etc/vconsole.conf
-fi
-printf 'KEYMAP=%s\\n' {shlex.quote(cfg.keymap)} > /etc/vconsole.conf
-unset FEATURES
-
+echo ">> fstab"
 cat > /etc/fstab << 'FSTAB'
 {fstab.strip()}
 FSTAB

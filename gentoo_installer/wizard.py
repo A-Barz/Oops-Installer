@@ -404,7 +404,8 @@ def _system(cfg: InstallConfig) -> None:
     ui.chapter("8", "Configuring the system", f"{HANDBOOK}/Installation/System")
     cfg.hostname = ui.prompt("Hostname", cfg.hostname)
     cfg.timezone = ui.prompt("Timezone (e.g. America/New_York)", cfg.timezone)
-    cfg.locale = ui.prompt("Locale", cfg.locale)
+    cfg.locale = ui.prompt("Locale (glibc locale.gen name, e.g. en_US.UTF-8)", cfg.locale)
+    ui.info("The installer writes only that locale plus C.UTF-8, then runs locale-gen with LANG=C.")
     cfg.keymap = ui.prompt("Console keymap", cfg.keymap)
     cfg.root_password = ui.ask_password("Root password")
     if ui.ask_yes_no("Create a non-root user?", True):
