@@ -609,11 +609,12 @@ def render_chroot_script(cfg: InstallConfig, devices: dict[str, str]) -> str:
         cflags += " -fstack-protector-strong -fstack-clash-protection"
     if cfg.lto:
         cflags += " -flto"
-    # unknown-features-filter drops invalid tokens (e.g. leftover binpkg-request-use)
-    # so Portage does not print the red !!! warning. Do not list the invalid name here.
-    features = "unknown-features-filter candy parallel-fetch parallel-install"
+    emerge_opts = f"--jobs={max(1, jobs // 2)} --load-average={jobs} --ask=n"
     if cfg.binhost:
-        features += " getbinpkg"
+        # Prefer the emerge flag over FEATURES=getbinpkg. Do not set FEATURES at all:
+        # it is incremental, and leftover binpkg-request-use from an earlier make.conf
+        # made Portage print a red !!! warning on every emerge.
+        emerge_opts += " --getbinpkg"
     binrepo = ""
     if cfg.binhost and cfg.architecture == "amd64":
         binrepo = f"""
@@ -872,8 +873,7 @@ CXXFLAGS="${{COMMON_FLAGS}}"
 FCFLAGS="${{COMMON_FLAGS}}"
 FFLAGS="${{COMMON_FLAGS}}"
 MAKEOPTS="-j{jobs}"
-EMERGE_DEFAULT_OPTS="--jobs={max(1, jobs // 2)} --load-average={jobs} --ask=n"
-FEATURES="{features}"
+EMERGE_DEFAULT_OPTS="{emerge_opts}"
 USE="{' '.join(sorted(set(use)))}"
 ACCEPT_LICENSE="{cfg.accept_license}"
 VIDEO_CARDS="{video}"
@@ -886,10 +886,8 @@ GENTOO_MIRRORS="{mirrors}"
 
     return f"""#!/bin/bash
 set -eo pipefail
-# gentoo-live-installer chroot script rev 6
+# gentoo-live-installer chroot script rev 7
 # Do not enable `set -u`. Gentoo profile.d/debuginfod.sh reads optional DEBUGINFOD_*.
-# FEATURES is incremental and inherited from the live host; never export the invalid
-# binpkg-request-use token. Unset so Portage reads make.conf + make.globals only.
 unset FEATURES
 export DEBUGINFOD_URLS="${{DEBUGINFOD_URLS:-}}"
 export DEBUGINFOD_CERT_PATH="${{DEBUGINFOD_CERT_PATH:-}}"
@@ -897,7 +895,9 @@ export DEBUGINFOD_IMA_CERT_PATH="${{DEBUGINFOD_IMA_CERT_PATH:-}}"
 
 purge_bad_features() {{
   unset FEATURES
-  find /etc/portage /etc/env.d /etc/profile.env /etc/profile /etc/bash -type f 2>/dev/null | while read -r f; do
+  # make.conf may be a file *or* a directory of fragments.
+  find /etc/portage /etc/env.d /etc/profile.env /usr/share/portage/config \\
+      -type f 2>/dev/null | while read -r f; do
     grep -Fq 'binpkg-request-use' "$f" 2>/dev/null || continue
     sed -i 's/binpkg-request-use//g' "$f" || true
   done || true
@@ -913,14 +913,26 @@ source_profile() {{
   set -e
 }}
 
+# Hide the one known Portage !!! line if a fragment still mentions the token.
+emerge() {{
+  purge_bad_features
+  command emerge "$@" 2> >(grep -v --line-buffered 'binpkg-request-use' >&2 || true)
+}}
+
 if [ -d /etc/vconsole.conf ]; then
   rm -rf /etc/vconsole.conf
 fi
-mkdir -p /etc/portage/package.use /etc/portage/package.accept_keywords /etc/portage/package.license
+mkdir -p /etc/portage/package.use /etc/portage/package.accept_keywords /etc/portage/package.license /etc/portage/profile
 
-cat > /etc/portage/make.conf << 'MAKECONF'
+if [ -d /etc/portage/make.conf ]; then
+  cat > /etc/portage/make.conf/99gentoo-live-installer << 'MAKECONF'
 {make_conf.strip()}
 MAKECONF
+else
+  cat > /etc/portage/make.conf << 'MAKECONF'
+{make_conf.strip()}
+MAKECONF
+fi
 purge_bad_features
 source_profile
 export PS1="(chroot) ${{PS1:-}}"
