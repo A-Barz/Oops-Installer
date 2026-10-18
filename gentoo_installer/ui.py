@@ -82,19 +82,18 @@ def _gentoo_ascii() -> list[str]:
 
 
 def banner() -> None:
-    """Logo, title, revision, and how to move around menus — shown at startup."""
+    """Revision first, then logo and navigation — the first thing install.py prints."""
     from .rev import INSTALLER_REV
 
     w = width()
     line = "═" * (w - 2)
-    rev = f"installer rev {INSTALLER_REV}"
+    rev = f"rev {INSTALLER_REV}"
     print()
+    print(paint(f"  Oops Installer  {rev}", C.BOLD, C.GREEN))
     print(paint("╔" + line + "╗", C.BOLD, C.PURPLE))
+    print(paint("║" + f"GENTOO LINUX INSTALLER  ·  {rev}".center(w - 2) + "║", C.BOLD, C.GREEN))
     for art in _gentoo_ascii():
         print(paint("║", C.PURPLE) + paint(art.center(w - 2), C.BOLD, C.GREEN) + paint("║", C.PURPLE))
-    print(paint("║" + " ".center(w - 2) + "║", C.PURPLE))
-    print(paint("║" + "GENTOO LINUX INSTALLER".center(w - 2) + "║", C.BOLD, C.GREEN))
-    print(paint("║" + rev.center(w - 2) + "║", C.BOLD, C.GREEN))
     print(paint("║" + "Ubuntu XFCE live  →  disk".center(w - 2) + "║", C.GREEN))
     print(paint("║" + "Handbook-ordered  ·  wiki.gentoo.org".center(w - 2) + "║", C.PURPLE))
     print(paint("╚" + line + "╝", C.BOLD, C.PURPLE))

@@ -191,12 +191,12 @@ Then, from the same live session if the mounts are still there:
 
   sudo python3 install.py --resume --config ./gentoo-install.yaml
 
-The first screen of the installer prints `installer rev N`. That number
+The first line of the installer is `Oops Installer  rev N`. That number
 must match `INSTALLER_REV` in gentoo_installer/rev.py and the chroot
-script banner. This tree is rev 13:
+script banner. This tree is rev 14:
 
   grep "INSTALLER_REV" gentoo_installer/rev.py
-  grep "rev 13" /mnt/gentoo/root/chroot-install.sh
+  grep "rev 14" /mnt/gentoo/root/chroot-install.sh
 
 Resume skips phases already marked done. If disks were only half-written,
 do not resume blindly; start a new wipe in a VM, or inspect partitions

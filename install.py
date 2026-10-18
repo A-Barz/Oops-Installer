@@ -50,8 +50,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
-    args = parse_args()
     ui.banner()
+    args = parse_args()
     ran_wizard = False
     if args.config:
         cfg = InstallConfig.load(args.config)
