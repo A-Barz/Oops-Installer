@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.json
+!example-config.json
+gentoo-install.yaml
+gentoo-install.yml
+!example-config.yaml
+.install-state
+*.log
+.venv/

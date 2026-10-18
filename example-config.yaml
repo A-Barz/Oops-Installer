@@ -1,0 +1,45 @@
+# Example Gentoo live installer profile (no passwords).
+# Copy, edit, then:
+#   sudo python3 install.py --config example-config.yaml
+#
+# After a wizard run you can also write your own file:
+#   sudo python3 install.py --wizard-only --save-config ./gentoo-install.yaml
+# Next time:
+#   sudo python3 install.py --config ./gentoo-install.yaml
+
+architecture: amd64
+firmware: uefi
+partition_table: gpt
+target_disk: /dev/sda
+wipe_disk: true
+layout: handbook
+filesystem: ext4
+swap_mode: partition
+swap_size_gib: 4
+luks: false
+encrypted_swap: false
+network_mode: dhcp
+static_iface: ""
+netifrc_iface: ""
+init_system: openrc
+install_type: desktop
+stage_variant: standard
+verify_stage: true
+profile: default/linux/amd64/23.0/desktop
+sync_method: webrsync
+binhost: true
+kernel: gentoo-kernel-bin
+hostname: gentoo
+timezone: UTC
+locale: en_US.UTF-8
+keymap: us
+username: gentoo
+network_stack: networkmanager
+bootloader: grub
+bootloaders:
+  - grub
+plymouth: false
+desktop: xfce
+window_managers: []
+overlays: []
+extra_packages: []

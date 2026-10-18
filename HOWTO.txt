@@ -1,0 +1,216 @@
+HOW TO USE THE GENTOO LIVE INSTALLER
+====================================
+
+Read this before you run install.py. The default path wipes the disk you
+select. There is no undo.
+
+What this is
+------------
+This program installs Gentoo Linux onto a hard disk or SSD. You boot an
+Ubuntu XFCE live USB (or similar Debian-like live system), open a terminal,
+and answer a colourful question wizard. After you confirm the disk path, it
+partitions the disk, downloads a Gentoo stage3 tarball, and installs the
+system.
+
+It follows the Gentoo AMD64 Handbook chapter by chapter:
+
+  https://wiki.gentoo.org/wiki/Handbook:AMD64
+
+You do not need the Gentoo minimal ISO. Ubuntu live is the host; Gentoo
+ends up on the target disk.
+
+Who should use it
+-----------------
+Use this if you want a guided Gentoo install with optional LUKS, LVM, RAID1,
+Btrfs, ZFS, several bootloaders, Plymouth, desktop environments, and extra
+packages (including overlay WMs such as niri and Hyprland).
+
+Do not use this as your first Linux install on a machine that holds unique
+data unless you have backups and have already practised in a virtual machine.
+
+What you need
+-------------
+  * A PC you can reboot (or a VM)
+  * Ubuntu XFCE live USB/ISO, or another live system with apt and Python 3.10+
+  * Working internet (wired or Wi-Fi) to fetch stage3 and packages
+  * Root / sudo
+  * A target disk you are willing to erase, unless you choose "existing
+    partitions" and point the installer at partitions you already made
+
+Recommended first run
+---------------------
+1. Practise in a VM (VirtualBox, QEMU, virt-manager, VMware). Give the VM
+   its own virtual disk.
+2. Or run a dry-run on the live USB so you can see every command without
+   wiping anything:
+
+     sudo python3 install.py --dry-run
+
+Dry-run still walks the wizard. It prints commands instead of executing
+them. You will not be asked to re-type the disk path.
+
+Get the installer onto the live system
+--------------------------------------
+Boot Ubuntu live. Open a terminal. Then:
+
+  sudo apt-get update
+  sudo apt-get install -y python3 git
+  git clone <this-repository-url>
+  cd gentoo-live-installer
+
+If you copied the folder onto a USB already:
+
+  cd /path/to/gentoo-live-installer
+
+Read this file on the live system with:
+
+  less HOWTO.txt
+
+Run a real install
+------------------
+  sudo python3 install.py
+
+You must be root. If you are not, the execute phase will stop.
+
+Useful options:
+
+  sudo python3 install.py --dry-run
+      Print commands. Do not change disks.
+
+  sudo python3 install.py --wizard-only --save-config ./gentoo-install.yaml
+      Answer the wizard, save the profile, do not install yet.
+
+  sudo python3 install.py --config ./gentoo-install.yaml
+      Skip the wizard. Use a saved profile. Passwords are asked again
+      unless you saved them with --include-secrets.
+
+  sudo python3 install.py --resume
+      Continue after a crash. Completed phases in
+      /var/tmp/gentoo-live-installer-state.json are skipped.
+
+  sudo python3 install.py --save-config ./gentoo-install.yaml --include-secrets
+      Write passwords, LUKS, and Wi-Fi keys into the file. Keep that file
+      private (chmod 600). Prefer omitting secrets.
+
+example-config.yaml in this folder shows the profile shape.
+
+The wizard (nothing is wiped yet)
+---------------------------------
+Questions match Handbook chapters 1-12. Nothing is written to the target
+disk until the review at the end.
+
+  1. About        Dry-run, resume, mountpoint (default /mnt/gentoo)
+  2. Medium       Architecture (amd64 / arm64), UEFI vs BIOS, host tools
+  3. Network      Live DHCP, Wi-Fi, or static IP so stage3 can download
+  4. Disks        Target disk, wipe, layout, filesystem, swap, LUKS
+  5. Stage3       OpenRC or systemd, desktop / hardened / musl
+  6. Base         Profile, sync method, binhost, USE flags
+  7. Kernel       gentoo-kernel-bin (fastest), sources, firmware, dracut
+  8. System       Hostname, locale, timezone, root and user passwords
+  9. Tools        NetworkManager / dhcpcd / netifrc, sshd, cron, CUPS
+ 10. Bootloader   GRUB (handbook default) and optional extras, Plymouth
+ 11. Desktop      XFCE, Plasma, GNOME, etc.
+ 12. Packages     Searchable catalogue, overlays, window managers
+
+Menus (shown again at the start of the installer):
+
+  Up / Down     move the highlight
+  Space         select this item, or toggle a checkbox
+  Enter         confirm  ·  on checklists, finish and continue
+  Left / Right  previous / next page
+  /             search (packages, overlays, window managers)
+  a / c         select all / clear the current page
+  y / n         yes / no shortcuts
+
+Typed answers are only used for  ?  prompts (disk paths, names, sizes).
+
+Passwords are hidden. You type them twice (except Wi-Fi).
+
+Disk warning
+------------
+The default layout WIPEFS and recreates the partition table on the disk
+you pick. That destroys every partition on that disk.
+
+Do not select the live USB. The wizard tries to tag a "possible live USB"
+when it can; still read the size and model.
+
+At the summary you must:
+
+  * Answer yes to proceed (default is no)
+  * Type the exact device path again, for example /dev/nvme0n1 or /dev/sda
+
+Empty Enter is not confirmation.
+
+If you chose "existing partitions", the installer will not zap the disk.
+You still confirm the path, and you must give the ESP/boot, root, and
+optional swap device names yourself.
+
+How long it takes
+-----------------
+Downloading stage3 is minutes on a decent link. Emerging a full desktop
+can take many hours, especially without binary packages.
+
+For a first install, prefer:
+
+  * Official binhost (binary packages) when the wizard offers it
+  * sys-kernel/gentoo-kernel-bin rather than compiling gentoo-sources
+
+A log is appended at:
+
+  /var/tmp/gentoo-live-installer.log
+
+If /var/tmp is not writable, a log is created in the current directory.
+
+After the installer finishes
+----------------------------
+It will tell you to unmount and reboot. Typical last steps on the live USB:
+
+  umount -R /mnt/gentoo
+  reboot
+
+Remove the Ubuntu live USB so firmware boots the Gentoo disk.
+
+If you enabled LUKS, you will type the passphrase at boot (unless you later
+enroll TPM2 yourself; this installer only drops a helper script).
+
+If you used Limine, kernel upgrades later may need you to refresh
+/boot/limine.conf or the vmlinuz symlink. GRUB's grub-mkconfig path is
+the more automatic handbook default.
+
+If it fails part-way
+--------------------
+Read the log. Fix the problem (network, disk full, emerge conflict).
+
+Then, from the same live session if the mounts are still there:
+
+  sudo python3 install.py --resume --config ./gentoo-install.yaml
+
+Resume skips phases already marked done. If disks were only half-written,
+do not resume blindly; start a new wipe in a VM, or inspect partitions
+before you continue on real hardware.
+
+Limits you should know
+----------------------
+  * The package list is a handbook-sized catalogue plus overlays, not
+    every ebuild in Portage. You can type extra atoms such as app-misc/jq.
+  * Encrypted swap is a separate LUKS volume (/dev/mapper/swap) when you
+    use a swap partition or LV. LVM-on-LUKS already encrypts the volume
+    group, so swap is not wrapped twice. A swap FILE is not encrypted.
+  * TPM2 auto-unlock is not completed during install. Enroll after first
+    boot (helper: /usr/local/sbin/gentoo-tpm-enroll.sh on the new system).
+  * Static IP and OpenRC netifrc use the NIC you choose; they do not
+    assume eth0.
+  * ZFS needs zfsutils-linux on the Ubuntu host.
+  * This is not an official Gentoo project. When in doubt, the Handbook
+    on wiki.gentoo.org is the authority.
+
+Safety recap
+------------
+  * Back up anything you care about.
+  * Test in a VM.
+  * Prefer --dry-run or --wizard-only the first time.
+  * Confirm the disk path character-for-character.
+  * Do not save configs with --include-secrets on a shared USB.
+
+Handbook:  https://wiki.gentoo.org/wiki/Handbook:AMD64
+Wiki home: https://wiki.gentoo.org/wiki/Main_Page
