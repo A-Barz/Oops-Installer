@@ -191,6 +191,67 @@ FEATURED_OVERLAYS: list[tuple[str, str]] = [
 ]
 
 
+# Handbook ch. 6 USE flags. Value is the flag written to make.conf; the
+# description is what the wizard shows so you know why you would enable it.
+USE_FLAGS: list[tuple[str, str]] = [
+    ("X", "X11 — classic graphical stack (most desktops still need this)"),
+    ("wayland", "Wayland — modern display protocol (Sway, Hyprland, GNOME/KDE Wayland)"),
+    ("gtk", "GTK — GNOME/Xfce/MATE toolkits"),
+    ("qt5", "Qt5 — older KDE/Qt applications"),
+    ("qt6", "Qt6 — current KDE Plasma / Qt applications"),
+    ("opengl", "OpenGL — 3D acceleration"),
+    ("vulkan", "Vulkan — modern GPU API"),
+    ("alsa", "ALSA — Linux sound drivers and mixing"),
+    ("pulseaudio", "PulseAudio — compatibility layer (often with PipeWire)"),
+    ("pipewire", "PipeWire — current audio/video server"),
+    ("jack", "JACK — low-latency pro audio"),
+    ("bluetooth", "Bluetooth — adapters, audio, input"),
+    ("networkmanager", "NetworkManager — desktop networking (Wi-Fi, VPN, Ethernet)"),
+    ("wifi", "wifi — extra wireless support in some packages"),
+    ("dbus", "D-Bus — desktop/session message bus"),
+    ("udev", "udev — device events (almost always wanted)"),
+    ("elogind", "elogind — logind for OpenRC desktops (seat, power, idle)"),
+    ("systemd", "systemd USE — only for systemd stages/profiles"),
+    ("cups", "CUPS — printing"),
+    ("pam", "PAM — pluggable authentication"),
+    ("ssl", "ssl — TLS/HTTPS in clients and servers"),
+    ("python", "python — Python bindings where optional"),
+    ("nls", "nls — native-language menus; translations still limited by LINGUAS/L10N"),
+    ("dist-kernel", "dist-kernel — distribution kernel helpers (installkernel, modules)"),
+]
+
+COMMON_LOCALES: list[tuple[str, str]] = [
+    ("en_US.UTF-8", "English (United States) UTF-8"),
+    ("en_GB.UTF-8", "English (United Kingdom) UTF-8"),
+    ("de_DE.UTF-8", "German (Germany) UTF-8"),
+    ("fr_FR.UTF-8", "French (France) UTF-8"),
+    ("es_ES.UTF-8", "Spanish (Spain) UTF-8"),
+    ("es_MX.UTF-8", "Spanish (Mexico) UTF-8"),
+    ("it_IT.UTF-8", "Italian (Italy) UTF-8"),
+    ("pt_BR.UTF-8", "Portuguese (Brazil) UTF-8"),
+    ("pt_PT.UTF-8", "Portuguese (Portugal) UTF-8"),
+    ("nl_NL.UTF-8", "Dutch (Netherlands) UTF-8"),
+    ("pl_PL.UTF-8", "Polish (Poland) UTF-8"),
+    ("ru_RU.UTF-8", "Russian (Russia) UTF-8"),
+    ("uk_UA.UTF-8", "Ukrainian (Ukraine) UTF-8"),
+    ("cs_CZ.UTF-8", "Czech (Czechia) UTF-8"),
+    ("sv_SE.UTF-8", "Swedish (Sweden) UTF-8"),
+    ("nb_NO.UTF-8", "Norwegian Bokmål UTF-8"),
+    ("fi_FI.UTF-8", "Finnish (Finland) UTF-8"),
+    ("da_DK.UTF-8", "Danish (Denmark) UTF-8"),
+    ("ja_JP.UTF-8", "Japanese (Japan) UTF-8"),
+    ("ko_KR.UTF-8", "Korean (Korea) UTF-8"),
+    ("zh_CN.UTF-8", "Chinese simplified (China) UTF-8"),
+    ("zh_TW.UTF-8", "Chinese traditional (Taiwan) UTF-8"),
+    ("ar_EG.UTF-8", "Arabic (Egypt) UTF-8"),
+    ("he_IL.UTF-8", "Hebrew (Israel) UTF-8"),
+    ("hi_IN.UTF-8", "Hindi (India) UTF-8"),
+    ("tr_TR.UTF-8", "Turkish (Turkey) UTF-8"),
+    ("C.UTF-8", "C.UTF-8 — POSIX Unicode, no translations"),
+    ("custom", "Type a different glibc locale name"),
+]
+
+
 def extra_overlays() -> list[tuple[str, str]]:
     """More names from overlays.gentoo.org (shown after the featured list)."""
     names = [
@@ -206,7 +267,11 @@ def extra_overlays() -> list[tuple[str, str]]:
         "wayland-desktop", "guru", "hyproverlay", "science", "kde", "qt",
     ]
     featured = {n for n, _ in FEATURED_OVERLAYS}
-    return [(n, f"Registered overlay `{n}`") for n in sorted(set(names)) if n not in featured]
+    return [
+        (n, f"Community overlay from overlays.gentoo.org — `eselect repository enable {n}`")
+        for n in sorted(set(names))
+        if n not in featured
+    ]
 
 
 def overlay_choices() -> list[tuple[str, str]]:
@@ -265,49 +330,49 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
         "desktop-environments",
         "Desktop environments",
         _pkgs(
-            Pkg("xfce-base/xfce4-meta", "Xfce meta"),
-            Pkg("kde-plasma/plasma-meta", "KDE Plasma meta"),
-            Pkg("kde-apps/kde-apps-meta", "KDE Gear apps"),
-            Pkg("gnome-base/gnome", "GNOME"),
-            Pkg("mate-base/mate", "MATE"),
-            Pkg("gnome-extra/cinnamon", "Cinnamon"),
-            Pkg("lxde-base/lxde-meta", "LXDE"),
-            Pkg("lxqt-base/lxqt-meta", "LXQt"),
-            Pkg("x11-wm/enlightenment", "Enlightenment"),
-            Pkg("pantheon-base/pantheon", "Pantheon (if available)"),
+            Pkg("xfce-base/xfce4-meta", "Xfce — lightweight GTK desktop (panels, file manager, settings)"),
+            Pkg("kde-plasma/plasma-meta", "KDE Plasma — full Qt desktop"),
+            Pkg("kde-apps/kde-apps-meta", "KDE Gear — Dolphin, Konsole, Gwenview, and other KDE apps"),
+            Pkg("gnome-base/gnome", "GNOME — full GTK desktop with mutter"),
+            Pkg("mate-base/mate", "MATE — traditional GTK desktop (GNOME 2 style)"),
+            Pkg("gnome-extra/cinnamon", "Cinnamon — GNOME-fork desktop used by Linux Mint"),
+            Pkg("lxde-base/lxde-meta", "LXDE — very light GTK2 desktop"),
+            Pkg("lxqt-base/lxqt-meta", "LXQt — light Qt desktop"),
+            Pkg("x11-wm/enlightenment", "Enlightenment — compositor plus desktop shell"),
+            Pkg("pantheon-base/pantheon", "Pantheon — elementary OS desktop (if the ebuild exists)"),
         ),
     ),
     (
         "display-managers",
         "Display / login managers",
         _pkgs(
-            Pkg("x11-misc/lightdm", "LightDM"),
-            Pkg("x11-misc/sddm", "SDDM"),
-            Pkg("gnome-base/gdm", "GDM"),
-            Pkg("x11-misc/ly", "ly TUI login manager", "guru"),
-            Pkg("gui-libs/greetd", "greetd"),
-            Pkg("gui-apps/gtkgreet", "gtkgreet"),
-            Pkg("gui-apps/tuigreet", "tuigreet", "guru"),
-            Pkg("x11-misc/slim", "SLiM (legacy)"),
+            Pkg("x11-misc/lightdm", "LightDM — greeter used by Xfce/MATE/Cinnamon"),
+            Pkg("x11-misc/sddm", "SDDM — Plasma-friendly graphical login"),
+            Pkg("gnome-base/gdm", "GDM — GNOME display manager"),
+            Pkg("x11-misc/ly", "ly — TUI login manager (no X greeter)", "guru"),
+            Pkg("gui-libs/greetd", "greetd — minimal login daemon (often with tuigreet)"),
+            Pkg("gui-apps/gtkgreet", "gtkgreet — GTK greeter for greetd"),
+            Pkg("gui-apps/tuigreet", "tuigreet — terminal greeter for greetd", "guru"),
+            Pkg("x11-misc/slim", "SLiM — legacy simple login manager"),
         ),
     ),
     (
         "browsers",
         "Web browsers",
         _pkgs(
-            Pkg("www-client/firefox-bin", "Firefox binary"),
-            Pkg("www-client/firefox", "Firefox from source"),
-            Pkg("www-client/chromium", "Chromium"),
-            Pkg("www-client/google-chrome", "Google Chrome"),
-            Pkg("www-client/librewolf", "LibreWolf", "librewolf"),
-            Pkg("www-client/brave-bin", "Brave binary", "guru"),
-            Pkg("www-client/ungoogled-chromium", "Ungoogled Chromium", "guru"),
-            Pkg("www-client/qutebrowser", "qutebrowser"),
-            Pkg("www-client/falkon", "Falkon"),
-            Pkg("www-client/epiphany", "GNOME Web"),
-            Pkg("www-client/w3m", "w3m"),
-            Pkg("www-client/lynx", "Lynx"),
-            Pkg("www-client/links", "Links"),
+            Pkg("www-client/firefox-bin", "Firefox — official binary (no compile)"),
+            Pkg("www-client/firefox", "Firefox — compile from source (hours)"),
+            Pkg("www-client/chromium", "Chromium — open-source Chrome (long compile)"),
+            Pkg("www-client/google-chrome", "Google Chrome — official binary"),
+            Pkg("www-client/librewolf", "LibreWolf — privacy-forked Firefox", "librewolf"),
+            Pkg("www-client/brave-bin", "Brave — Chromium-based browser binary", "guru"),
+            Pkg("www-client/ungoogled-chromium", "Ungoogled Chromium — Chrome without Google services", "guru"),
+            Pkg("www-client/qutebrowser", "qutebrowser — keyboard-driven Qt browser"),
+            Pkg("www-client/falkon", "Falkon — KDE Qt WebEngine browser"),
+            Pkg("www-client/epiphany", "GNOME Web — GTK WebKit browser"),
+            Pkg("www-client/w3m", "w3m — text browser with images in a terminal"),
+            Pkg("www-client/lynx", "Lynx — classic text-only browser"),
+            Pkg("www-client/links", "Links — text/graphical lightweight browser"),
         ),
     ),
     (

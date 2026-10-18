@@ -12,6 +12,9 @@ Gentoo onto a local disk. Layout:
   execute.py   Destructive host work + generated chroot bash script.
 
 Version is informational only; there is no packaging index.
+The live banner prints INSTALLER_REV (bump that integer on each change).
 """
 
-__version__ = "1.0.0"
+from .rev import INSTALLER_REV
+
+__version__ = f"1.{INSTALLER_REV}.0"

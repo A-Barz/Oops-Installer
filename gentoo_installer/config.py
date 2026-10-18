@@ -75,9 +75,10 @@ class InstallConfig:
     existing_root: str = ""
     existing_swap: str = ""
 
-    # --- Handbook ch. 5: stage3 tarball flavour ---
+    # --- Handbook ch. 5: stage tarball flavour ---
     init_system: str = "openrc"  # openrc | systemd — selects latest-stage3-*-{init}.txt
     install_type: str = "desktop"  # desktop stage3 includes LLVM/Rust-bin
+    stage_level: str = "stage3"  # stage1, stage2, or stage3 (handbook default)
     stage_variant: str = "standard"  # standard, hardened, musl
     verify_stage: bool = True  # SHA256 + GPG (Release Engineering keys)
     testing_keywords: bool = False  # Writes */* ~amd64 if True
@@ -87,6 +88,8 @@ class InstallConfig:
     sync_method: str = "webrsync"  # webrsync, rsync, git
     binhost: bool = True  # Gentoo official binpackages (--getbinpkg, not FEATURES)
     binhost_abi: str = "x86-64"  # x86-64 or x86-64-v3
+    # False avoids rebuilding glibc from source (which compiles ~500 locales).
+    binpkg_respect_use: bool = False
     use_flags: str = "dist-kernel"
     extra_use: list[str] = field(default_factory=list)
     accept_license: str = "*"
@@ -108,6 +111,7 @@ class InstallConfig:
     hostname: str = "gentoo"
     timezone: str = "UTC"
     locale: str = "en_US.UTF-8"
+    extra_locales: list[str] = field(default_factory=list)  # Extra glibc locales in locale.gen
     keymap: str = "us"
     root_password: str = ""
     username: str = "gentoo"

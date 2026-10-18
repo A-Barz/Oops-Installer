@@ -25,11 +25,11 @@ from pathlib import Path
 
 from . import catalog, detect, ui
 from .config import InstallConfig, part_name
+from .rev import INSTALLER_REV
 from .runner import Runner, State
 
-# Printed by the host and by the generated /root/chroot-install.sh so a stale
-# USB copy is obvious. Bump this whenever the chroot script changes.
-CHROOT_SCRIPT_REV = 12
+# Same integer as the startup banner. Bump INSTALLER_REV in rev.py on each change.
+CHROOT_SCRIPT_REV = INSTALLER_REV
 
 
 def selected_bootloaders(cfg: InstallConfig) -> list[str]:
@@ -97,6 +97,7 @@ def execute(cfg: InstallConfig) -> None:
         ("chroot_install", lambda: phase_chroot(cfg, runner, root)),
         ("done", lambda: phase_done(cfg, runner, root)),
     ]
+    ui.info(f"Oops Installer rev {INSTALLER_REV}")
     for name, fn in phases:
         ui.chapter("→", f"Phase: {name}", "https://wiki.gentoo.org/wiki/Handbook:AMD64")
         if state.skip(name, cfg.resume):
@@ -441,10 +442,20 @@ def _mount_tree(cfg: InstallConfig, runner: Runner, devices: dict[str, str]) -> 
         runner.shell(f"mount {shlex.quote(devices['boot'])} {shlex.quote(root + '/boot')}")
 
 
-def stage3_flavor(cfg: InstallConfig) -> str:
-    """Name used in latest-stage3-<flavor>.txt on distfiles.gentoo.org."""
+def stage_flavor(cfg: InstallConfig) -> str:
+    """Name used in latest-<flavor>.txt on distfiles.gentoo.org."""
     arch = cfg.architecture
     init = cfg.init_system
+    level = getattr(cfg, "stage_level", "stage3") or "stage3"
+    if level not in {"stage1", "stage2", "stage3"}:
+        level = "stage3"
+    # Official desktop/LLVM autobuilds are stage3-only.
+    if level != "stage3":
+        if cfg.stage_variant == "musl":
+            return f"{level}-{arch}-musl-{init}" if init == "openrc" else f"{level}-{arch}-musl"
+        if cfg.stage_variant == "hardened":
+            return f"{level}-{arch}-hardened-{init}"
+        return f"{level}-{arch}-{init}"
     if cfg.stage_variant == "musl":
         return f"stage3-{arch}-musl-{init}" if init == "openrc" else f"stage3-{arch}-musl"
     if cfg.stage_variant == "hardened":
@@ -454,12 +465,17 @@ def stage3_flavor(cfg: InstallConfig) -> str:
     return f"stage3-{arch}-{init}"
 
 
+def stage3_flavor(cfg: InstallConfig) -> str:
+    """Back-compat alias for stage_flavor()."""
+    return stage_flavor(cfg)
+
+
 def phase_stage3(cfg: InstallConfig, runner: Runner, root: str) -> None:
     """Download the current stage3, optionally verify SHA256/GPG, extract with xattrs."""
-    flavor = stage3_flavor(cfg)
+    flavor = stage_flavor(cfg)
     latest = f"https://distfiles.gentoo.org/releases/{cfg.architecture}/autobuilds/latest-{flavor}.txt"
     ui.info(f"Resolving latest {flavor}")
-    pointer = f"{root}/latest-stage3.txt"
+    pointer = f"{root}/latest-stage.txt"
     runner.shell(f"mkdir -p {shlex.quote(root)}")
     runner.shell(f"wget -O {shlex.quote(pointer)} {shlex.quote(latest)}")
     if cfg.dry_run:
@@ -470,11 +486,14 @@ def phase_stage3(cfg: InstallConfig, runner: Runner, root: str) -> None:
         for line in text.splitlines():
             if line.startswith("#") or line.startswith("-----"):
                 continue
-            if "stage3" in line and ".tar." in line:
+            if ".tar." in line and "stage" in line:
                 rel = line.split()[0]
                 break
         if not rel:
-            raise SystemExit(f"Could not parse stage3 pointer from {latest}")
+            raise SystemExit(
+                f"Could not parse stage pointer from {latest}. "
+                f"Official autobuilds may not publish {flavor}; try stage3."
+            )
         tarball = rel.split("/")[-1]
         url = f"https://distfiles.gentoo.org/releases/{cfg.architecture}/autobuilds/{rel}"
         runner.shell(f"wget -O {shlex.quote(root + '/' + tarball)} {shlex.quote(url)}")
@@ -654,7 +673,12 @@ def _make_conf_text(cfg: InstallConfig) -> str:
         cflags += " -flto"
     emerge_opts = f"--jobs={max(1, jobs // 2)} --load-average={jobs} --ask=n"
     if cfg.binhost:
-        emerge_opts += " --getbinpkg --binpkg-respect-use=y"
+        emerge_opts += " --getbinpkg --usepkg"
+        if getattr(cfg, "binpkg_respect_use", False):
+            emerge_opts += " --binpkg-respect-use=y"
+        else:
+            emerge_opts += " --binpkg-respect-use=n"
+    l10n, linguas = _l10n_linguas(cfg)
     lines = [
         f'COMMON_FLAGS="{cflags}"',
         'CFLAGS="${COMMON_FLAGS}"',
@@ -669,6 +693,10 @@ def _make_conf_text(cfg: InstallConfig) -> str:
         f'VIDEO_CARDS="{video}"',
         f'GENTOO_MIRRORS="{mirrors}"',
     ]
+    if l10n:
+        lines.append(f'L10N="{l10n}"')
+    if linguas:
+        lines.append(f'LINGUAS="{linguas}"')
     if grub_plat:
         lines.append(grub_plat)
     return "\n".join(lines) + "\n"
@@ -693,6 +721,10 @@ def _write_make_conf(cfg: InstallConfig, root: str) -> None:
             extra = legacy.read_text(encoding="utf-8", errors="replace")
             if "unknown-features-filter" not in extra:
                 legacy.write_text(extra.rstrip() + "\n" + _FEATURES_SANITIZE + "\n", encoding="utf-8")
+    use_dir = portage / "package.use"
+    use_dir.mkdir(parents=True, exist_ok=True)
+    # compile-locales makes glibc build every locale in the source tree (~500).
+    (use_dir / "00glibc-locales").write_text("sys-libs/glibc -compile-locales\n", encoding="utf-8")
 
 
 def _safe_timezone(raw: str) -> str:
@@ -702,14 +734,34 @@ def _safe_timezone(raw: str) -> str:
     return text
 
 
+def _l10n_linguas(cfg: InstallConfig) -> tuple[str, str]:
+    """Portage L10N (hyphenated) and LINGUAS (language) from the chosen locales."""
+    l10n: list[str] = []
+    linguas: list[str] = []
+    extras = getattr(cfg, "extra_locales", None) or []
+    for loc in [cfg.locale, *extras]:
+        base = (loc or "").split(".")[0].strip()
+        if not base or base in {"C", "POSIX"}:
+            continue
+        parts = base.split("_")
+        lang = parts[0].lower()
+        if lang and lang not in linguas:
+            linguas.append(lang)
+        token = f"{lang}-{parts[1]}" if len(parts) == 2 else lang
+        if token not in l10n:
+            l10n.append(token)
+    return " ".join(l10n), " ".join(linguas)
+
+
 def _locale_gen_lines(cfg: InstallConfig) -> list[str]:
     """Handbook locale.gen entries. musl does not use glibc locale-gen."""
     if cfg.stage_variant == "musl":
         return []
     seen: list[str] = []
-    for loc in (cfg.locale, "C.UTF-8"):
+    extras = getattr(cfg, "extra_locales", None) or []
+    for loc in [cfg.locale, *extras, "C.UTF-8"]:
         loc = (loc or "").strip()
-        if loc and loc not in seen:
+        if loc and loc not in seen and loc != "custom":
             seen.append(loc)
     return [f"{loc} UTF-8" for loc in seen]
 
@@ -739,8 +791,16 @@ def _write_system_files(cfg: InstallConfig, root: str) -> None:
     except OSError:
         ui.warn(f"Could not link /etc/localtime to zoneinfo/{tz}")
     lines = _locale_gen_lines(cfg)
-    (etc / "locale.gen").write_text(
-        "# generated by gentoo-live-installer\n" + "\n".join(lines) + ("\n" if lines else ""),
+    loc_gen = etc / "locale.gen"
+    loc_gen_d = etc / "locale.gen.d"
+    if loc_gen.is_dir():
+        shutil.rmtree(loc_gen)
+    if loc_gen_d.is_dir():
+        shutil.rmtree(loc_gen_d)
+    loc_gen.write_text(
+        "# generated by gentoo-live-installer — only these locales, not the full glibc set\n"
+        + "\n".join(lines)
+        + ("\n" if lines else ""),
         encoding="utf-8",
     )
     envd = etc / "env.d"
@@ -1048,6 +1108,19 @@ EOF
 
     overlay_block = _overlay_script(cfg)
     plymouth_block = _plymouth_script(cfg)
+    level = getattr(cfg, "stage_level", "stage3") or "stage3"
+    bootstrap = ""
+    if level == "stage1":
+        bootstrap = """
+echo ">> stage1 bootstrap (seed toolchain, then @system)"
+emerge --ask=n --oneshot sys-devel/binutils sys-devel/gcc sys-libs/glibc sys-devel/make || true
+emerge --ask=n --emptytree @system || true
+"""
+    elif level == "stage2":
+        bootstrap = """
+echo ">> stage2 bootstrap (@system)"
+emerge --ask=n --emptytree @system || true
+"""
 
     return f"""#!/bin/bash
 # gentoo-live-installer chroot script rev {CHROOT_SCRIPT_REV}
@@ -1080,6 +1153,7 @@ echo 'sys-kernel/linux-firmware @BINARY-REDISTRIBUTABLE' > /etc/portage/package.
 echo ">> sync Portage tree"
 {sync}
 unset FEATURES
+{bootstrap}
 echo ">> emerge Portage"
 emerge --ask=n --oneshot --verbose sys-apps/portage || true
 unset FEATURES

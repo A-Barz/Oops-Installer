@@ -82,15 +82,19 @@ def _gentoo_ascii() -> list[str]:
 
 
 def banner() -> None:
-    """Logo, title, and how to move around menus — shown once at wizard start."""
+    """Logo, title, revision, and how to move around menus — shown at startup."""
+    from .rev import INSTALLER_REV
+
     w = width()
     line = "═" * (w - 2)
+    rev = f"installer rev {INSTALLER_REV}"
     print()
     print(paint("╔" + line + "╗", C.BOLD, C.PURPLE))
     for art in _gentoo_ascii():
         print(paint("║", C.PURPLE) + paint(art.center(w - 2), C.BOLD, C.GREEN) + paint("║", C.PURPLE))
     print(paint("║" + " ".center(w - 2) + "║", C.PURPLE))
     print(paint("║" + "GENTOO LINUX INSTALLER".center(w - 2) + "║", C.BOLD, C.GREEN))
+    print(paint("║" + rev.center(w - 2) + "║", C.BOLD, C.GREEN))
     print(paint("║" + "Ubuntu XFCE live  →  disk".center(w - 2) + "║", C.GREEN))
     print(paint("║" + "Handbook-ordered  ·  wiki.gentoo.org".center(w - 2) + "║", C.PURPLE))
     print(paint("╚" + line + "╝", C.BOLD, C.PURPLE))
@@ -342,10 +346,11 @@ def menu(title: str, choices: Sequence[tuple[str, str]], default: str | None = N
                 abs_i = start + offset
                 cursor = abs_i == index
                 mark = paint("▸", C.BOLD, C.GREEN) if cursor else " "
-                label = paint(value, C.BOLD, C.GREEN) if cursor else paint(value, C.WHITE)
-                extra = paint(desc, C.BOLD, C.PURPLE) if cursor else paint(desc, C.DIM, C.PURPLE)
+                shown = desc or value
+                label = paint(shown, C.BOLD, C.GREEN) if cursor else paint(shown, C.WHITE)
+                extra = paint(f"({value})", C.DIM, C.PURPLE) if desc else ""
                 prefix = paint("  > ", C.BOLD, C.GREEN) if cursor else "    "
-                lines.append(f"{prefix}{mark} {label}  {extra}")
+                lines.append(f"{prefix}{mark} {label}  {extra}".rstrip())
             _erase_lines(drawn)
             print("\n".join(lines))
             drawn = len(lines)
@@ -421,10 +426,12 @@ def paged_checklist(
                 on = value in current
                 box = paint("[x]", C.GREEN, C.BOLD) if on else paint("[ ]", C.DIM)
                 mark = paint("▸", C.BOLD, C.GREEN) if i == cursor else " "
-                label = paint(value, C.BOLD, C.GREEN) if i == cursor else paint(value, C.WHITE)
-                extra = paint(desc, C.PURPLE) if i == cursor else paint(desc, C.DIM, C.PURPLE)
+                # Description first so packages/USE flags explain what they are.
+                shown = desc or value
+                label = paint(shown, C.BOLD, C.GREEN) if i == cursor else paint(shown, C.WHITE)
+                atom = paint(f"({value})", C.DIM, C.PURPLE) if desc else ""
                 prefix = paint("  > ", C.BOLD, C.GREEN) if i == cursor else "    "
-                lines.append(f"{prefix}{mark} {box} {label}  {extra}")
+                lines.append(f"{prefix}{mark} {box} {label}  {atom}".rstrip())
             _erase_lines(drawn)
             print("\n".join(lines))
             drawn = len(lines)
@@ -496,7 +503,11 @@ def _paged_checklist_fallback(
         print(paint(f"  {title}", C.BOLD, C.GREEN))
         for i, (value, desc) in enumerate(view, start=1):
             mark = paint("[x]", C.GREEN, C.BOLD) if value in current else paint("[ ]", C.DIM)
-            print(f"    {mark} {paint(str(i), C.GREEN)}. {paint(value, C.WHITE)}  {paint(desc, C.DIM)}")
+            shown = desc or value
+            print(
+                f"    {mark} {paint(str(i), C.GREEN)}. {paint(shown, C.WHITE)}  "
+                f"{paint('(' + value + ')' if desc else '', C.DIM)}"
+            )
         raw = prompt("Package command", "0")
         if raw in {"", "0", "d", "done"}:
             order = [v for v, _ in choices if v in current]

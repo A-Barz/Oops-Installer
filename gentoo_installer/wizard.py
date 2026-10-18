@@ -37,7 +37,6 @@ def fill_missing_secrets(cfg: InstallConfig) -> None:
 
 def run_wizard(cfg: InstallConfig) -> InstallConfig:
     """Drive every chapter in handbook order, then the pre-wipe review."""
-    ui.banner()
     ui.info("This installer follows the Gentoo AMD64 Handbook chapter by chapter.")
     ui.info(HANDBOOK)
     ui.warn("It can wipe the selected disk. Back up first. Prefer testing in a VM.")
@@ -255,8 +254,30 @@ def _disks(cfg: InstallConfig) -> None:
 
 
 def _stage(cfg: InstallConfig) -> None:
-    """Handbook: Stage file — OpenRC/systemd and desktop vs hardened/musl tarball."""
-    ui.chapter("5", "Installing the Gentoo installation files (stage3)", f"{HANDBOOK}/Installation/Stage")
+    """Handbook: Stage file — stage1/2/3, OpenRC/systemd, desktop vs hardened/musl."""
+    ui.chapter("5", "Installing the Gentoo installation files", f"{HANDBOOK}/Installation/Stage")
+    cfg.stage_level = ui.menu(
+        "Stage tarball (handbook default is stage3)",
+        [
+            (
+                "stage3",
+                "stage3 — full base system (recommended). Ready for Portage after extract.",
+            ),
+            (
+                "stage2",
+                "stage2 — toolchain plus a thin base. This installer then runs emerge -e @system.",
+            ),
+            (
+                "stage1",
+                "stage1 — seed toolchain only. Very long bootstrap; not for a first install.",
+            ),
+        ],
+        "stage3",
+    )
+    if cfg.stage_level != "stage3":
+        ui.warn(f"{cfg.stage_level} is experimental on official autobuilds and can take many extra hours.")
+        ui.warn("Desktop/LLVM tarballs usually exist only as stage3. Minimal flavour will be used.")
+        cfg.install_type = "server"
     cfg.init_system = ui.menu(
         "Init system",
         [
@@ -265,16 +286,17 @@ def _stage(cfg: InstallConfig) -> None:
         ],
         "openrc",
     )
-    cfg.install_type = ui.menu(
-        "Install type",
-        [
-            ("desktop", "Desktop stage3 (includes LLVM/Rust-bin; faster graphical installs)"),
-            ("server", "Minimal/server stage3"),
-        ],
-        "desktop",
-    )
+    if cfg.stage_level == "stage3":
+        cfg.install_type = ui.menu(
+            "Install type",
+            [
+                ("desktop", "Desktop stage3 (includes LLVM/Rust-bin; faster graphical installs)"),
+                ("server", "Minimal/server stage3"),
+            ],
+            "desktop",
+        )
     cfg.stage_variant = ui.menu(
-        "Stage3 variant",
+        "Stage libc / toolchain variant",
         [
             ("standard", "glibc + GCC (recommended)"),
             ("hardened", "Hardened toolchain stage when available"),
@@ -285,7 +307,7 @@ def _stage(cfg: InstallConfig) -> None:
     if cfg.stage_variant == "musl":
         ui.warn("musl stages typically have no KDE/GNOME desktop profiles.")
         cfg.install_type = "server"
-    cfg.verify_stage = ui.ask_yes_no("Verify stage3 SHA256 and GPG signature?", True)
+    cfg.verify_stage = ui.ask_yes_no("Verify the stage tarball with a detached GPG signature?", True)
     kw = "~amd64" if cfg.architecture == "amd64" else "~arm64"
     cfg.testing_keywords = ui.ask_yes_no(
         f"Accept testing keywords (*/* {kw}) for the whole system?",
@@ -314,24 +336,23 @@ def _base(cfg: InstallConfig) -> None:
             [("x86-64", "Generic x86-64"), ("x86-64-v3", "x86-64-v3 (Haswell and newer)")],
             "x86-64",
         )
+        cfg.binpkg_respect_use = ui.ask_yes_no(
+            "Require binpkgs to match USE exactly? (No = use binaries even if USE differs; "
+            "avoids compiling glibc's ~500 locales from source)",
+            False,
+        )
     gpu = detect.detect_gpu()
     ui.info(f"Detected VIDEO_CARDS suggestion: {gpu}")
     cfg.video_cards = ui.prompt("VIDEO_CARDS (or 'auto')", "auto")
+    ui.info("USE flags control optional features inside packages (audio, GUI toolkits, networking).")
     extra = ui.checklist(
-        "Additional global USE flags",
-        [
-            ("alsa", "ALSA"),
-            ("pulseaudio", "PulseAudio compatibility"),
-            ("pipewire", "PipeWire"),
-            ("bluetooth", "Bluetooth"),
-            ("networkmanager", "NetworkManager"),
-            ("wayland", "Wayland"),
-            ("X", "X11"),
-            ("elogind", "elogind (OpenRC desktops)"),
-            ("systemd", "systemd USE"),
-        ],
+        "Global USE flags (handbook ch. 6) — Space toggles, Enter continues",
+        catalog.USE_FLAGS,
         selected=_default_use(cfg),
     )
+    typed = ui.prompt("Extra USE tokens to add (space-separated, empty for none)", "")
+    if typed.strip():
+        extra = list(dict.fromkeys(extra + typed.split()))
     cfg.extra_use = extra
     cfg.lto = ui.ask_yes_no("Enable LTO in CFLAGS (experimental, slower compiles)?", False)
     cfg.hardened_flags = cfg.stage_variant == "hardened" or ui.ask_yes_no("Add hardened CFLAGS / USE (pie ssp)?", False)
@@ -366,7 +387,9 @@ def _profiles(cfg: InstallConfig) -> list[tuple[str, str]]:
 
 def _default_use(cfg: InstallConfig) -> list[str]:
     """Pre-tick USE flags that match the chosen init system and desktop type."""
-    flags = ["X"] if cfg.install_type == "desktop" else []
+    flags = ["dist-kernel"]
+    if cfg.install_type == "desktop":
+        flags.append("X")
     if cfg.init_system == "openrc":
         flags.append("elogind")
     else:
@@ -404,9 +427,25 @@ def _system(cfg: InstallConfig) -> None:
     ui.chapter("8", "Configuring the system", f"{HANDBOOK}/Installation/System")
     cfg.hostname = ui.prompt("Hostname", cfg.hostname)
     cfg.timezone = ui.prompt("Timezone (e.g. America/New_York)", cfg.timezone)
-    cfg.locale = ui.prompt("Locale (glibc locale.gen name, e.g. en_US.UTF-8)", cfg.locale)
-    ui.info("The installer writes only that locale plus C.UTF-8, then runs locale-gen with LANG=C.")
-    cfg.keymap = ui.prompt("Console keymap", cfg.keymap)
+    loc = ui.menu(
+        "System locale (written to locale.gen and /etc/env.d/02locale)",
+        catalog.COMMON_LOCALES,
+        cfg.locale if cfg.locale in {v for v, _ in catalog.COMMON_LOCALES} else "en_US.UTF-8",
+    )
+    if loc == "custom":
+        loc = ui.prompt("glibc locale name (e.g. en_CA.UTF-8)", cfg.locale or "en_US.UTF-8")
+    cfg.locale = loc.strip() or "en_US.UTF-8"
+    ui.info("Only your locale plus C.UTF-8 are generated. glibc will not compile all 500+ locales.")
+    if ui.ask_yes_no("Generate additional locales besides the one above?", False):
+        extras = [
+            (v, d)
+            for v, d in catalog.COMMON_LOCALES
+            if v not in {cfg.locale, "custom", "C.UTF-8"}
+        ]
+        cfg.extra_locales = ui.checklist("Additional locales", extras, selected=cfg.extra_locales)
+    else:
+        cfg.extra_locales = []
+    cfg.keymap = ui.prompt("Console keymap (e.g. us, uk, de, fr)", cfg.keymap)
     cfg.root_password = ui.ask_password("Root password")
     if ui.ask_yes_no("Create a non-root user?", True):
         cfg.username = ui.prompt("Username", cfg.username)
@@ -518,36 +557,36 @@ def _finalize(cfg: InstallConfig) -> None:
         cfg.desktop = ui.menu(
             "Desktop environment",
             [
-                ("none", "No DE (install later)"),
-                ("xfce", "Xfce"),
-                ("plasma", "KDE Plasma"),
-                ("gnome", "GNOME"),
-                ("mate", "MATE"),
-                ("cinnamon", "Cinnamon"),
-                ("i3", "i3 window manager"),
+                ("none", "No DE — tiling WMs and extras are chosen in chapter 12"),
+                ("xfce", "Xfce — light GTK desktop (good default on a live USB)"),
+                ("plasma", "KDE Plasma — full Qt desktop"),
+                ("gnome", "GNOME — full GTK desktop"),
+                ("mate", "MATE — traditional GTK desktop"),
+                ("cinnamon", "Cinnamon — Mint-style desktop"),
+                ("i3", "i3 — X11 tiling window manager (not a full DE)"),
             ],
             "xfce",
         )
         if cfg.desktop != "none":
             cfg.display_manager = ui.menu(
-                "Display manager",
+                "Display manager (graphical login)",
                 [
-                    ("auto", "Auto (sddm/gdm/lightdm by DE)"),
-                    ("lightdm", "LightDM"),
-                    ("sddm", "SDDM"),
-                    ("gdm", "GDM"),
-                    ("none", "None — startx"),
+                    ("auto", "Auto — LightDM/SDDM/GDM matching the DE"),
+                    ("lightdm", "LightDM — common for Xfce/MATE/Cinnamon"),
+                    ("sddm", "SDDM — usual choice for Plasma"),
+                    ("gdm", "GDM — usual choice for GNOME"),
+                    ("none", "None — log in on TTY and run startx"),
                 ],
                 "auto",
             )
             cfg.pipewire = ui.ask_yes_no("Install PipeWire audio?", True)
             cfg.browser = ui.menu(
-                "Web browser (Gentoo tree packages)",
+                "Web browser",
                 [
-                    ("firefox-bin", "firefox-bin"),
-                    ("firefox", "firefox (compile)"),
-                    ("chromium", "chromium"),
-                    ("none", "None"),
+                    ("firefox-bin", "Firefox official binary — no compile"),
+                    ("firefox", "Firefox compiled from source — many hours"),
+                    ("chromium", "Chromium from source — very long compile"),
+                    ("none", "No browser from this chapter (you can pick one in chapter 12)"),
                 ],
                 "firefox-bin",
             )
@@ -635,7 +674,8 @@ def _review(cfg: InstallConfig) -> None:
         ("LUKS", str(cfg.luks) + (" + encrypted swap" if cfg.encrypted_swap else "")),
         ("Swap", f"{cfg.swap_mode} {cfg.swap_size_gib}G"),
         ("Init", cfg.init_system),
-        ("Stage", f"{cfg.install_type}/{cfg.stage_variant}"),
+        ("Stage", f"{cfg.stage_level}/{cfg.install_type}/{cfg.stage_variant}"),
+        ("USE", " ".join((cfg.use_flags or "").split()[:12]) + ("…" if len((cfg.use_flags or "").split()) > 12 else "")),
         ("Profile", cfg.profile),
         ("Kernel", cfg.kernel),
         ("Bootloaders", ", ".join(cfg.bootloaders) + f" (primary {cfg.bootloader})"),

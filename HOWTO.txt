@@ -191,11 +191,12 @@ Then, from the same live session if the mounts are still there:
 
   sudo python3 install.py --resume --config ./gentoo-install.yaml
 
-Confirm you copied this revision before you resume. The live terminal must
-print `rev 12` when it writes chroot-install.sh:
+The first screen of the installer prints `installer rev N`. That number
+must match `INSTALLER_REV` in gentoo_installer/rev.py and the chroot
+script banner. This tree is rev 13:
 
-  grep "CHROOT_SCRIPT_REV = 12" gentoo_installer/execute.py
-  grep "rev 12" /mnt/gentoo/root/chroot-install.sh
+  grep "INSTALLER_REV" gentoo_installer/rev.py
+  grep "rev 13" /mnt/gentoo/root/chroot-install.sh
 
 Resume skips phases already marked done. If disks were only half-written,
 do not resume blindly; start a new wipe in a VM, or inspect partitions
