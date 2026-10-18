@@ -88,6 +88,14 @@ Useful options:
       Continue after a crash. Completed phases in
       /var/tmp/gentoo-live-installer-state.json are skipped.
 
+You do not need to run ". /etc/profile" on the Ubuntu live USB before
+--config or --resume. The installer clears the live-CD environment (env -i)
+and, inside the Gentoo chroot, runs the Handbook sequence:
+
+  env-update && source /etc/profile
+
+(see wiki.gentoo.org Handbook env-update / Installation alternatives).
+
   sudo python3 install.py --save-config ./gentoo-install.yaml --include-secrets
       Write passwords, LUKS, and Wi-Fi keys into the file. Keep that file
       private (chmod 600). Prefer omitting secrets.

@@ -16,6 +16,7 @@ Phase names in execute() match runner.State so --resume can skip finished work.
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import shutil
@@ -71,6 +72,12 @@ def execute(cfg: InstallConfig) -> None:
             raise SystemExit("Execution requires a Linux live environment (Ubuntu XFCE live).")
         if not detect.is_root():
             raise SystemExit("Re-run as root: sudo python3 install.py")
+
+    # Live USBs (and a previous failed chroot) can export stale FEATURES/USE into
+    # this process. Portage then prints "Run . /etc/profile". Drop them here so
+    # --config/--resume does not require sourcing the profile by hand.
+    os.environ.pop("FEATURES", None)
+    os.environ.pop("USE", None)
 
     runner = Runner(dry_run=cfg.dry_run)
     state = State(cfg.state_file)
@@ -523,8 +530,16 @@ def phase_chroot(cfg: InstallConfig, runner: Runner, root: str) -> None:
     secrets.chmod(0o600)
     cfg.save(str(Path(root) / "root" / "install-config.json"), include_secrets=False)
     cfg.save(str(Path(root) / "root" / "install-config.yaml"), include_secrets=False)
+    # Handbook + wiki "Installation alternatives": LiveCDs leak a messy env.
+    # env -i clears it; bash --login then sources Gentoo /etc/profile.
+    # https://wiki.gentoo.org/wiki/Installation_alternatives
+    # https://wiki.gentoo.org/wiki/Handbook:AMD64/Installation/Base
+    term = os.environ.get("TERM") or "linux"
     runner.shell(
-        f"env -u FEATURES chroot {shlex.quote(root)} /bin/bash /root/chroot-install.sh"
+        "env -i "
+        f"HOME=/root TERM={shlex.quote(term)} "
+        "PATH=/usr/sbin:/usr/bin:/sbin:/bin "
+        f"chroot {shlex.quote(root)} /bin/bash --login /root/chroot-install.sh"
     )
     if secrets.exists():
         secrets.unlink()
@@ -891,8 +906,9 @@ GENTOO_MIRRORS="{mirrors}"
 
     return f"""#!/bin/bash
 set -eo pipefail
-# gentoo-live-installer chroot script rev 7
+# gentoo-live-installer chroot script rev 8
 # Do not enable `set -u`. Gentoo profile.d/debuginfod.sh reads optional DEBUGINFOD_*.
+# Handbook: env-update && source /etc/profile after make.conf / locale changes.
 unset FEATURES
 export DEBUGINFOD_URLS="${{DEBUGINFOD_URLS:-}}"
 export DEBUGINFOD_CERT_PATH="${{DEBUGINFOD_CERT_PATH:-}}"
@@ -909,10 +925,14 @@ purge_bad_features() {{
 }}
 
 source_profile() {{
+  # https://wiki.gentoo.org/wiki/Handbook:AMD64/Working/EnvVar
+  # env-update writes /etc/profile.env; source loads it in *this* shell.
   set +e
   purge_bad_features
+  env-update
   # shellcheck disable=SC1091
   source /etc/profile
+  export PS1="(chroot) ${{PS1:-}}"
   purge_bad_features
   unset FEATURES
   set -e
@@ -938,9 +958,16 @@ else
 {make_conf.strip()}
 MAKECONF
 fi
+# Wiki Chroot: persist profile load for interactive rescue shells.
+cat > /root/.bashrc << 'BASHRC'
+if [ -f /etc/profile ]; then
+  # shellcheck disable=SC1091
+  . /etc/profile
+fi
+export PS1="(chroot) ${{PS1:-}}"
+BASHRC
 purge_bad_features
 source_profile
-export PS1="(chroot) ${{PS1:-}}"
 
 {binrepo}
 {installkernel_conf}
