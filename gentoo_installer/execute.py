@@ -101,6 +101,13 @@ def execute(cfg: InstallConfig) -> None:
     for name, fn in phases:
         ui.chapter("→", f"Phase: {name}", "https://wiki.gentoo.org/wiki/Handbook:AMD64")
         if state.skip(name, cfg.resume):
+            # Skip means "already done", not "leave the target unmounted".
+            # --config/--resume after a crash often still has /mnt/gentoo mounted;
+            # if the machine rebooted, reopen LUKS and remount without mkfs.
+            if name == "disks":
+                _ensure_target_mounted(cfg, runner)
+            elif name == "chroot_mounts":
+                phase_chroot_mounts(cfg, runner, root)
             continue
         fn()
         state.mark(name)
@@ -172,10 +179,103 @@ def _netifrc_iface(cfg: InstallConfig) -> str:
     return match.group(0) if match else "eth0"
 
 
+def _mountpoint_q(path: str) -> bool:
+    return detect.is_mounted(path)
+
+
+def _mount_if_needed(runner: Runner, source: str, dest: str, options: str = "") -> None:
+    """Mount dest if it is not already a mountpoint (resume-safe)."""
+    runner.shell(f"mkdir -p {shlex.quote(dest)}")
+    opt = f"-o {options} " if options else ""
+    runner.shell(
+        f"mountpoint -q {shlex.quote(dest)} || mount {opt}{shlex.quote(source)} {shlex.quote(dest)}"
+    )
+
+
+def _unmount_target(cfg: InstallConfig, runner: Runner) -> None:
+    """Drop mounts/swap/LUKS so wipefs can run. Safe if nothing is mounted."""
+    root = cfg.mountpoint
+    ui.info(f"Unmounting {root} if it is busy from a previous run")
+    runner.shell(
+        f"umount -R {shlex.quote(root)} || umount -Rl {shlex.quote(root)} || true"
+    )
+    runner.shell("swapoff -a || true")
+    runner.shell("cryptsetup close swap || true")
+    runner.shell("cryptsetup close root || true")
+    if cfg.layout in {"lvm", "lvm-luks"}:
+        runner.shell("vgchange -an vg0 || true")
+
+
+def _luks_open_only(cfg: InstallConfig, runner: Runner, device: str, name: str) -> None:
+    mapper = f"/dev/mapper/{name}"
+    if Path(mapper).exists():
+        return
+    if not cfg.luks_passphrase:
+        raise SystemExit(f"LUKS passphrase missing; cannot open {device} as {name}.")
+    runner.shell(
+        f"printf '%s' {shlex.quote(cfg.luks_passphrase)} | cryptsetup open "
+        f"{shlex.quote(device)} {shlex.quote(name)}"
+    )
+
+
+def _runtime_devices(cfg: InstallConfig) -> dict[str, str]:
+    """Partition map plus live mapper/LV names (no mkfs)."""
+    devices = _map_devices(cfg)
+    if cfg.luks and devices.get("luks_source"):
+        devices["root"] = "/dev/mapper/root"
+    if cfg.layout in {"lvm", "lvm-luks"}:
+        if cfg.swap_mode in {"partition", "both"}:
+            if cfg.layout == "lvm-luks":
+                devices["swap"] = "/dev/vg0/swap"
+            elif cfg.encrypted_swap and cfg.luks:
+                devices["luks_swap_source"] = "/dev/vg0/swap"
+                devices["swap"] = "/dev/mapper/swap"
+            else:
+                devices["swap"] = "/dev/vg0/swap"
+        devices["root"] = "/dev/vg0/root"
+    elif cfg.luks and cfg.encrypted_swap and cfg.swap_mode in {"partition", "both"}:
+        devices["luks_swap_source"] = devices.get("swap", "")
+        devices["swap"] = "/dev/mapper/swap"
+    return devices
+
+
+def _ensure_target_mounted(cfg: InstallConfig, runner: Runner) -> None:
+    """Reopen LUKS/LVM and mount /mnt/gentoo without partitioning or mkfs."""
+    if cfg.dry_run:
+        ui.info("Would remount the existing target without wiping.")
+        cfg._devices = _runtime_devices(cfg)  # type: ignore[attr-defined]
+        return
+    devices = _runtime_devices(cfg)
+    if cfg.luks and devices.get("luks_source"):
+        _luks_open_only(cfg, runner, devices["luks_source"], "root")
+    if cfg.layout in {"lvm", "lvm-luks"}:
+        runner.shell("vgchange -ay vg0 || true")
+    if cfg.encrypted_swap and devices.get("luks_swap_source"):
+        _luks_open_only(cfg, runner, devices["luks_swap_source"], "swap")
+        runner.shell(f"swapon {shlex.quote(devices['swap'])} || true")
+    if cfg.layout == "zfs":
+        runner.shell(f"zpool import -R {shlex.quote(cfg.mountpoint)} rpool || true")
+    elif not _mountpoint_q(cfg.mountpoint):
+        _mount_tree(cfg, runner, devices, create_subvols=False)
+    else:
+        ui.info(f"{cfg.mountpoint} is already mounted; leaving it in place.")
+        if cfg.firmware == "uefi" and devices.get("esp"):
+            boot = cfg.mountpoint + "/boot"
+            if not _mountpoint_q(boot):
+                _mount_if_needed(runner, devices["esp"], boot)
+    cfg._devices = devices  # type: ignore[attr-defined]
+    ui.ok("Target filesystems are mounted")
+
+
 def phase_disks(cfg: InstallConfig, runner: Runner) -> None:
     """Wipe/partition/LUKS/LVM, mkfs, and mount at cfg.mountpoint (handbook /mnt/gentoo)."""
     disk = cfg.target_disk
+    if cfg.resume:
+        ui.info("Resume: not wiping or formatting; ensuring the target is mounted.")
+        _ensure_target_mounted(cfg, runner)
+        return
     if cfg.wipe_disk and cfg.layout != "existing":
+        _unmount_target(cfg, runner)
         ui.danger(f"Zapping partition tables on {disk}")
         runner.shell(f"wipefs -af {shlex.quote(disk)} || true")
         if cfg.layout == "mdraid1":
@@ -334,8 +434,7 @@ def _layout_zfs(cfg: InstallConfig, runner: Runner) -> None:
     runner.shell("zpool export rpool || true")
     runner.shell(f"zpool import -R {shlex.quote(cfg.mountpoint)} rpool")
     if cfg.firmware == "uefi":
-        runner.shell(f"mkdir -p {shlex.quote(cfg.mountpoint + '/boot')}")
-        runner.shell(f"mount {shlex.quote(part_name(disk, 1))} {shlex.quote(cfg.mountpoint + '/boot')}")
+        _mount_if_needed(runner, part_name(disk, 1), cfg.mountpoint + "/boot")
 
 
 def _map_devices(cfg: InstallConfig) -> dict[str, str]:
@@ -411,35 +510,38 @@ def _mkfs(cfg: InstallConfig, runner: Runner, devices: dict[str, str]) -> None:
         runner.shell(f"mkfs.jfs -f {shlex.quote(root)}")
 
 
-def _mount_tree(cfg: InstallConfig, runner: Runner, devices: dict[str, str]) -> None:
+def _mount_tree(
+    cfg: InstallConfig,
+    runner: Runner,
+    devices: dict[str, str],
+    create_subvols: bool = True,
+) -> None:
     """Mount root (and Btrfs subvols / ESP) under cfg.mountpoint for stage3 extract."""
     root = cfg.mountpoint
     runner.shell(f"mkdir -p {shlex.quote(root)}")
     if cfg.layout == "zfs":
         return
     if cfg.layout == "btrfs-subvols" or cfg.filesystem == "btrfs" and cfg.layout == "btrfs-subvols":
-        runner.shell(f"mount {shlex.quote(devices['root'])} {shlex.quote(root)}")
-        for sub in ("@", "@home", "@log", "@cache", "@tmp", "@swap"):
-            runner.shell(f"btrfs subvolume create {shlex.quote(root + '/' + sub)}")
-        runner.shell(f"umount {shlex.quote(root)}")
+        if create_subvols and not _mountpoint_q(root):
+            _mount_if_needed(runner, devices["root"], root)
+            for sub in ("@", "@home", "@log", "@cache", "@tmp", "@swap"):
+                runner.shell(
+                    f"btrfs subvolume list {shlex.quote(root)} | grep -q 'path {sub}$' "
+                    f"|| btrfs subvolume create {shlex.quote(root + '/' + sub)}"
+                )
+            runner.shell(f"umount {shlex.quote(root)} || true")
         opts = "noatime,compress=zstd:3,ssd"
-        runner.shell(f"mount -o {opts},subvol=@ {shlex.quote(devices['root'])} {shlex.quote(root)}")
+        _mount_if_needed(runner, devices["root"], root, f"{opts},subvol=@")
         for sub, mp in (("@home", "home"), ("@log", "var/log"), ("@cache", "var/cache"), ("@tmp", "tmp"), ("@swap", "swap")):
-            runner.shell(f"mkdir -p {shlex.quote(root + '/' + mp)}")
             extra = "noatime,nodatacow" if sub == "@swap" else opts
-            runner.shell(
-                f"mount -o {extra},subvol={sub} {shlex.quote(devices['root'])} {shlex.quote(root + '/' + mp)}"
-            )
+            _mount_if_needed(runner, devices["root"], root + "/" + mp, f"{extra},subvol={sub}")
     else:
-        runner.shell(f"mount {shlex.quote(devices['root'])} {shlex.quote(root)}")
+        _mount_if_needed(runner, devices["root"], root)
     if cfg.firmware == "uefi" and devices.get("esp"):
         runner.shell(f"mkdir -p {shlex.quote(root + '/efi')} {shlex.quote(root + '/boot')}")
-        # Handbook often mounts ESP at /efi with kernel in /boot, or ESP at /boot.
-        # Use /boot for dist-kernel + GRUB simplicity (handbook UEFI GRUB common path).
-        runner.shell(f"mount {shlex.quote(devices['esp'])} {shlex.quote(root + '/boot')}")
-    elif devices.get("boot") and devices["boot"] != devices.get("root"):
-        runner.shell(f"mkdir -p {shlex.quote(root + '/boot')}")
-        runner.shell(f"mount {shlex.quote(devices['boot'])} {shlex.quote(root + '/boot')}")
+        _mount_if_needed(runner, devices["esp"], root + "/boot")
+    elif devices.get("boot") and devices["boot"] != devices.get("esp") and devices["boot"] != devices.get("root"):
+        _mount_if_needed(runner, devices["boot"], root + "/boot")
 
 
 def stage_flavor(cfg: InstallConfig) -> str:
@@ -472,6 +574,9 @@ def stage3_flavor(cfg: InstallConfig) -> str:
 
 def phase_stage3(cfg: InstallConfig, runner: Runner, root: str) -> None:
     """Download the current stage3, optionally verify SHA256/GPG, extract with xattrs."""
+    if cfg.resume and (Path(root) / "etc" / "portage").is_dir():
+        ui.info("Resume: stage tarball already extracted; skipping download.")
+        return
     flavor = stage_flavor(cfg)
     latest = f"https://distfiles.gentoo.org/releases/{cfg.architecture}/autobuilds/latest-{flavor}.txt"
     ui.info(f"Resolving latest {flavor}")
@@ -514,14 +619,18 @@ def phase_stage3(cfg: InstallConfig, runner: Runner, root: str) -> None:
 
 def phase_chroot_mounts(cfg: InstallConfig, runner: Runner, root: str) -> None:
     """Bind /proc /sys /dev /run and copy resolv.conf — handbook 'mounting the necessary filesystems'."""
-    runner.shell(f"mount --types proc /proc {shlex.quote(root + '/proc')}")
-    runner.shell(f"mount --rbind /sys {shlex.quote(root + '/sys')}")
-    runner.shell(f"mount --make-rslave {shlex.quote(root + '/sys')}")
-    runner.shell(f"mount --rbind /dev {shlex.quote(root + '/dev')}")
-    runner.shell(f"mount --make-rslave {shlex.quote(root + '/dev')}")
-    runner.shell(f"mkdir -p {shlex.quote(root + '/run')}")
-    runner.shell(f"mount --bind /run {shlex.quote(root + '/run')} || true")
-    runner.shell(f"cp /etc/resolv.conf {shlex.quote(root + '/etc/resolv.conf')}")
+    proc = shlex.quote(root + "/proc")
+    sysfs = shlex.quote(root + "/sys")
+    dev = shlex.quote(root + "/dev")
+    run = shlex.quote(root + "/run")
+    runner.shell(f"mkdir -p {proc} {sysfs} {dev} {run}")
+    runner.shell(f"mountpoint -q {proc} || mount --types proc /proc {proc}")
+    runner.shell(f"mountpoint -q {sysfs} || mount --rbind /sys {sysfs}")
+    runner.shell(f"mount --make-rslave {sysfs} || true")
+    runner.shell(f"mountpoint -q {dev} || mount --rbind /dev {dev}")
+    runner.shell(f"mount --make-rslave {dev} || true")
+    runner.shell(f"mountpoint -q {run} || mount --bind /run {run} || true")
+    runner.shell(f"cp /etc/resolv.conf {shlex.quote(root + '/etc/resolv.conf')} || true")
 
 
 def _chroot_env_argv(*command: str) -> list[str]:
@@ -979,7 +1088,11 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
 
     de_pkgs = _desktop_packages(cfg)
     all_extra = " ".join(
-        dict.fromkeys(boot_pkgs + net_pkgs + extra_fw + de_pkgs + cfg.extra_packages + cfg.window_managers)
+        dict.fromkeys(
+            a
+            for a in boot_pkgs + net_pkgs + extra_fw + de_pkgs + cfg.extra_packages + cfg.window_managers
+            if a and not a.startswith("flatpak-app/")
+        )
     )
 
     dm = cfg.display_manager
@@ -1107,6 +1220,7 @@ EOF
 """
 
     overlay_block = _overlay_script(cfg)
+    stores_block = _app_stores_script(cfg)
     plymouth_block = _plymouth_script(cfg)
     level = getattr(cfg, "stage_level", "stage3") or "stage3"
     bootstrap = ""
@@ -1181,6 +1295,8 @@ FSTAB
 unset FEATURES
 emerge --ask=n sys-kernel/{pkgs_kernel} {all_extra}
 
+{stores_block}
+
 {swapfile}
 {zram_block}
 {user_block}
@@ -1205,6 +1321,35 @@ fi
 
 echo "Chroot configuration complete."
 """
+
+
+def _app_stores_script(cfg: InstallConfig) -> str:
+    """Add Flathub and install Flatpak-distributed stores (Bazaar) after emerge."""
+    atoms = set(cfg.extra_packages + cfg.window_managers + cfg.selected_packages)
+    if cfg.flatpak:
+        atoms.add("sys-apps/flatpak")
+    want_flatpak = cfg.flatpak or any(
+        a == "sys-apps/flatpak"
+        or a.startswith("flatpak-app/")
+        or a in {"gui-apps/bazaar"}
+        for a in atoms
+    )
+    if not want_flatpak:
+        return ""
+    apps = [a.split("/", 1)[1] for a in sorted(atoms) if a.startswith("flatpak-app/")]
+    if "gui-apps/bazaar" in atoms and "io.github.kolunmi.Bazaar" not in apps:
+        apps.append("io.github.kolunmi.Bazaar")
+    lines = [
+        'echo ">> Flathub / Flatpak stores"',
+        "if command -v flatpak >/dev/null 2>&1; then",
+        "  flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo || "
+        "flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo || true",
+    ]
+    for app in apps:
+        q = shlex.quote(app)
+        lines.append(f"  flatpak install -y --noninteractive flathub {q} || true")
+    lines.append("fi")
+    return "\n".join(lines) + "\n"
 
 
 def _overlay_script(cfg: InstallConfig) -> str:

@@ -9,6 +9,8 @@ execute.py runs after `_review()` confirms the target disk path.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from . import catalog, detect, ui
 from .config import InstallConfig
 
@@ -29,6 +31,25 @@ def fill_missing_secrets(cfg: InstallConfig) -> None:
         cfg.wifi_psk = ui.ask_password("Wi-Fi passphrase", confirm=False)
     if not cfg.grub_password and ui.ask_yes_no("Set a GRUB password (was not in the saved file)?", False):
         cfg.grub_password = ui.ask_password("GRUB password")
+    state = Path(cfg.state_file)
+    mounted = detect.is_mounted(cfg.mountpoint)
+    if state.exists() or mounted:
+        ui.info(
+            "An incomplete install was found"
+            + (f" (state {cfg.state_file})" if state.exists() else "")
+            + (f"; {cfg.mountpoint} is already mounted" if mounted else "")
+            + "."
+        )
+        if ui.ask_yes_no(
+            "Resume (skip finished phases; do not wipe or remake filesystems)?",
+            True,
+        ):
+            cfg.resume = True
+            cfg.wipe_disk = False
+            ui.ok("Resume enabled — existing mounts will be reused.")
+        else:
+            cfg.resume = False
+            ui.warn("Full restart: the disk will be unmounted, then wiped if this profile says so.")
     ui.danger(f"This saved profile will operate on {cfg.target_disk}")
     if not ui.ask_yes_no("Continue with these imported settings?", False):
         raise SystemExit("Aborted after loading config.")
@@ -649,6 +670,13 @@ def _packages(cfg: InstallConfig) -> None:
         for atom in extra.split():
             if atom not in picked:
                 picked.append(atom)
+    if any(a.startswith("flatpak-app/") or a in {"gui-apps/bazaar"} for a in picked):
+        if "sys-apps/flatpak" not in picked:
+            picked.append("sys-apps/flatpak")
+        cfg.flatpak = True
+    if any(a.startswith("sys-fs/fuse") for a in picked) or any("appimage" in a.lower() for a in picked):
+        if "sys-fs/fuse:0" not in picked:
+            picked.append("sys-fs/fuse:0")
     cfg.selected_packages = picked
     # extra_packages is the emerge set: catalogue picks + WMs + typed atoms.
     cfg.extra_packages = list(dict.fromkeys(cfg.extra_packages + picked + cfg.window_managers))

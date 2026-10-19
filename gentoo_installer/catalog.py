@@ -327,6 +327,19 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
         ),
     ),
     (
+        "app-stores",
+        "App stores (Flatpak, Bazaar, AppImage)",
+        _pkgs(
+            Pkg("sys-apps/flatpak", "Flatpak — sandboxed apps; Flathub is added after emerge"),
+            Pkg(
+                "flatpak-app/io.github.kolunmi.Bazaar",
+                "Bazaar — Flatpak/Flathub app store (installed from Flathub, not Portage)",
+            ),
+            Pkg("sys-fs/fuse:0", "FUSE 2 — libfuse.so.2, required to run most AppImages"),
+            Pkg("sys-fs/fuse", "FUSE 3 — newer FUSE userspace (AppImages still need fuse:0)"),
+        ),
+    ),
+    (
         "desktop-environments",
         "Desktop environments",
         _pkgs(
@@ -568,7 +581,7 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
             Pkg("sys-process/cronie", "cronie"),
             Pkg("app-backup/restic", "restic"),
             Pkg("app-backup/borgbackup", "Borg"),
-            Pkg("sys-apps/flatpak", "Flatpak"),
+            Pkg("sys-apps/flatpak", "Flatpak (also listed under App stores)"),
             Pkg("app-emulation/distrobox", "Distrobox", "guru"),
         ),
     ),
@@ -577,6 +590,8 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
 
 def atom_overlay(atom: str) -> str:
     """Which eselect overlay an atom needs, or 'gentoo' for the main tree."""
+    if atom.startswith("flatpak-app/"):
+        return "gentoo"
     for p in WINDOW_MANAGERS + list(PLYMOUTH_THEME_PACKAGES.values()):
         if p.atom == atom:
             return p.overlay

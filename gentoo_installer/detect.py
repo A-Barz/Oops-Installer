@@ -20,6 +20,16 @@ def is_linux() -> bool:
     return platform.system() == "Linux"
 
 
+def is_mounted(path: str) -> bool:
+    """True if path is a current mountpoint (Linux). Safe on Windows (False)."""
+    if not path:
+        return False
+    try:
+        return Path(path).is_mount()
+    except OSError:
+        return False
+
+
 def is_root() -> bool:
     if hasattr(os, "geteuid"):
         return os.geteuid() == 0

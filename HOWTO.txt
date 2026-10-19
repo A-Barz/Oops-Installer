@@ -82,7 +82,9 @@ Useful options:
 
   sudo python3 install.py --config ./gentoo-install.yaml
       Skip the wizard. Use a saved profile. Passwords are asked again
-      unless you saved them with --include-secrets.
+      unless you saved them with --include-secrets. If /mnt/gentoo is
+      already mounted or a state file exists, you are asked whether to
+      resume instead of wiping.
 
   sudo python3 install.py --resume
       Continue after a crash. Completed phases in
@@ -193,10 +195,15 @@ Then, from the same live session if the mounts are still there:
 
 The first line of the installer is `Oops Installer  rev N`. That number
 must match `INSTALLER_REV` in gentoo_installer/rev.py and the chroot
-script banner. This tree is rev 14:
+script banner. This tree is rev 16:
 
   grep "INSTALLER_REV" gentoo_installer/rev.py
-  grep "rev 14" /mnt/gentoo/root/chroot-install.sh
+  grep "rev 16" /mnt/gentoo/root/chroot-install.sh
+
+`--config` without `--resume` used to re-run wipefs/mount and crash with
+"target is busy" / "already mounted" if /mnt/gentoo was still mounted.
+Rev 15 asks to resume when a state file or mount exists, reopens LUKS
+without formatting, and makes bind-mounts idempotent.
 
 Resume skips phases already marked done. If disks were only half-written,
 do not resume blindly; start a new wipe in a VM, or inspect partitions
