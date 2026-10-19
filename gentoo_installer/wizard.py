@@ -692,7 +692,8 @@ def _packages(cfg: InstallConfig) -> None:
 
 def _review(cfg: InstallConfig) -> None:
     """Last safe abort point. User must re-type the disk path before execute()."""
-    ui.chapter("✓", "Review — nothing has been written to disk yet", HANDBOOK)
+    ui.chapter("✓", "Review — target disk has not been changed", HANDBOOK)
+    ui.info("A YAML profile of these choices is already saved. The target disk is unchanged until you confirm it.")
     rows = [
         ("Firmware", cfg.firmware),
         ("Disk", cfg.target_disk),

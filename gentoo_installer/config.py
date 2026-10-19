@@ -165,6 +165,7 @@ class InstallConfig:
     def save(self, path: str | Path, include_secrets: bool = False) -> None:
         """Write answers for reuse. .yaml/.yml → YAML; anything else → JSON."""
         path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         data = asdict(self) if include_secrets else self.public_dict()
         if path.suffix.lower() in {".yaml", ".yml"}:
             path.write_text(_to_yaml(data), encoding="utf-8")

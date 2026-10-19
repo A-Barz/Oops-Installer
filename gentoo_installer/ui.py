@@ -22,6 +22,7 @@ import getpass
 import os
 import shutil
 import sys
+import time
 from typing import Iterable, Sequence
 
 
@@ -168,6 +169,64 @@ def prompt(question: str, default: str | None = None) -> str:
     return raw
 
 
+def _decode_csi(seq: str) -> str:
+    """Map the bytes after ESC to a key name.
+
+    Terminals send CSI (`[B`) or SS3 (`OB`). Modified arrows look like `[1;2B`.
+    A fixed two-byte read leaves the rest in the buffer, so the next Down is ignored.
+    """
+    if not seq:
+        return "esc"
+    if seq[0] == "O" and len(seq) >= 2:
+        return {"A": "up", "B": "down", "C": "right", "D": "left"}.get(seq[1], "esc")
+    if not seq.startswith("["):
+        return "esc"
+    body = seq[1:]
+    if body.endswith("~"):
+        body = body[:-1]
+    if body and body[-1].isalpha():
+        return {"A": "up", "B": "down", "C": "right", "D": "left", "H": "home", "F": "end"}.get(body[-1], "")
+    code = body.split(";")[0]
+    return {"5": "pgup", "6": "pgdn", "1": "home", "4": "end", "3": "delete"}.get(code, "")
+
+
+def _read_escape_posix(fd: int) -> str:
+    """Read the rest of an escape sequence. Bytes often arrive one at a time."""
+    import select
+
+    seq = ""
+    wait = 0.08
+    while len(seq) < 16:
+        ready, _, _ = select.select([fd], [], [], wait)
+        if not ready:
+            break
+        chunk = os.read(fd, 16)
+        if not chunk:
+            break
+        seq += chunk.decode("latin-1")
+        if seq[-1].isalpha() or seq.endswith("~"):
+            break
+        wait = 0.03
+    return _decode_csi(seq)
+
+
+def _read_escape_nt() -> str:
+    """Windows Terminal sometimes sends VT arrows instead of scan codes."""
+    import msvcrt
+
+    seq = ""
+    end = time.monotonic() + 0.08
+    while time.monotonic() < end and len(seq) < 16:
+        if msvcrt.kbhit():
+            seq += msvcrt.getwch()
+            if seq[-1:].isalpha() or seq.endswith("~"):
+                break
+            end = time.monotonic() + 0.03
+        else:
+            time.sleep(0.005)
+    return _decode_csi(seq) if seq else "esc"
+
+
 def _read_key() -> str:
     """One keypress. Returns 'up','down','left','right','enter','space', 'pgup','pgdn', or a character."""
     if os.name == "nt":
@@ -184,7 +243,7 @@ def _read_key() -> str:
         if ch == "\x03":
             raise KeyboardInterrupt
         if ch == "\x1b":
-            return "esc"
+            return _read_escape_nt()
         if ch == "\x08":
             return "backspace"
         return ch
@@ -196,14 +255,12 @@ def _read_key() -> str:
     old = termios.tcgetattr(fd)
     try:
         tty.setraw(fd)
-        ch = sys.stdin.read(1)
+        chunk = os.read(fd, 1)
+        if not chunk:
+            return ""
+        ch = chunk.decode("latin-1")
         if ch == "\x1b":
-            rest = sys.stdin.read(2)
-            table = {"[A": "up", "[B": "down", "[C": "right", "[D": "left", "[5": "pgup", "[6": "pgdn"}
-            key = table.get(rest, "")
-            if rest in {"[5", "[6"}:
-                sys.stdin.read(1)
-            return key or "esc"
+            return _read_escape_posix(fd)
         if ch in {"\r", "\n"}:
             return "enter"
         if ch == " ":
@@ -215,6 +272,14 @@ def _read_key() -> str:
         return ch
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def _clip(text: str, reserve: int = 18) -> str:
+    """Keep a menu row on one screen line so cursor-up erases the real row."""
+    limit = max(24, width() - reserve)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
 
 
 def _hide_cursor() -> None:
@@ -345,7 +410,7 @@ def menu(title: str, choices: Sequence[tuple[str, str]], default: str | None = N
                 abs_i = start + offset
                 cursor = abs_i == index
                 mark = paint("▸", C.BOLD, C.GREEN) if cursor else " "
-                shown = desc or value
+                shown = _clip(desc or value)
                 label = paint(shown, C.BOLD, C.GREEN) if cursor else paint(shown, C.WHITE)
                 extra = paint(f"({value})", C.DIM, C.PURPLE) if desc else ""
                 prefix = paint("  > ", C.BOLD, C.GREEN) if cursor else "    "
@@ -426,7 +491,7 @@ def paged_checklist(
                 box = paint("[x]", C.GREEN, C.BOLD) if on else paint("[ ]", C.DIM)
                 mark = paint("▸", C.BOLD, C.GREEN) if i == cursor else " "
                 # Description first so packages/USE flags explain what they are.
-                shown = desc or value
+                shown = _clip(desc or value, reserve=28)
                 label = paint(shown, C.BOLD, C.GREEN) if i == cursor else paint(shown, C.WHITE)
                 atom = paint(f"({value})", C.DIM, C.PURPLE) if desc else ""
                 prefix = paint("  > ", C.BOLD, C.GREEN) if i == cursor else "    "

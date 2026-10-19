@@ -87,6 +87,15 @@ def execute(cfg: InstallConfig) -> None:
     runner = Runner(dry_run=cfg.dry_run)
     state = State(cfg.state_file)
     root = cfg.mountpoint
+    profiles = [Path("gentoo-install.yaml")]
+    if os.name != "nt":
+        profiles.append(Path("/var/tmp/gentoo-install.yaml"))
+    for profile in profiles:
+        try:
+            cfg.save(profile)
+            ui.ok(f"Wrote {profile}")
+        except OSError as exc:
+            ui.warn(f"Could not write {profile}: {exc}")
 
     phases = [
         ("host_packages", lambda: phase_host(cfg, runner)),
@@ -1003,6 +1012,17 @@ def _required_tool_repairs(cfg: InstallConfig, loaders: list[str]) -> str:
         )
         if cfg.firmware == "uefi":
             checks.append(("command -v efibootmgr >/dev/null 2>&1", "sys-boot/efibootmgr"))
+    if "systemd-boot" in loaders:
+        boot_atom = "sys-apps/systemd" if cfg.init_system == "systemd" else "sys-apps/systemd-utils"
+        checks.append(("command -v bootctl >/dev/null 2>&1", boot_atom))
+    if "refind" in loaders:
+        checks.append(("command -v refind-install >/dev/null 2>&1", "sys-boot/refind"))
+    if "syslinux" in loaders:
+        checks.append(("command -v syslinux >/dev/null 2>&1", "sys-boot/syslinux"))
+    if "limine" in loaders:
+        checks.append(("command -v limine >/dev/null 2>&1", "sys-boot/limine"))
+    if "lilo" in loaders:
+        checks.append(("command -v lilo >/dev/null 2>&1", "sys-boot/lilo"))
     if cfg.plymouth:
         checks.append(("command -v plymouth-set-default-theme >/dev/null 2>&1", "sys-boot/plymouth"))
     openrc = cfg.init_system == "openrc"
@@ -1063,11 +1083,13 @@ def _required_tool_repairs(cfg: InstallConfig, loaders: list[str]) -> str:
                 [
                     f"if ! {{ {test}; }}; then",
                     f'  echo ">> {atom} is not installed"',
-                    f"  emerge --ask=n {quoted} || true",
+                    f"  emerge --ask=n {quoted}",
+                    "  _st=$?",
+                    '  if [ "$_st" -eq 132 ]; then disable_binpkgs; fi',
                     "fi",
                     f"if ! {{ {test}; }}; then",
                     f'  echo ">> {atom} still missing; building from source"',
-                    f"  emerge --ask=n --usepkg=n {quoted} || echo '>> emerge failed: {atom}' >&2",
+                    f"  emerge --ask=n --usepkg=n --getbinpkg=n {quoted} || echo '>> emerge failed: {atom}' >&2",
                     "fi",
                 ]
             )
@@ -1076,18 +1098,14 @@ def _required_tool_repairs(cfg: InstallConfig, loaders: list[str]) -> str:
 
 
 def _final_tool_checks(cfg: InstallConfig, loaders: list[str]) -> str:
-    """Exit non-zero so the chroot phase is not marked done when tools are missing.
+    """Warn when a service is absent. Exit only when the disk cannot boot.
 
-    The script runs under `set +e`. Without this, a missing sudoers drop-in,
-    grub-install, or OpenRC service still looked like a finished install, and
-    --resume skipped the phase.
+    The script runs under `set +e`. A missing optional package must not hide a
+    finished kernel and bootloader, and a missing kernel must not be marked done.
     """
     checks: list[tuple[str, str]] = []
     if cfg.username:
         checks.append(("[ -e /etc/sudoers.d/wheel ]", "/etc/sudoers.d/wheel"))
-    if "grub" in loaders:
-        checks.append(("command -v grub-install >/dev/null 2>&1", "grub-install"))
-        checks.append(("command -v grub-mkconfig >/dev/null 2>&1", "grub-mkconfig"))
     if cfg.plymouth:
         checks.append(("command -v plymouth-set-default-theme >/dev/null 2>&1", "plymouth-set-default-theme"))
     openrc = cfg.init_system == "openrc"
@@ -1107,11 +1125,85 @@ def _final_tool_checks(cfg: InstallConfig, loaders: list[str]) -> str:
     if openrc and cfg.cron != "none":
         svc = "cronie" if cfg.cron == "cronie" else cfg.cron
         checks.append((f"[ -e /etc/init.d/{svc} ]", svc))
-    lines = ['echo ">> verify sudo, bootloader, and services"', "missing=0"]
+    if openrc and cfg.zram:
+        checks.append(("[ -e /etc/init.d/zram-init ]", "zram-init"))
+    lines = [
+        'echo ">> verify kernel, bootloader, and services"',
+        "missing=0",
+        "kernel_ok=0",
+        "boot_ok=0",
+        "if ls /boot/vmlinuz* >/dev/null 2>&1 || ls /boot/EFI/Linux/*.efi >/dev/null 2>&1; then kernel_ok=1; fi",
+    ]
     for test, label in checks:
-        lines.append(f"if ! {{ {test}; }}; then echo \">> still missing: {label}\" >&2; missing=1; fi")
+        lines.append(f"if ! {{ {test}; }}; then echo \">> still missing: {label}\" >&2; fi")
+    boot_tests = []
+    if "grub" in loaders:
+        boot_tests.append("command -v grub-install >/dev/null 2>&1 && command -v grub-mkconfig >/dev/null 2>&1")
+    if "systemd-boot" in loaders:
+        boot_tests.append("command -v bootctl >/dev/null 2>&1")
+    if "refind" in loaders:
+        boot_tests.append("command -v refind-install >/dev/null 2>&1")
+    if "syslinux" in loaders:
+        boot_tests.append("command -v syslinux >/dev/null 2>&1")
+    if "limine" in loaders:
+        boot_tests.append("command -v limine >/dev/null 2>&1")
+    if "lilo" in loaders:
+        boot_tests.append("command -v lilo >/dev/null 2>&1")
+    if "efistub" in loaders or not boot_tests:
+        boot_tests.append('[ "$kernel_ok" -eq 1 ]')
+    joined = " || ".join(boot_tests)
+    lines.append(f"if {joined}; then boot_ok=1; else echo '>> no selected bootloader was installed' >&2; fi")
+    lines.append('if [ "$kernel_ok" -eq 0 ]; then echo ">> no kernel image was installed" >&2; missing=1; fi')
+    lines.append('if [ "$boot_ok" -eq 0 ]; then missing=1; fi')
     lines.append('if [ "$missing" -ne 0 ]; then echo ">> chroot configuration incomplete" >&2; exit 1; fi')
     return "\n".join(lines) + "\n"
+
+
+def _source_setup_script() -> str:
+    """Bash helpers: refuse v3 binpkgs on older CPUs, and rebuild after SIGILL.
+
+    Exit 132 is the shell's report for "Illegal instruction". Official
+    x86-64-v3 binpkgs (and a gentoo-kernel-bin built for that ABI) raise it
+    on CPUs without AVX2. Source builds use -march=native from make.conf.
+    """
+    return """
+cpu_has_v3=0
+if grep -qw avx2 /proc/cpuinfo && grep -qw bmi1 /proc/cpuinfo && grep -qw bmi2 /proc/cpuinfo && grep -qw fma /proc/cpuinfo && grep -qw movbe /proc/cpuinfo; then
+  cpu_has_v3=1
+fi
+if [ "$cpu_has_v3" -eq 0 ] && [ -f /etc/portage/binrepos.conf/gentoobinhost.conf ] && grep -q x86-64-v3 /etc/portage/binrepos.conf/gentoobinhost.conf; then
+  echo ">> this CPU cannot run x86-64-v3 binpkgs (Illegal instruction); using the x86-64 binhost"
+  sed -i 's/x86-64-v3/x86-64/g' /etc/portage/binrepos.conf/gentoobinhost.conf || true
+fi
+
+disable_binpkgs() {
+  echo ">> a binary raised Illegal instruction; further emerges use source"
+  local conf
+  for conf in /etc/portage/make.conf /etc/portage/make.conf/*; do
+    [ -f "$conf" ] || continue
+    sed -i -e 's/ --getbinpkg / /g' -e 's/ --usepkg / /g' "$conf" || true
+  done
+}
+
+emerge_with_source() {
+  # Distfiles are fetched even when a binpkg will be installed, so a later
+  # Illegal instruction can be rebuilt without another mirror lookup.
+  emerge --ask=n --fetchonly --usepkg=n --getbinpkg=n --keep-going "$@" || echo ">> some distfiles were not fetched" >&2
+  emerge --ask=n --keep-going "$@"
+  status=$?
+  if [ "$status" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$status" -eq 132 ]; then
+    echo ">> emerge died with Illegal instruction; rebuilding from source" >&2
+    disable_binpkgs
+    emerge --ask=n --keep-going --usepkg=n --getbinpkg=n "$@"
+    return $?
+  fi
+  echo ">> emerge failed ($status); required tools are rebuilt from source next" >&2
+  return "$status"
+}
+"""
 
 
 def _grub_uefi_install(target: str) -> str:
@@ -1125,7 +1217,7 @@ def _grub_uefi_install(target: str) -> str:
         [
             f"if [ ! -e /usr/lib/grub/{target}/modinfo.sh ]; then",
             '  echo ">> GRUB EFI modules missing; rebuilding sys-boot/grub from source"',
-            "  emerge --ask=n --usepkg=n sys-boot/grub || echo '>> grub rebuild failed' >&2",
+            "  emerge --ask=n --usepkg=n --getbinpkg=n sys-boot/grub || echo '>> grub rebuild failed' >&2",
             "fi",
             "if [ -d /sys/firmware/efi ]; then",
             "  mkdir -p /sys/firmware/efi/efivars",
@@ -1133,9 +1225,20 @@ def _grub_uefi_install(target: str) -> str:
             "  mount -o remount,rw,nosuid,nodev,noexec -t efivarfs efivarfs /sys/firmware/efi/efivars || true",
             "fi",
             "mkdir -p /boot/grub /boot/EFI",
-            f"if ! command -v grub-install >/dev/null 2>&1; then",
-            '  echo ">> grub-install does not exist" >&2',
-            f"elif ! grub-install --target={target} --efi-directory=/boot --bootloader-id=Gentoo; then",
+            "if ! command -v grub-install >/dev/null 2>&1; then",
+            '  echo ">> grub-install does not exist; building sys-boot/grub from source"',
+            "  emerge --ask=n --usepkg=n --getbinpkg=n sys-boot/grub || echo '>> grub source build failed' >&2",
+            "fi",
+            f"grub-install --target={target} --efi-directory=/boot --bootloader-id=Gentoo",
+            "grub_status=$?",
+            'if [ "$grub_status" -eq 132 ]; then',
+            '  echo ">> grub-install: illegal instruction; rebuilding sys-boot/grub from source"',
+            "  disable_binpkgs",
+            "  emerge --ask=n --usepkg=n --getbinpkg=n sys-boot/grub || echo '>> grub source build failed' >&2",
+            f"  grub-install --target={target} --efi-directory=/boot --bootloader-id=Gentoo",
+            "  grub_status=$?",
+            "fi",
+            'if [ "$grub_status" -ne 0 ]; then',
             '  echo ">> grub-install could not register NVRAM; writing the removable EFI fallback"',
             f"  grub-install --target={target} --efi-directory=/boot --bootloader-id=Gentoo --removable --no-nvram || echo '>> grub-install failed' >&2",
             "fi",
@@ -1284,6 +1387,17 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
             if a and not a.startswith("flatpak-app/")
         )
     )
+    kernel_atom = f"sys-kernel/{pkgs_kernel}"
+    # gentoo-kernel is the source dist-kernel. Fetch it even when the selected
+    # kernel is a binpkg or gentoo-sources, so a SIGILL or a sources-only tree
+    # can still produce /boot/vmlinuz.
+    fetch_atoms = [kernel_atom]
+    if kernel_atom != "sys-kernel/gentoo-kernel":
+        fetch_atoms.insert(0, "sys-kernel/gentoo-kernel")
+    fetch_line = " ".join(dict.fromkeys(fetch_atoms))
+    if all_extra:
+        fetch_line = f"{fetch_line} {all_extra}"
+    source_setup = _source_setup_script()
 
     dm = cfg.display_manager
     if dm == "auto":
@@ -1391,6 +1505,10 @@ EOF
 """
         else:
             zram_block = """
+if [ ! -e /etc/init.d/zram-init ]; then
+  echo ">> OpenRC service zram-init is missing; building sys-block/zram-init from source"
+  emerge --ask=n --usepkg=n --getbinpkg=n sys-block/zram-init || echo ">> zram-init source build failed" >&2
+fi
 cat > /etc/conf.d/zram-init << 'EOF'
 load_on_start=yes
 num_devices=1
@@ -1475,6 +1593,7 @@ BASHRC
 
 echo ">> binhost / installkernel"
 {binrepo}
+{source_setup}
 {installkernel_conf}
 {dracut_luks}
 echo 'sys-kernel/linux-firmware @BINARY-REDISTRIBUTABLE' > /etc/portage/package.license/firmware || true
@@ -1496,7 +1615,13 @@ if command -v mirrorselect >/dev/null 2>&1; then
   mirrorselect -s3 -b10 || true
 fi
 echo ">> emerge @world"
-emerge --verbose --update --deep --newuse @world || true
+emerge --verbose --update --deep --newuse @world
+world_status=$?
+if [ "$world_status" -eq 132 ]; then
+  echo ">> @world died with Illegal instruction; rebuilding from source"
+  disable_binpkgs
+  emerge --verbose --update --deep --newuse --usepkg=n --getbinpkg=n @world || echo ">> @world source rebuild failed" >&2
+fi
 unset FEATURES
 if command -v cpuid2cpuflags >/dev/null 2>&1 || emerge --ask=n app-portage/cpuid2cpuflags; then
   echo "*/* $(cpuid2cpuflags)" > /etc/portage/package.use/00cpu-flags || true
@@ -1509,10 +1634,17 @@ FSTAB
 {crypttab_block}
 
 unset FEATURES
+echo ">> fetch kernel and package sources"
+emerge --ask=n --fetchonly --usepkg=n --getbinpkg=n --keep-going {fetch_line} || echo ">> some distfiles were not fetched; emerge will try again" >&2
 echo ">> emerge kernel and selected packages"
 # --keep-going: a kernel, Plasma, or Firefox failure must not skip sudo,
-# GRUB, Plymouth, NetworkManager, chrony, rsyslog, or cronie.
-emerge --ask=n --keep-going sys-kernel/{pkgs_kernel} {all_extra} || echo ">> one or more packages failed; repairing required tools" >&2
+# GRUB, Plymouth, NetworkManager, chrony, rsyslog, cronie, or zram-init.
+# Exit 132 (Illegal instruction) rebuilds the same atoms from those distfiles.
+emerge_with_source {kernel_atom} {all_extra} || echo ">> one or more packages failed; repairing required tools" >&2
+if ! ls /boot/vmlinuz* >/dev/null 2>&1; then
+  echo ">> no kernel image in /boot; building sys-kernel/gentoo-kernel from source"
+  emerge --ask=n --usepkg=n --getbinpkg=n sys-kernel/gentoo-kernel || echo ">> gentoo-kernel source build failed" >&2
+fi
 {repair_tools}
 {stores_block}
 
@@ -1635,7 +1767,7 @@ fi
     return f"""
 if ! command -v plymouth-set-default-theme >/dev/null 2>&1; then
   echo ">> installing sys-boot/plymouth"
-  emerge --ask=n sys-boot/plymouth || emerge --ask=n --usepkg=n sys-boot/plymouth || echo ">> plymouth emerge failed" >&2
+  emerge --ask=n sys-boot/plymouth || emerge --ask=n --usepkg=n --getbinpkg=n sys-boot/plymouth || echo ">> plymouth emerge failed" >&2
 fi
 if command -v plymouth-set-default-theme >/dev/null 2>&1; then
   plymouth-set-default-theme {shlex.quote(theme_name)} || echo ">> plymouth theme failed" >&2
@@ -1645,6 +1777,30 @@ fi
 {grub}
 {refresh}
 """
+
+
+def _retry_sigill(atom: str, command: str) -> str:
+    """Run a bootloader step. Exit 132 means the binary cannot run on this CPU."""
+    quoted = shlex.quote(atom)
+    body = command.strip()
+    return (
+        "{\n"
+        + body
+        + "\n}\n"
+        + "boot_status=$?\n"
+        + 'if [ "$boot_status" -eq 132 ]; then\n'
+        + f'  echo ">> illegal instruction installing {atom}; rebuilding from source"\n'
+        + "  disable_binpkgs\n"
+        + f"  emerge --ask=n --usepkg=n --getbinpkg=n {quoted} || echo '>> source build failed: {atom}' >&2\n"
+        + "  {\n"
+        + body
+        + "\n}\n"
+        + "  boot_status=$?\n"
+        + "fi\n"
+        + 'if [ "$boot_status" -ne 0 ]; then\n'
+        + f"  echo '>> bootloader step failed: {atom}' >&2\n"
+        + "fi\n"
+    )
 
 
 def _install_bootloaders(cfg: InstallConfig, devices: dict[str, str], loaders: list[str]) -> str:
@@ -1661,7 +1817,16 @@ def _install_bootloaders(cfg: InstallConfig, devices: dict[str, str], loaders: l
                     "\n".join(
                         [
                             "mkdir -p /boot/grub",
-                            f"grub-install {disk} || echo '>> grub-install failed' >&2",
+                            f"grub-install {disk}",
+                            "grub_status=$?",
+                            'if [ "$grub_status" -eq 132 ]; then',
+                            '  echo ">> grub-install: illegal instruction; rebuilding sys-boot/grub from source"',
+                            "  disable_binpkgs",
+                            "  emerge --ask=n --usepkg=n --getbinpkg=n sys-boot/grub || echo '>> grub source build failed' >&2",
+                            f"  grub-install {disk}",
+                            "  grub_status=$?",
+                            "fi",
+                            'if [ "$grub_status" -ne 0 ]; then echo ">> grub-install failed" >&2; fi',
                             "grub-mkconfig -o /boot/grub/grub.cfg || echo '>> grub-mkconfig failed' >&2",
                         ]
                     )
@@ -1684,18 +1849,19 @@ fi
 """
                 )
         elif bl == "systemd-boot":
-            cmds.append("bootctl install || true")
+            atom = "sys-apps/systemd" if cfg.init_system == "systemd" else "sys-apps/systemd-utils"
+            cmds.append(_retry_sigill(atom, "bootctl install"))
         elif bl == "refind":
-            cmds.append("refind-install || true")
+            cmds.append(_retry_sigill("sys-boot/refind", "refind-install"))
         elif bl == "syslinux":
             boot = devices.get("boot") or devices.get("esp") or ""
-            cmds.append(f"syslinux-install_update -iam || syslinux {boot} || true")
+            cmds.append(_retry_sigill("sys-boot/syslinux", f"syslinux-install_update -iam || syslinux {boot}"))
         elif bl == "efistub":
             cmds.append("echo 'EFI stub/UKI selected — kernel installkernel handles the EFI entry' ")
         elif bl == "limine":
-            cmds.append(_limine_install(cfg, devices))
+            cmds.append(_retry_sigill("sys-boot/limine", _limine_install(cfg, devices).strip()))
         elif bl == "lilo":
-            cmds.append("lilo || true")
+            cmds.append(_retry_sigill("sys-boot/lilo", "lilo"))
     return "\n".join(cmds)
 
 

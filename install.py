@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from gentoo_installer import ui
 from gentoo_installer.config import InstallConfig
@@ -49,38 +50,68 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _write_profile(path: str, cfg: InstallConfig, include_secrets: bool = False) -> None:
+    """Create the YAML/JSON profile, including parent directories."""
+    dest = Path(path)
+    try:
+        cfg.save(dest, include_secrets=include_secrets)
+    except OSError as exc:
+        ui.warn(f"Could not write {dest}: {exc}")
+        return
+    ui.ok(f"Wrote {dest.resolve()}")
+
+
 def main() -> int:
     ui.banner()
     args = parse_args()
     ran_wizard = False
+    # The profile has to exist before the wizard finishes. A missing
+    # --config used to raise "No such file or directory" ("not created yet").
     if args.config:
-        cfg = InstallConfig.load(args.config)
-        ui.ok(f"Loaded config {args.config}")
-        if args.dry_run:
-            cfg.dry_run = True
-        if args.resume:
-            cfg.resume = True
-        fill_missing_secrets(cfg)
+        config_path = Path(args.config)
+        if config_path.is_file():
+            cfg = InstallConfig.load(config_path)
+            ui.ok(f"Loaded config {config_path.resolve()}")
+            if args.dry_run:
+                cfg.dry_run = True
+            if args.resume:
+                cfg.resume = True
+            fill_missing_secrets(cfg)
+        else:
+            ui.warn(f"{config_path} is not created yet. Creating it, then starting the wizard.")
+            cfg = InstallConfig()
+            _write_profile(str(config_path), cfg)
+            if args.dry_run:
+                cfg.dry_run = True
+            if args.resume:
+                cfg.resume = True
+            cfg = run_wizard(cfg)
+            ran_wizard = True
+            _write_profile(str(config_path), cfg, include_secrets=args.include_secrets)
     else:
         cfg = InstallConfig()
+        starter = Path("gentoo-install.yaml")
+        if not starter.exists():
+            ui.info("Creating gentoo-install.yaml for this install.")
+            _write_profile(str(starter), cfg)
         if args.dry_run:
             cfg.dry_run = True
         if args.resume:
             cfg.resume = True
         cfg = run_wizard(cfg)
         ran_wizard = True
-        if args.dry_run:
-            cfg.dry_run = True
-        if args.resume:
-            cfg.resume = True
+        _write_profile(str(starter), cfg)
+    if args.dry_run:
+        cfg.dry_run = True
+    if args.resume:
+        cfg.resume = True
     save_path = args.save_config
-    if not save_path and ran_wizard and ui.ask_yes_no("Save these choices as YAML for the next install?", True):
+    if not save_path and ran_wizard and ui.ask_yes_no("Also copy these choices to another YAML path?", False):
         save_path = ui.prompt("Config path", "./gentoo-install.yaml")
     if save_path:
         if args.include_secrets:
             ui.warn("Writing passwords into the config file. Restrict its permissions.")
-        cfg.save(save_path, include_secrets=args.include_secrets)
-        ui.ok(f"Wrote {save_path}")
+        _write_profile(save_path, cfg, include_secrets=args.include_secrets)
     if args.wizard_only:
         ui.info("Wizard-only mode; not executing.")
         return 0
