@@ -890,6 +890,12 @@ def _write_make_conf(cfg: InstallConfig, root: str) -> None:
         "sys-libs/glibc -compile-locales\n",
         keep_existing=False,
     )
+    _write_text(use_dir / "installer", _package_use_text(cfg), keep_existing=False)
+    keywords = _keyword_text(cfg)
+    if keywords.strip():
+        kw_dir = portage / "package.accept_keywords"
+        kw_dir.mkdir(parents=True, exist_ok=True)
+        _write_text(kw_dir / "installer", keywords, keep_existing=False)
 
 
 def _safe_timezone(raw: str) -> str:
@@ -979,6 +985,11 @@ def _write_system_files(cfg: InstallConfig, root: str) -> None:
     envd.mkdir(parents=True, exist_ok=True)
     loc = cfg.locale.strip() or "C.UTF-8"
     _write_text(envd / "02locale", f'LANG="{loc}"\nLC_COLLATE="C"\n', keep_existing=keep)
+    locale_conf = etc / "locale.conf"
+    if locale_conf.is_dir() and not keep:
+        shutil.rmtree(locale_conf)
+    if not locale_conf.is_dir():
+        _write_text(locale_conf, f'LANG="{loc}"\n', keep_existing=keep)
     vc = etc / "vconsole.conf"
     if vc.is_dir() and not keep:
         shutil.rmtree(vc)
@@ -1031,10 +1042,10 @@ def _systemd_unit_test(unit: str) -> str:
     )
 
 
-def _openrc_enable_line(service: str) -> str:
+def _openrc_enable_line(service: str, runlevel: str = "default") -> str:
     """rc-update only after the init script exists, so a missing package is obvious."""
     return (
-        f'if [ -e /etc/init.d/{service} ]; then rc-update add {service} default; '
+        f'if [ -e /etc/init.d/{service} ]; then rc-update add {service} {runlevel}; '
         f'else echo ">> OpenRC service {service} does not exist" >&2; fi'
     )
 
@@ -1047,102 +1058,149 @@ def _systemd_enable_line(service: str) -> str:
     )
 
 
-def _required_tool_repairs(cfg: InstallConfig, loaders: list[str]) -> str:
-    """Re-emerge every tool the later chroot lines call.
+def _service_probe(openrc: bool, init_name: str, unit: str | None = None) -> tuple[str, ...]:
+    """Argv that is true when the OpenRC script or systemd unit is installed."""
+    if openrc:
+        return ("test", "-e", f"/etc/init.d/{init_name}")
+    unit_name = unit or init_name
+    return (
+        "bash",
+        "-c",
+        "test -e /usr/lib/systemd/system/"
+        + unit_name
+        + ".service || test -e /lib/systemd/system/"
+        + unit_name
+        + ".service",
+    )
 
-    Portage stops the rest of a multi-package emerge when one package fails
-    unless --keep-going is set, and even then a package can still be skipped.
-    grub-install, plymouth-set-default-theme, and rc-update then report that
-    the command or service does not exist.
+
+def _emerge_checked_call(atom: str, test: tuple[str, ...]) -> str:
+    args = " ".join(shlex.quote(part) for part in (atom, *test))
+    return f"emerge_checked {args} || true"
+
+
+def _required_tools(cfg: InstallConfig, loaders: list[str]) -> list[tuple[str, tuple[str, ...]]]:
+    """Packages that must be installed before dracut and rc-update run.
+
+    Dracut's host scan calls `btrfs` whenever any mounted filesystem is btrfs
+    (the target root, or the live USB's own mounts, visible through the
+    bind-mounted /proc). Plymouth's default gtk USE fails to compile against
+    gtk without X. OpenRC init scripts are omitted from systemd binpkgs.
     """
-    checks: list[tuple[str, str]] = [("command -v sudo >/dev/null 2>&1", "app-admin/sudo")]
+    tools: list[tuple[str, tuple[str, ...]]] = []
+
+    def add(atom: str, *test: str) -> None:
+        tools.append((atom, test))
+
+    openrc = cfg.init_system == "openrc"
+    if cfg.initramfs == "dracut":
+        # Always, even on ext4: dracut-functions.sh btrfs_devs() runs for every
+        # btrfs mount it can see, and installkernel runs dracut from the kernel ebuild.
+        add("sys-fs/btrfs-progs", "command", "-v", "btrfs")
+        add("sys-apps/kbd", "command", "-v", "loadkeys")
+    fs_cmds = {
+        "ext4": ("mkfs.ext4", "sys-fs/e2fsprogs"),
+        "xfs": ("mkfs.xfs", "sys-fs/xfsprogs"),
+        "btrfs": ("mkfs.btrfs", "sys-fs/btrfs-progs"),
+        "f2fs": ("mkfs.f2fs", "sys-fs/f2fs-tools"),
+        "jfs": ("mkfs.jfs", "sys-fs/jfsutils"),
+        "zfs": ("zfs", "sys-fs/zfs"),
+    }
+    fs_cmd, fs_atom = fs_cmds.get(cfg.filesystem, ("mkfs.ext4", "sys-fs/e2fsprogs"))
+    if fs_atom != "sys-fs/btrfs-progs":
+        add(fs_atom, "command", "-v", fs_cmd)
+    if cfg.firmware == "uefi":
+        add("sys-fs/dosfstools", "command", "-v", "mkfs.vfat")
+    add("app-admin/sudo", "command", "-v", "sudo")
     if "grub" in loaders:
-        checks.append(
-            (
-                "command -v grub-install >/dev/null 2>&1 && command -v grub-mkconfig >/dev/null 2>&1",
-                "sys-boot/grub",
-            )
-        )
+        add("sys-boot/grub", "bash", "-c", "command -v grub-install >/dev/null 2>&1 && command -v grub-mkconfig >/dev/null 2>&1")
         if cfg.firmware == "uefi":
-            checks.append(("command -v efibootmgr >/dev/null 2>&1", "sys-boot/efibootmgr"))
+            add("sys-boot/efibootmgr", "command", "-v", "efibootmgr")
     if "systemd-boot" in loaders:
         boot_atom = "sys-apps/systemd" if cfg.init_system == "systemd" else "sys-apps/systemd-utils"
-        checks.append(("command -v bootctl >/dev/null 2>&1", boot_atom))
+        add(boot_atom, "command", "-v", "bootctl")
     if "refind" in loaders:
-        checks.append(("command -v refind-install >/dev/null 2>&1", "sys-boot/refind"))
+        add("sys-boot/refind", "command", "-v", "refind-install")
     if "syslinux" in loaders:
-        checks.append(("command -v syslinux >/dev/null 2>&1", "sys-boot/syslinux"))
+        add("sys-boot/syslinux", "command", "-v", "syslinux")
     if "limine" in loaders:
-        checks.append(("command -v limine >/dev/null 2>&1", "sys-boot/limine"))
+        add("sys-boot/limine", "command", "-v", "limine")
     if "lilo" in loaders:
-        checks.append(("command -v lilo >/dev/null 2>&1", "sys-boot/lilo"))
+        add("sys-boot/lilo", "command", "-v", "lilo")
+    if cfg.initramfs == "dracut":
+        add("sys-kernel/dracut", "command", "-v", "dracut")
+        add(
+            "sys-kernel/installkernel",
+            "bash",
+            "-c",
+            "command -v installkernel >/dev/null 2>&1 || test -d /usr/lib/kernel/install.d",
+        )
+    if cfg.luks:
+        add("sys-fs/cryptsetup", "command", "-v", "cryptsetup")
     if cfg.plymouth:
-        checks.append(("command -v plymouth-set-default-theme >/dev/null 2>&1", "sys-boot/plymouth"))
-    openrc = cfg.init_system == "openrc"
+        add("sys-boot/plymouth", "command", "-v", "plymouth-set-default-theme")
+    if cfg.wireless:
+        add("net-wireless/iw", "command", "-v", "iw")
+        add("net-wireless/wpa_supplicant", "command", "-v", "wpa_supplicant")
     if cfg.network_stack == "networkmanager":
         if openrc:
-            checks.append(("[ -e /etc/init.d/dbus ]", "sys-apps/dbus"))
-            checks.append(("[ -e /etc/init.d/NetworkManager ]", "net-misc/networkmanager"))
-        else:
-            checks.append((_systemd_unit_test("NetworkManager"), "net-misc/networkmanager"))
+            add("sys-apps/dbus", *_service_probe(True, "dbus"))
+            add("sys-auth/elogind", *_service_probe(True, "elogind"))
+        add("net-misc/networkmanager", *_service_probe(openrc, "NetworkManager"))
     elif cfg.network_stack == "dhcpcd":
-        if openrc:
-            checks.append(("[ -e /etc/init.d/dhcpcd ]", "net-misc/dhcpcd"))
-        else:
-            checks.append((_systemd_unit_test("dhcpcd"), "net-misc/dhcpcd"))
+        add("net-misc/dhcpcd", *_service_probe(openrc, "dhcpcd"))
     if cfg.sshd:
-        if openrc:
-            checks.append(("[ -e /etc/init.d/sshd ]", "net-misc/openssh"))
-        else:
-            checks.append((_systemd_unit_test("sshd"), "net-misc/openssh"))
+        add("net-misc/openssh", *_service_probe(openrc, "sshd"))
     if cfg.chrony:
-        if openrc:
-            checks.append(("[ -e /etc/init.d/chronyd ]", "net-misc/chrony"))
-        else:
-            checks.append((_systemd_unit_test("chronyd"), "net-misc/chrony"))
+        add("net-misc/chrony", *_service_probe(openrc, "chronyd"))
     if cfg.cups:
-        if openrc:
-            checks.append(("[ -e /etc/init.d/cupsd ]", "net-print/cups"))
-        else:
-            checks.append((_systemd_unit_test("cups"), "net-print/cups"))
+        add("net-print/cups", *_service_probe(openrc, "cupsd", "cups"))
     if openrc and cfg.syslog != "none":
-        checks.append((f"[ -e /etc/init.d/{cfg.syslog} ]", f"app-admin/{cfg.syslog}"))
+        add(f"app-admin/{cfg.syslog}", *_service_probe(True, cfg.syslog))
     if openrc and cfg.cron != "none":
         svc = "cronie" if cfg.cron == "cronie" else cfg.cron
-        checks.append((f"[ -e /etc/init.d/{svc} ]", f"sys-process/{cfg.cron}"))
-    if openrc and cfg.zram:
-        checks.append(("[ -e /etc/init.d/zram-init ]", "sys-block/zram-init"))
-    dm = cfg.display_manager
-    if dm == "auto":
-        dm = {
-            "plasma": "sddm",
-            "gnome": "gdm",
-            "xfce": "lightdm",
-            "mate": "lightdm",
-            "cinnamon": "lightdm",
-            "i3": "lightdm",
-        }.get(cfg.desktop, "none")
-    dm_atoms = {"sddm": "x11-misc/sddm", "gdm": "gnome-base/gdm", "lightdm": "x11-misc/lightdm"}
-    if dm in dm_atoms:
+        add(f"sys-process/{cfg.cron}", *_service_probe(True, svc))
+    if cfg.zram:
         if openrc:
-            checks.append((f"[ -e /etc/init.d/{dm} ]", dm_atoms[dm]))
+            add("sys-block/zram-init", *_service_probe(True, "zram-init"))
         else:
-            checks.append((_systemd_unit_test(dm), dm_atoms[dm]))
-    lines = ["echo '>> repair tools that must exist before bootloader and services'"]
-    for test, atom in checks:
-        quoted = shlex.quote(atom)
+            add(
+                "sys-apps/zram-generator",
+                "bash",
+                "-c",
+                "test -e /usr/lib/systemd/system-generators/zram-generator || test -e /lib/systemd/system-generators/zram-generator",
+            )
+    return tools
+
+
+def _required_tool_repairs(cfg: InstallConfig, loaders: list[str]) -> str:
+    """Install boot and service packages one failure at a time, before the kernel.
+
+    A masked theme or a Plymouth build error used to sit in the same emerge
+    as NetworkManager, chrony, rsyslog, cronie, and zram-init. Portage then
+    aborted the whole calculation and rc-update reported every service missing.
+    """
+    tools = _required_tools(cfg, loaders)
+    lines = ["echo '>> install tools before dracut and OpenRC services'"]
+    if tools:
+        atoms = " ".join(shlex.quote(atom) for atom, _test in tools)
+        lines.append(
+            "emerge --ask=n --keep-going --binpkg-respect-use=y $NR "
+            + atoms
+            + " || echo '>> some required packages failed; retrying one at a time' >&2"
+        )
+    for atom, test in tools:
+        lines.append(_emerge_checked_call(atom, test))
+    openrc = cfg.init_system == "openrc"
+    if cfg.network_stack == "networkmanager" and openrc:
         lines.append(
             "\n".join(
                 [
-                    f"if ! {{ {test}; }}; then",
-                    f'  echo ">> {atom} is not installed"',
-                    f"  emerge --ask=n {quoted}",
-                    "  _st=$?",
-                    '  if [ "$_st" -eq 132 ]; then disable_binpkgs; fi',
-                    "fi",
-                    f"if ! {{ {test}; }}; then",
-                    f'  echo ">> {atom} still missing; building from source"',
-                    f"  emerge --ask=n --usepkg=n --getbinpkg=n {quoted} || echo '>> emerge failed: {atom}' >&2",
+                    "if ! test -e /etc/init.d/NetworkManager; then",
+                    '  echo ">> NetworkManager init script still missing; installing dbus and elogind first"',
+                    "  emerge --ask=n --binpkg-respect-use=y sys-apps/dbus || true",
+                    "  emerge --ask=n --binpkg-respect-use=y sys-auth/elogind || true",
+                    "  emerge --ask=n --selective=n --usepkg=n --getbinpkg=n net-misc/networkmanager || echo '>> emerge failed: net-misc/networkmanager' >&2",
                     "fi",
                 ]
             )
@@ -1285,6 +1343,42 @@ emerge_with_source() {
   echo ">> emerge failed ($status); required tools are rebuilt from source next" >&2
   return "$status"
 }
+
+# emerge_checked ATOM TEST...
+# Install ATOM, then rebuild from source if TEST still fails. A binpkg built
+# with the wrong USE (systemd on an OpenRC machine, gtk Plymouth) can be
+# recorded as installed and still omit the init script or plymouth-set-default-theme.
+# --selective=n reinstalls that already-recorded package.
+emerge_checked() {
+  local atom="$1"
+  shift
+  if "$@"; then
+    echo ">> $atom is installed"
+    return 0
+  fi
+  echo ">> installing $atom"
+  emerge --ask=n --keep-going --binpkg-respect-use=y "$atom"
+  local st=$?
+  if [ "$st" -eq 132 ]; then
+    disable_binpkgs
+    emerge --ask=n --keep-going --usepkg=n --getbinpkg=n "$atom" || true
+  fi
+  if "$@"; then
+    return 0
+  fi
+  echo ">> $atom still missing; building from source"
+  emerge --ask=n --usepkg=n --getbinpkg=n --newuse "$atom" || true
+  if "$@"; then
+    return 0
+  fi
+  echo ">> forcing source rebuild of $atom"
+  emerge --ask=n --selective=n --usepkg=n --getbinpkg=n "$atom" || echo ">> emerge failed: $atom" >&2
+  if "$@"; then
+    return 0
+  fi
+  echo ">> still missing after emerge: $atom" >&2
+  return 1
+}
 """
 
 
@@ -1331,6 +1425,83 @@ def _grub_uefi_install(target: str) -> str:
             "fi",
         ]
     )
+
+
+def _package_use_text(cfg: InstallConfig) -> str:
+    """Per-package USE so OpenRC init scripts and Plymouth can actually be installed.
+
+    Plymouth's default gtk USE fails to compile when gtk+ is built without X
+    (Gentoo bug 850400). The spinner theme needs drm and pango, not gtk.
+    A systemd binpkg of NetworkManager, dbus, or Plymouth does not ship
+    /etc/init.d, so OpenRC installs must not reuse that USE.
+    """
+    wifi = "wifi" if cfg.wireless else "-wifi"
+    if cfg.init_system == "openrc":
+        lines = [
+            "sys-boot/plymouth drm pango udev -gtk -systemd",
+            "sys-apps/dbus -systemd",
+            f"net-misc/networkmanager elogind -systemd {wifi} tools",
+            "sys-auth/polkit elogind -systemd",
+        ]
+    else:
+        lines = [
+            "sys-boot/plymouth drm pango udev systemd -gtk",
+            "sys-apps/dbus systemd",
+            f"net-misc/networkmanager systemd -elogind {wifi} tools",
+        ]
+    return "\n".join(lines) + "\n"
+
+
+def _keyword_text(cfg: InstallConfig) -> str:
+    """Unmask packages the wizard offers that are still ~arch."""
+    if cfg.testing_keywords:
+        return ""
+    keyword = "~amd64" if cfg.architecture == "amd64" else "~arm64"
+    lines = []
+    if cfg.plymouth and cfg.plymouth_openrc_plugin and cfg.init_system == "openrc":
+        # plymouth-openrc-plugin is keyworded ~arch. Leaving it masked aborts the
+        # whole emerge calculation, so NetworkManager and chrony never install.
+        lines.append(f"sys-boot/plymouth-openrc-plugin {keyword}")
+    if not lines:
+        return ""
+    return "\n".join(lines) + "\n"
+
+
+def _dracut_conf_text(cfg: InstallConfig) -> str:
+    """Dracut settings read by installkernel while the kernel package is merged.
+
+    Without i18n_vars, dracut prints "i18n_vars not set! Please set up i18n_vars
+    in configuration file." The keymap and locale files are the OpenRC ones this
+    installer writes. btrfs-progs has to be installed before this runs; omitting
+    the module on a non-btrfs target keeps the host's btrfs mounts out of the image.
+    """
+    lines = [
+        'i18n_vars="/etc/conf.d/keymaps:keymap-KEYMAP /etc/locale.conf:LANG"',
+        'i18n_default_font="default8x16"',
+        'kbddir="/usr/share"',
+    ]
+    modules: list[str] = []
+    omit: list[str] = []
+    if cfg.luks:
+        modules.extend(["crypt", "dm"])
+    if cfg.filesystem == "btrfs" or cfg.layout == "btrfs-subvols":
+        modules.append("btrfs")
+    else:
+        omit.append("btrfs")
+    if cfg.plymouth:
+        modules.append("plymouth")
+    if modules:
+        lines.append(f'add_dracutmodules+=" {" ".join(modules)} "')
+    if omit:
+        lines.append(f'omit_dracutmodules+=" {" ".join(omit)} "')
+    return "\n".join(lines) + "\n"
+
+
+def _safe_token(raw: str, fallback: str) -> str:
+    text = (raw or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9_.@+-]+", text):
+        return text
+    return fallback
 
 
 def render_chroot_script(cfg: InstallConfig, devices: dict[str, str]) -> str:
@@ -1440,13 +1611,16 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
     if cfg.initramfs == "dracut":
         boot_pkgs.append("sys-kernel/dracut")
         boot_pkgs.append("sys-kernel/installkernel")
+    theme_pkgs: list[str] = []
     if cfg.plymouth:
         boot_pkgs.append("sys-boot/plymouth")
+        # Themes and the ~arch OpenRC plugin are not in the pre-kernel emerge.
+        # A masked theme aborts Portage's calculation and skips every service.
         for extra_theme in catalog.plymouth_packages_for(
             cfg.plymouth_themes or [cfg.plymouth_theme],
             cfg.plymouth_openrc_plugin and cfg.init_system == "openrc",
         ):
-            boot_pkgs.append(extra_theme.atom)
+            theme_pkgs.append(extra_theme.atom)
     if cfg.luks:
         boot_pkgs.append("sys-fs/cryptsetup")
     fs_tools = {
@@ -1462,13 +1636,25 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
     boot_pkgs.append("app-admin/sudo")
 
     de_pkgs = _desktop_packages(cfg)
-    all_extra = " ".join(
-        dict.fromkeys(
-            a
-            for a in boot_pkgs + net_pkgs + extra_fw + de_pkgs + cfg.extra_packages + cfg.window_managers
-            if a and not a.startswith("flatpak-app/")
-        )
-    )
+    required_atoms = [atom for atom, _test in _required_tools(cfg, loaders)]
+    required_set = set(required_atoms)
+    # Anything the older package lists named that the checker does not probe
+    # still has to be installed. Themes stay out of this list.
+    missed = [
+        atom
+        for atom in dict.fromkeys(boot_pkgs + net_pkgs)
+        if atom and atom not in required_set and atom not in theme_pkgs
+    ]
+    late_atoms = [
+        atom
+        for atom in dict.fromkeys(theme_pkgs + de_pkgs + cfg.extra_packages + cfg.window_managers)
+        if atom and not atom.startswith("flatpak-app/") and atom not in required_set
+    ]
+    fetch_atoms_extra = list(dict.fromkeys(required_atoms + missed + extra_fw + late_atoms))
+    all_extra = " ".join(fetch_atoms_extra)
+    late_extra = " ".join(late_atoms)
+    missed_line = " ".join(shlex.quote(atom) for atom in missed)
+    firmware_line = " ".join(shlex.quote(atom) for atom in extra_fw)
     kernel_atom = f"sys-kernel/{pkgs_kernel}"
     # gentoo-kernel is the source dist-kernel. Fetch it even when the selected
     # kernel is a binpkg or gentoo-sources, so a SIGILL or a sources-only tree
@@ -1517,8 +1703,54 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
 
     enable_openrc = "\n".join(_openrc_enable_line(s) for s in openrc_services)
     enable_systemd = "\n".join(_systemd_enable_line(s) for s in systemd_services)
+    boot_enable = ""
+    if cfg.init_system == "openrc" and cfg.network_stack == "networkmanager":
+        boot_enable = _openrc_enable_line("elogind", "boot")
+    rc_plymouth = ""
+    if cfg.plymouth and cfg.init_system == "openrc":
+        rc_plymouth = "append_once /etc/rc.conf 'rc_interactive=\"NO\"'"
     repair_tools = _required_tool_repairs(cfg, loaders)
     final_checks = _final_tool_checks(cfg, loaders)
+    package_use = _package_use_text(cfg).strip()
+    accept_keywords = _keyword_text(cfg).strip()
+    dracut_conf = _dracut_conf_text(cfg).strip() if cfg.initramfs == "dracut" else ""
+    locale_safe = _safe_token(cfg.locale, "en_US.UTF-8")
+    keymap_safe = _safe_token(cfg.keymap, "us")
+    keyword_block = ""
+    if accept_keywords:
+        keyword_block = f"""cat > /etc/portage/package.accept_keywords/installer << 'EOF'
+{accept_keywords}
+EOF
+"""
+    dracut_block = ""
+    if dracut_conf:
+        dracut_block = f"""mkdir -p /etc/dracut.conf.d /etc/conf.d
+cat > /etc/dracut.conf.d/gentoo-live.conf << 'EOF'
+{dracut_conf}
+EOF
+if [ ! -s /etc/locale.conf ]; then echo 'LANG="{locale_safe}"' > /etc/locale.conf; fi
+if [ ! -s /etc/conf.d/keymaps ]; then echo 'keymap="{keymap_safe}"' > /etc/conf.d/keymaps; fi
+"""
+    firmware_block = ""
+    if firmware_line:
+        firmware_block = (
+            'echo ">> firmware"\n'
+            f"emerge --ask=n --keep-going --binpkg-respect-use=y $NR {firmware_line} "
+            '|| echo ">> firmware emerge failed" >&2\n'
+        )
+    missed_block = ""
+    if missed_line:
+        missed_block = (
+            'echo ">> remaining service packages"\n'
+            f"emerge --ask=n --keep-going --binpkg-respect-use=y $NR {missed_line} "
+            '|| echo ">> some service packages failed" >&2\n'
+        )
+    late_block = ""
+    if late_extra:
+        late_block = (
+            'echo ">> emerge desktop, themes, and extra packages"\n'
+            f"emerge_with_source {late_extra} || echo '>> some optional packages failed' >&2\n"
+        )
     nm_cleanup = ""
     if cfg.init_system == "openrc" and cfg.network_stack == "networkmanager":
         nm_cleanup = """
@@ -1597,9 +1829,28 @@ EOF
 """
         else:
             zram_block = """
+emerge_checked sys-block/zram-init test -e /etc/init.d/zram-init || true
 if [ ! -e /etc/init.d/zram-init ]; then
-  echo ">> OpenRC service zram-init is missing; building sys-block/zram-init from source"
-  emerge --ask=n --usepkg=n --getbinpkg=n sys-block/zram-init || echo ">> zram-init source build failed" >&2
+  echo ">> writing a small OpenRC zram-init service"
+  cat > /etc/init.d/zram-init << 'ZRAM'
+#!/sbin/openrc-run
+description="Compressed RAM swap"
+start() {
+  modprobe zram || return 1
+  local kib bytes
+  kib=$(awk '/MemTotal/ {print int($2/2)}' /proc/meminfo)
+  bytes=$((kib * 1024))
+  echo zstd > /sys/block/zram0/comp_algorithm 2>/dev/null || true
+  echo "$bytes" > /sys/block/zram0/disksize || return 1
+  mkswap /dev/zram0 || return 1
+  swapon /dev/zram0
+}
+stop() {
+  swapoff /dev/zram0 || true
+  echo 1 > /sys/block/zram0/reset 2>/dev/null || true
+}
+ZRAM
+  chmod 755 /etc/init.d/zram-init
 fi
 cat > /etc/conf.d/zram-init << 'EOF'
 load_on_start=yes
@@ -1670,6 +1921,7 @@ emerge --ask=n --emptytree @system || true
 set +eu
 unset FEATURES
 unset PORTAGE_FEATURES
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
 export LANG=C
 export LC_ALL=C
 export DEBUGINFOD_URLS="${{DEBUGINFOD_URLS:-}}"
@@ -1678,6 +1930,12 @@ export DEBUGINFOD_IMA_CERT_PATH="${{DEBUGINFOD_IMA_CERT_PATH:-}}"
 echo "=== gentoo-live-installer chroot rev {CHROOT_SCRIPT_REV} ==="
 {resume_prelude}
 mkdir -p /etc/portage/package.use /etc/portage/package.accept_keywords /etc/portage/package.license /etc/portage/profile
+echo ">> USE flags and dracut configuration"
+cat > /etc/portage/package.use/installer << 'EOF'
+{package_use}
+EOF
+{keyword_block}
+{dracut_block}
 cat > /root/.bashrc << 'BASHRC'
 unset FEATURES
 export PS1="(chroot) ${{PS1:-}}"
@@ -1732,16 +1990,19 @@ fi
 unset FEATURES
 echo ">> fetch kernel and package sources"
 emerge --ask=n --fetchonly --usepkg=n --getbinpkg=n --keep-going {fetch_line} || echo ">> some distfiles were not fetched; emerge will try again" >&2
-echo ">> emerge kernel and selected packages"
-# --keep-going: a kernel, Plasma, or Firefox failure must not skip sudo,
-# GRUB, Plymouth, NetworkManager, chrony, rsyslog, cronie, or zram-init.
-# Exit 132 (Illegal instruction) rebuilds the same atoms from those distfiles.
-emerge_with_source {kernel_atom} {all_extra} || echo ">> one or more packages failed; repairing required tools" >&2
+# btrfs-progs, kbd, Plymouth, and OpenRC services must exist before the kernel
+# package's installkernel hook runs dracut. A later desktop failure must not
+# be in that same emerge.
+{repair_tools}
+{missed_block}
+{firmware_block}
+echo ">> emerge kernel"
+emerge_with_source {kernel_atom} || echo ">> kernel emerge failed" >&2
 if ! ls /boot/vmlinuz* >/dev/null 2>&1; then
   echo ">> no kernel image in /boot; building sys-kernel/gentoo-kernel from source"
   emerge --ask=n --usepkg=n --getbinpkg=n sys-kernel/gentoo-kernel || echo ">> gentoo-kernel source build failed" >&2
 fi
-{repair_tools}
+{late_block}
 {stores_block}
 
 {swapfile}
@@ -1755,8 +2016,10 @@ fi
 
 if [ "{cfg.init_system}" = "openrc" ]; then
 {textwrap.indent(nm_cleanup, "  ")}
+{textwrap.indent(boot_enable, "  ")}
 {textwrap.indent(enable_openrc, "  ")}
   append_once /etc/rc.conf 'rc_parallel="YES"'
+  {rc_plymouth}
 else
 {textwrap.indent(enable_systemd, "  ")}
 fi
@@ -1847,6 +2110,9 @@ sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT="quiet splas
     # Theme must be selected before dracut packs the initramfs, and grub.cfg
     # must be regenerated after that initramfs exists.
     refresh = """
+if ! command -v btrfs >/dev/null 2>&1; then
+  emerge --ask=n --binpkg-respect-use=y sys-fs/btrfs-progs || true
+fi
 if command -v dracut >/dev/null 2>&1; then
   kver=$(ls -1 /lib/modules 2>/dev/null | tail -n1 || true)
   if [ -n "$kver" ]; then
@@ -1863,13 +2129,12 @@ else
 fi
 """
     return f"""
-if ! command -v plymouth-set-default-theme >/dev/null 2>&1; then
-  echo ">> installing sys-boot/plymouth"
-  emerge --ask=n sys-boot/plymouth || emerge --ask=n --usepkg=n --getbinpkg=n sys-boot/plymouth || echo ">> plymouth emerge failed" >&2
-fi
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+emerge_checked sys-boot/plymouth command -v plymouth-set-default-theme || true
 if command -v plymouth-set-default-theme >/dev/null 2>&1; then
   plymouth-set-default-theme {shlex.quote(theme_name)} || echo ">> plymouth theme failed" >&2
 else
+  echo ">> plymouth emerge failed" >&2
   echo ">> plymouth-set-default-theme does not exist" >&2
 fi
 {grub}
