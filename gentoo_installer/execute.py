@@ -106,9 +106,24 @@ def execute(cfg: InstallConfig) -> None:
         ("chroot_install", lambda: phase_chroot(cfg, runner, root)),
         ("done", lambda: phase_done(cfg, runner, root)),
     ]
+    # A recorded chroot_install used to be skipped, so resume died on the same
+    # missing packages. These phases are safe to repeat: apt/emerge skip what
+    # is already installed, and nothing here formats a disk.
+    rerun_on_resume = {"host_packages", "network", "chroot_install"}
+    if cfg.resume:
+        cfg.wipe_disk = False
+        ui.info(
+            "Resume: package installs will run again. "
+            "Existing files stay. Disks are not formatted or repartitioned."
+        )
     ui.info(f"Oops Installer rev {INSTALLER_REV}")
     for name, fn in phases:
         ui.chapter("→", f"Phase: {name}", "https://wiki.gentoo.org/wiki/Handbook:AMD64")
+        if cfg.resume and name in rerun_on_resume:
+            ui.info(f"Resume: running {name} again.")
+            fn()
+            state.mark(name)
+            continue
         if state.skip(name, cfg.resume):
             # Skip means "already done", not "leave the target unmounted".
             # --config/--resume after a crash often still has /mnt/gentoo mounted;
@@ -155,7 +170,9 @@ def phase_network(cfg: InstallConfig, runner: Runner) -> None:
         if not cfg.dry_run:
             path.write_text(conf + "\n", encoding="utf-8")
             path.chmod(0o600)
-        runner.shell(f"wpa_supplicant -B -i {shlex.quote(cfg.wifi_iface)} -c /tmp/wpa-gentoo.conf")
+        runner.shell(
+            f"wpa_supplicant -B -i {shlex.quote(cfg.wifi_iface)} -c /tmp/wpa-gentoo.conf || true"
+        )
         runner.shell(f"dhclient {shlex.quote(cfg.wifi_iface)} || dhcpcd {shlex.quote(cfg.wifi_iface)} || true")
     elif cfg.network_mode == "static":
         iface = cfg.static_iface or detect.default_nic(prefer_wireless=False)
@@ -622,7 +639,12 @@ def phase_stage3(cfg: InstallConfig, runner: Runner, root: str) -> None:
             runner.shell(
                 f"gpg --verify {shlex.quote(root + '/' + tarball + '.asc')} {shlex.quote(root + '/' + tarball)}"
             )
-    runner.shell(f"tar xpvf {shlex.quote(root + '/' + tarball)} --xattrs-include='*.*' --numeric-owner -C {shlex.quote(root)}")
+    # --skip-old-files: a partial extract must not replace files already on the target.
+    skip_old = "--skip-old-files " if cfg.resume else ""
+    runner.shell(
+        f"tar xpvf {shlex.quote(root + '/' + tarball)} {skip_old}"
+        f"--xattrs-include='*.*' --numeric-owner -C {shlex.quote(root)}"
+    )
     ui.ok("Stage3 extracted")
 
 
@@ -822,6 +844,23 @@ def _make_conf_text(cfg: InstallConfig) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _write_text(path: Path, text: str, *, keep_existing: bool) -> None:
+    """Write path. Identical contents are left alone. keep_existing skips any file already there."""
+    if path.is_file():
+        current = path.read_text(encoding="utf-8", errors="replace")
+        if current == text:
+            ui.info(f"Keeping identical file {path}")
+            return
+        if keep_existing:
+            ui.info(f"Keeping existing file {path}")
+            return
+    if path.is_dir():
+        ui.warn(f"Not replacing directory {path}")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
 def _write_make_conf(cfg: InstallConfig, root: str) -> None:
     text = _make_conf_text(cfg)
     portage = Path(root) / "etc" / "portage"
@@ -829,7 +868,9 @@ def _write_make_conf(cfg: InstallConfig, root: str) -> None:
     dest = portage / "make.conf"
     if dest.is_dir():
         dest = dest / "99gentoo-live-installer"
-    dest.write_text(text, encoding="utf-8")
+    # make.conf is how emerge is configured. Refresh it when the text changed
+    # so a resume does not keep a broken FEATURES line. Identical files are kept.
+    _write_text(dest, text, keep_existing=False)
     # FEATURES is incremental: a leftover /etc/make.conf would still merge the
     # unknown token even after /etc/portage/make.conf is clean.
     legacy = Path(root) / "etc" / "make.conf"
@@ -844,7 +885,11 @@ def _write_make_conf(cfg: InstallConfig, root: str) -> None:
     use_dir = portage / "package.use"
     use_dir.mkdir(parents=True, exist_ok=True)
     # compile-locales makes glibc build every locale in the source tree (~500).
-    (use_dir / "00glibc-locales").write_text("sys-libs/glibc -compile-locales\n", encoding="utf-8")
+    _write_text(
+        use_dir / "00glibc-locales",
+        "sys-libs/glibc -compile-locales\n",
+        keep_existing=False,
+    )
 
 
 def _safe_timezone(raw: str) -> str:
@@ -896,41 +941,49 @@ def _write_system_files(cfg: InstallConfig, root: str) -> None:
     rootp = Path(root)
     etc = rootp / "etc"
     etc.mkdir(parents=True, exist_ok=True)
-    (etc / "hostname").write_text(cfg.hostname + "\n", encoding="utf-8")
+    keep = cfg.resume
+    _write_text(etc / "hostname", cfg.hostname + "\n", keep_existing=keep)
     confd = etc / "conf.d"
     confd.mkdir(parents=True, exist_ok=True)
-    (confd / "hostname").write_text(f'hostname="{cfg.hostname}"\n', encoding="utf-8")
-    (confd / "keymaps").write_text(f'keymap="{cfg.keymap}"\n', encoding="utf-8")
+    _write_text(confd / "hostname", f'hostname="{cfg.hostname}"\n', keep_existing=keep)
+    _write_text(confd / "keymaps", f'keymap="{cfg.keymap}"\n', keep_existing=keep)
     tz = _safe_timezone(cfg.timezone)
-    (etc / "timezone").write_text(tz + "\n", encoding="utf-8")
+    _write_text(etc / "timezone", tz + "\n", keep_existing=keep)
     localtime = etc / "localtime"
-    try:
-        if localtime.exists() or localtime.is_symlink():
-            localtime.unlink()
-        localtime.symlink_to(f"/usr/share/zoneinfo/{tz}")
-    except OSError:
-        ui.warn(f"Could not link /etc/localtime to zoneinfo/{tz}")
+    if keep and (localtime.exists() or localtime.is_symlink()):
+        ui.info(f"Keeping existing file {localtime}")
+    else:
+        try:
+            if localtime.exists() or localtime.is_symlink():
+                localtime.unlink()
+            localtime.symlink_to(f"/usr/share/zoneinfo/{tz}")
+        except OSError:
+            ui.warn(f"Could not link /etc/localtime to zoneinfo/{tz}")
     lines = _locale_gen_lines(cfg)
     loc_gen = etc / "locale.gen"
     loc_gen_d = etc / "locale.gen.d"
-    if loc_gen.is_dir():
-        shutil.rmtree(loc_gen)
-    if loc_gen_d.is_dir():
-        shutil.rmtree(loc_gen_d)
-    loc_gen.write_text(
+    locale_body = (
         "# generated by gentoo-live-installer — only these locales, not the full glibc set\n"
         + "\n".join(lines)
-        + ("\n" if lines else ""),
-        encoding="utf-8",
+        + ("\n" if lines else "")
     )
+    if keep and (loc_gen.exists() or loc_gen_d.exists()):
+        ui.info("Keeping existing locale.gen")
+    else:
+        if loc_gen.is_dir():
+            shutil.rmtree(loc_gen)
+        if loc_gen_d.is_dir():
+            shutil.rmtree(loc_gen_d)
+        _write_text(loc_gen, locale_body, keep_existing=False)
     envd = etc / "env.d"
     envd.mkdir(parents=True, exist_ok=True)
     loc = cfg.locale.strip() or "C.UTF-8"
-    (envd / "02locale").write_text(f'LANG="{loc}"\nLC_COLLATE="C"\n', encoding="utf-8")
+    _write_text(envd / "02locale", f'LANG="{loc}"\nLC_COLLATE="C"\n', keep_existing=keep)
     vc = etc / "vconsole.conf"
-    if vc.is_dir():
+    if vc.is_dir() and not keep:
         shutil.rmtree(vc)
-    vc.write_text(f"KEYMAP={cfg.keymap}\n", encoding="utf-8")
+    if not vc.is_dir():
+        _write_text(vc, f"KEYMAP={cfg.keymap}\n", keep_existing=keep)
     ui.ok("Wrote hostname, timezone, keymap, locale.gen, and env.d/02locale")
 
 
@@ -1159,6 +1212,35 @@ def _final_tool_checks(cfg: InstallConfig, loaders: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _resume_prelude(cfg: InstallConfig) -> str:
+    """Keep files already on the target, and skip emerge of installed packages.
+
+    --noreplace leaves an already-merged package's files alone and still
+    installs anything that is missing. append_once does not duplicate a line
+    that is already in a config file. Stage3's stock /etc/fstab is not treated
+    as ours; a fstab this installer already wrote is kept.
+    """
+    flag = "1" if cfg.resume else "0"
+    return f"""
+KEEP_EXISTING={flag}
+NR=
+if [ "$KEEP_EXISTING" = 1 ]; then
+  NR="--noreplace"
+  echo ">> resume: keep files already on the target; emerge skips packages already installed"
+fi
+append_once() {{
+  local file="$1"
+  local line="$2"
+  mkdir -p "$(dirname "$file")"
+  if [ -f "$file" ] && grep -qxF "$line" "$file"; then
+    echo ">> skip existing line in $file"
+    return 0
+  fi
+  echo "$line" >> "$file"
+}}
+"""
+
+
 def _source_setup_script() -> str:
     """Bash helpers: refuse v3 binpkgs on older CPUs, and rebuild after SIGILL.
 
@@ -1189,7 +1271,7 @@ emerge_with_source() {
   # Distfiles are fetched even when a binpkg will be installed, so a later
   # Illegal instruction can be rebuilt without another mirror lookup.
   emerge --ask=n --fetchonly --usepkg=n --getbinpkg=n --keep-going "$@" || echo ">> some distfiles were not fetched" >&2
-  emerge --ask=n --keep-going "$@"
+  emerge --ask=n --keep-going $NR "$@"
   status=$?
   if [ "$status" -eq 0 ]; then
     return 0
@@ -1269,7 +1351,7 @@ EOF
 """
     kw_arch = "amd64" if cfg.architecture == "amd64" else "arm64"
     keywords = (
-        f'echo "*/* ~{kw_arch}" >> /etc/portage/package.accept_keywords/testing'
+        f"append_once /etc/portage/package.accept_keywords/testing '*/* ~{kw_arch}'"
         if cfg.testing_keywords
         else ""
     )
@@ -1398,6 +1480,7 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
     if all_extra:
         fetch_line = f"{fetch_line} {all_extra}"
     source_setup = _source_setup_script()
+    resume_prelude = _resume_prelude(cfg)
 
     dm = cfg.display_manager
     if dm == "auto":
@@ -1448,13 +1531,22 @@ done
 
     installkernel_conf = ""
     if cfg.bootloader == "grub":
-        installkernel_conf = "echo 'sys-kernel/installkernel grub dracut' >> /etc/portage/package.use/installkernel"
+        installkernel_conf = (
+            "append_once /etc/portage/package.use/installkernel 'sys-kernel/installkernel grub dracut'"
+        )
     elif cfg.bootloader == "systemd-boot":
-        installkernel_conf = "echo 'sys-kernel/installkernel systemd systemd-boot dracut' >> /etc/portage/package.use/installkernel"
+        installkernel_conf = (
+            "append_once /etc/portage/package.use/installkernel "
+            "'sys-kernel/installkernel systemd systemd-boot dracut'"
+        )
     elif cfg.uki or cfg.bootloader == "efistub":
-        installkernel_conf = "echo 'sys-kernel/installkernel dracut uki' >> /etc/portage/package.use/installkernel"
+        installkernel_conf = (
+            "append_once /etc/portage/package.use/installkernel 'sys-kernel/installkernel dracut uki'"
+        )
     else:
-        installkernel_conf = "echo 'sys-kernel/installkernel dracut' >> /etc/portage/package.use/installkernel"
+        installkernel_conf = (
+            "append_once /etc/portage/package.use/installkernel 'sys-kernel/installkernel dracut'"
+        )
 
     grub_install = _install_bootloaders(cfg, devices, loaders)
 
@@ -1527,7 +1619,7 @@ if [ ! -f /swapfile ]; then
   chmod 600 /swapfile
   mkswap /swapfile
 fi
-echo '/swapfile none swap sw 0 0' >> /etc/fstab
+append_once /etc/fstab '/swapfile none swap sw 0 0'
 """
 
     tpm_script = ""
@@ -1584,7 +1676,7 @@ export DEBUGINFOD_URLS="${{DEBUGINFOD_URLS:-}}"
 export DEBUGINFOD_CERT_PATH="${{DEBUGINFOD_CERT_PATH:-}}"
 export DEBUGINFOD_IMA_CERT_PATH="${{DEBUGINFOD_IMA_CERT_PATH:-}}"
 echo "=== gentoo-live-installer chroot rev {CHROOT_SCRIPT_REV} ==="
-
+{resume_prelude}
 mkdir -p /etc/portage/package.use /etc/portage/package.accept_keywords /etc/portage/package.license /etc/portage/profile
 cat > /root/.bashrc << 'BASHRC'
 unset FEATURES
@@ -1604,10 +1696,10 @@ echo ">> sync Portage tree"
 unset FEATURES
 {bootstrap}
 echo ">> emerge Portage"
-emerge --ask=n --oneshot --verbose sys-apps/portage || true
+emerge --ask=n --oneshot --verbose $NR sys-apps/portage || true
 unset FEATURES
 {overlay_block}
-emerge --ask=n --oneshot --verbose sys-apps/portage || true
+emerge --ask=n --oneshot --verbose $NR sys-apps/portage || true
 unset FEATURES
 echo ">> eselect profile"
 eselect profile set {shlex.quote(cfg.profile)} || eselect profile set --force {shlex.quote(cfg.profile)} || true
@@ -1615,7 +1707,7 @@ if command -v mirrorselect >/dev/null 2>&1; then
   mirrorselect -s3 -b10 || true
 fi
 echo ">> emerge @world"
-emerge --verbose --update --deep --newuse @world
+emerge --verbose --update --deep --newuse $NR @world
 world_status=$?
 if [ "$world_status" -eq 132 ]; then
   echo ">> @world died with Illegal instruction; rebuilding from source"
@@ -1623,14 +1715,18 @@ if [ "$world_status" -eq 132 ]; then
   emerge --verbose --update --deep --newuse --usepkg=n --getbinpkg=n @world || echo ">> @world source rebuild failed" >&2
 fi
 unset FEATURES
-if command -v cpuid2cpuflags >/dev/null 2>&1 || emerge --ask=n app-portage/cpuid2cpuflags; then
+if command -v cpuid2cpuflags >/dev/null 2>&1 || emerge --ask=n $NR app-portage/cpuid2cpuflags; then
   echo "*/* $(cpuid2cpuflags)" > /etc/portage/package.use/00cpu-flags || true
 fi
 
 echo ">> fstab"
+if [ "$KEEP_EXISTING" = 1 ] && grep -q 'generated by gentoo-live-installer' /etc/fstab 2>/dev/null; then
+  echo ">> skip existing /etc/fstab"
+else
 cat > /etc/fstab << 'FSTAB'
 {fstab.strip()}
 FSTAB
+fi
 {crypttab_block}
 
 unset FEATURES
@@ -1660,7 +1756,7 @@ fi
 if [ "{cfg.init_system}" = "openrc" ]; then
 {textwrap.indent(nm_cleanup, "  ")}
 {textwrap.indent(enable_openrc, "  ")}
-  echo 'rc_parallel="YES"' >> /etc/rc.conf || true
+  append_once /etc/rc.conf 'rc_parallel="YES"'
 else
 {textwrap.indent(enable_systemd, "  ")}
 fi
@@ -1724,7 +1820,9 @@ def _overlay_script(cfg: InstallConfig) -> str:
         lines.append(f"eselect repository enable {qov} || true")
         lines.append("unset FEATURES")
         lines.append(f"emaint sync --repo {qov} || true")
-        lines.append(f'echo "*/*::{ov} {arch_kw}" >> /etc/portage/package.accept_keywords/overlays')
+        lines.append(
+            f"append_once /etc/portage/package.accept_keywords/overlays '*/*::{ov} {arch_kw}'"
+        )
     return "\n".join(lines) + "\n"
 
 

@@ -41,7 +41,7 @@ def fill_missing_secrets(cfg: InstallConfig) -> None:
             + "."
         )
         if ui.ask_yes_no(
-            "Resume (skip finished phases; do not wipe or remake filesystems)?",
+            "Resume (re-run package installs, keep files already on the disk, do not format or repartition)?",
             True,
         ):
             cfg.resume = True
