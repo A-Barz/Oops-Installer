@@ -765,6 +765,8 @@ def _make_conf_text(cfg: InstallConfig) -> str:
         use.append("systemd")
     else:
         use.append("elogind")
+    if cfg.network_stack == "networkmanager":
+        use.append("networkmanager")
     if cfg.hardened_flags:
         use.extend(["hardened", "pie", "ssp"])
     if cfg.selinux:
@@ -959,6 +961,193 @@ def phase_done(cfg: InstallConfig, runner: Runner, root: str) -> None:
     ui.info("Remove the Ubuntu live USB so the machine boots from the Gentoo disk.")
 
 
+def _systemd_unit_test(unit: str) -> str:
+    """True when unit is installed under either merged-/usr or /lib."""
+    return (
+        f"[ -e /usr/lib/systemd/system/{unit}.service ] || "
+        f"[ -e /lib/systemd/system/{unit}.service ]"
+    )
+
+
+def _openrc_enable_line(service: str) -> str:
+    """rc-update only after the init script exists, so a missing package is obvious."""
+    return (
+        f'if [ -e /etc/init.d/{service} ]; then rc-update add {service} default; '
+        f'else echo ">> OpenRC service {service} does not exist" >&2; fi'
+    )
+
+
+def _systemd_enable_line(service: str) -> str:
+    test = _systemd_unit_test(service)
+    return (
+        f"if {test}; then systemctl enable {service}; "
+        f'else echo ">> systemd unit {service}.service does not exist" >&2; fi'
+    )
+
+
+def _required_tool_repairs(cfg: InstallConfig, loaders: list[str]) -> str:
+    """Re-emerge every tool the later chroot lines call.
+
+    Portage stops the rest of a multi-package emerge when one package fails
+    unless --keep-going is set, and even then a package can still be skipped.
+    grub-install, plymouth-set-default-theme, and rc-update then report that
+    the command or service does not exist.
+    """
+    checks: list[tuple[str, str]] = [("command -v sudo >/dev/null 2>&1", "app-admin/sudo")]
+    if "grub" in loaders:
+        checks.append(
+            (
+                "command -v grub-install >/dev/null 2>&1 && command -v grub-mkconfig >/dev/null 2>&1",
+                "sys-boot/grub",
+            )
+        )
+        if cfg.firmware == "uefi":
+            checks.append(("command -v efibootmgr >/dev/null 2>&1", "sys-boot/efibootmgr"))
+    if cfg.plymouth:
+        checks.append(("command -v plymouth-set-default-theme >/dev/null 2>&1", "sys-boot/plymouth"))
+    openrc = cfg.init_system == "openrc"
+    if cfg.network_stack == "networkmanager":
+        if openrc:
+            checks.append(("[ -e /etc/init.d/dbus ]", "sys-apps/dbus"))
+            checks.append(("[ -e /etc/init.d/NetworkManager ]", "net-misc/networkmanager"))
+        else:
+            checks.append((_systemd_unit_test("NetworkManager"), "net-misc/networkmanager"))
+    elif cfg.network_stack == "dhcpcd":
+        if openrc:
+            checks.append(("[ -e /etc/init.d/dhcpcd ]", "net-misc/dhcpcd"))
+        else:
+            checks.append((_systemd_unit_test("dhcpcd"), "net-misc/dhcpcd"))
+    if cfg.sshd:
+        if openrc:
+            checks.append(("[ -e /etc/init.d/sshd ]", "net-misc/openssh"))
+        else:
+            checks.append((_systemd_unit_test("sshd"), "net-misc/openssh"))
+    if cfg.chrony:
+        if openrc:
+            checks.append(("[ -e /etc/init.d/chronyd ]", "net-misc/chrony"))
+        else:
+            checks.append((_systemd_unit_test("chronyd"), "net-misc/chrony"))
+    if cfg.cups:
+        if openrc:
+            checks.append(("[ -e /etc/init.d/cupsd ]", "net-print/cups"))
+        else:
+            checks.append((_systemd_unit_test("cups"), "net-print/cups"))
+    if openrc and cfg.syslog != "none":
+        checks.append((f"[ -e /etc/init.d/{cfg.syslog} ]", f"app-admin/{cfg.syslog}"))
+    if openrc and cfg.cron != "none":
+        svc = "cronie" if cfg.cron == "cronie" else cfg.cron
+        checks.append((f"[ -e /etc/init.d/{svc} ]", f"sys-process/{cfg.cron}"))
+    if openrc and cfg.zram:
+        checks.append(("[ -e /etc/init.d/zram-init ]", "sys-block/zram-init"))
+    dm = cfg.display_manager
+    if dm == "auto":
+        dm = {
+            "plasma": "sddm",
+            "gnome": "gdm",
+            "xfce": "lightdm",
+            "mate": "lightdm",
+            "cinnamon": "lightdm",
+            "i3": "lightdm",
+        }.get(cfg.desktop, "none")
+    dm_atoms = {"sddm": "x11-misc/sddm", "gdm": "gnome-base/gdm", "lightdm": "x11-misc/lightdm"}
+    if dm in dm_atoms:
+        if openrc:
+            checks.append((f"[ -e /etc/init.d/{dm} ]", dm_atoms[dm]))
+        else:
+            checks.append((_systemd_unit_test(dm), dm_atoms[dm]))
+    lines = ["echo '>> repair tools that must exist before bootloader and services'"]
+    for test, atom in checks:
+        quoted = shlex.quote(atom)
+        lines.append(
+            "\n".join(
+                [
+                    f"if ! {{ {test}; }}; then",
+                    f'  echo ">> {atom} is not installed"',
+                    f"  emerge --ask=n {quoted} || true",
+                    "fi",
+                    f"if ! {{ {test}; }}; then",
+                    f'  echo ">> {atom} still missing; building from source"',
+                    f"  emerge --ask=n --usepkg=n {quoted} || echo '>> emerge failed: {atom}' >&2",
+                    "fi",
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _final_tool_checks(cfg: InstallConfig, loaders: list[str]) -> str:
+    """Exit non-zero so the chroot phase is not marked done when tools are missing.
+
+    The script runs under `set +e`. Without this, a missing sudoers drop-in,
+    grub-install, or OpenRC service still looked like a finished install, and
+    --resume skipped the phase.
+    """
+    checks: list[tuple[str, str]] = []
+    if cfg.username:
+        checks.append(("[ -e /etc/sudoers.d/wheel ]", "/etc/sudoers.d/wheel"))
+    if "grub" in loaders:
+        checks.append(("command -v grub-install >/dev/null 2>&1", "grub-install"))
+        checks.append(("command -v grub-mkconfig >/dev/null 2>&1", "grub-mkconfig"))
+    if cfg.plymouth:
+        checks.append(("command -v plymouth-set-default-theme >/dev/null 2>&1", "plymouth-set-default-theme"))
+    openrc = cfg.init_system == "openrc"
+    if cfg.network_stack == "networkmanager":
+        checks.append(
+            (
+                "[ -e /etc/init.d/NetworkManager ]" if openrc else _systemd_unit_test("NetworkManager"),
+                "NetworkManager",
+            )
+        )
+    if cfg.chrony:
+        checks.append(
+            ("[ -e /etc/init.d/chronyd ]" if openrc else _systemd_unit_test("chronyd"), "chronyd")
+        )
+    if openrc and cfg.syslog != "none":
+        checks.append((f"[ -e /etc/init.d/{cfg.syslog} ]", cfg.syslog))
+    if openrc and cfg.cron != "none":
+        svc = "cronie" if cfg.cron == "cronie" else cfg.cron
+        checks.append((f"[ -e /etc/init.d/{svc} ]", svc))
+    lines = ['echo ">> verify sudo, bootloader, and services"', "missing=0"]
+    for test, label in checks:
+        lines.append(f"if ! {{ {test}; }}; then echo \">> still missing: {label}\" >&2; missing=1; fi")
+    lines.append('if [ "$missing" -ne 0 ]; then echo ">> chroot configuration incomplete" >&2; exit 1; fi')
+    return "\n".join(lines) + "\n"
+
+
+def _grub_uefi_install(target: str) -> str:
+    """Install GRUB for UEFI. efivarfs is often read-only in an Ubuntu chroot.
+
+    That makes efibootmgr exit with "No such file or directory". The removable
+    fallback still writes EFI/BOOT/BOOTX64.EFI so the firmware can boot.
+    A binpkg built without GRUB_PLATFORMS=efi-64 has no modinfo.sh; rebuild it.
+    """
+    return "\n".join(
+        [
+            f"if [ ! -e /usr/lib/grub/{target}/modinfo.sh ]; then",
+            '  echo ">> GRUB EFI modules missing; rebuilding sys-boot/grub from source"',
+            "  emerge --ask=n --usepkg=n sys-boot/grub || echo '>> grub rebuild failed' >&2",
+            "fi",
+            "if [ -d /sys/firmware/efi ]; then",
+            "  mkdir -p /sys/firmware/efi/efivars",
+            "  mountpoint -q /sys/firmware/efi/efivars || mount -t efivarfs efivarfs /sys/firmware/efi/efivars || true",
+            "  mount -o remount,rw,nosuid,nodev,noexec -t efivarfs efivarfs /sys/firmware/efi/efivars || true",
+            "fi",
+            "mkdir -p /boot/grub /boot/EFI",
+            f"if ! command -v grub-install >/dev/null 2>&1; then",
+            '  echo ">> grub-install does not exist" >&2',
+            f"elif ! grub-install --target={target} --efi-directory=/boot --bootloader-id=Gentoo; then",
+            '  echo ">> grub-install could not register NVRAM; writing the removable EFI fallback"',
+            f"  grub-install --target={target} --efi-directory=/boot --bootloader-id=Gentoo --removable --no-nvram || echo '>> grub-install failed' >&2",
+            "fi",
+            "if command -v grub-mkconfig >/dev/null 2>&1; then",
+            "  grub-mkconfig -o /boot/grub/grub.cfg || echo '>> grub-mkconfig failed' >&2",
+            "else",
+            '  echo ">> grub-mkconfig does not exist" >&2',
+            "fi",
+        ]
+    )
+
+
 def render_chroot_script(cfg: InstallConfig, devices: dict[str, str]) -> str:
     """Build the bash script that runs *inside* Gentoo (Portage, kernel, bootloader).
 
@@ -1024,6 +1213,7 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
     net_pkgs = []
     if cfg.network_stack == "networkmanager":
         net_pkgs.append("net-misc/networkmanager")
+        net_pkgs.append("sys-apps/dbus")
     elif cfg.network_stack == "dhcpcd":
         net_pkgs.append("net-misc/dhcpcd")
     elif cfg.network_stack == "systemd-networkd":
@@ -1104,6 +1294,8 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
     openrc_services = []
     systemd_services = []
     if cfg.network_stack == "networkmanager":
+        # NetworkManager's OpenRC script needs dbus already in the runlevel.
+        openrc_services.append("dbus")
         openrc_services.append("NetworkManager")
         systemd_services.append("NetworkManager")
     elif cfg.network_stack == "dhcpcd":
@@ -1126,8 +1318,19 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
         openrc_services.append(dm)
         systemd_services.append(dm)
 
-    enable_openrc = "\n".join(f"rc-update add {s} default || true" for s in openrc_services)
-    enable_systemd = "\n".join(f"systemctl enable {s} || true" for s in systemd_services)
+    enable_openrc = "\n".join(_openrc_enable_line(s) for s in openrc_services)
+    enable_systemd = "\n".join(_systemd_enable_line(s) for s in systemd_services)
+    repair_tools = _required_tool_repairs(cfg, loaders)
+    final_checks = _final_tool_checks(cfg, loaders)
+    nm_cleanup = ""
+    if cfg.init_system == "openrc" and cfg.network_stack == "networkmanager":
+        nm_cleanup = """
+rc-update del dhcpcd default 2>/dev/null || true
+for netinit in /etc/runlevels/default/net.*; do
+  [ -e "$netinit" ] || continue
+  rc-update del "$(basename "$netinit")" default || true
+done
+"""
 
     installkernel_conf = ""
     if cfg.bootloader == "grub":
@@ -1151,8 +1354,21 @@ if [ -f /root/.install-secrets ]; then
   printf '%s:%s\\n' root "${{ROOT_PW}}" | chpasswd
   printf '%s:%s\\n' {shlex.quote(cfg.username)} "${{USER_PW}}" | chpasswd
 fi
+# app-admin/sudo does not keepdir /etc/sudoers.d. Portage drops that empty
+# directory, so a redirect here fails: "No such file or directory".
+if ! command -v sudo >/dev/null 2>&1; then
+  emerge --ask=n app-admin/sudo || echo ">> sudo emerge failed" >&2
+fi
+mkdir -p /etc/sudoers.d
+chmod 750 /etc/sudoers.d
 echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/wheel
 chmod 440 /etc/sudoers.d/wheel
+if [ -f /etc/sudoers ] && ! grep -Eq '^[#@]includedir[[:space:]]+/etc/sudoers\\.d([[:space:]]|$)' /etc/sudoers; then
+  echo '@includedir /etc/sudoers.d' >> /etc/sudoers
+fi
+if command -v visudo >/dev/null 2>&1; then
+  visudo -cf /etc/sudoers || echo ">> sudoers syntax check failed" >&2
+fi
 """
     else:
         user_block = """
@@ -1182,7 +1398,7 @@ type0=swap
 size0=$(($(awk '/MemTotal/ {print int($2/2)}' /proc/meminfo)))
 algo0=zstd
 EOF
-rc-update add zram-init boot || true
+if [ -e /etc/init.d/zram-init ]; then rc-update add zram-init boot; else echo ">> OpenRC service zram-init does not exist" >&2; fi
 """
 
     swapfile = ""
@@ -1293,8 +1509,11 @@ FSTAB
 {crypttab_block}
 
 unset FEATURES
-emerge --ask=n sys-kernel/{pkgs_kernel} {all_extra}
-
+echo ">> emerge kernel and selected packages"
+# --keep-going: a kernel, Plasma, or Firefox failure must not skip sudo,
+# GRUB, Plymouth, NetworkManager, chrony, rsyslog, or cronie.
+emerge --ask=n --keep-going sys-kernel/{pkgs_kernel} {all_extra} || echo ">> one or more packages failed; repairing required tools" >&2
+{repair_tools}
 {stores_block}
 
 {swapfile}
@@ -1307,6 +1526,7 @@ emerge --ask=n sys-kernel/{pkgs_kernel} {all_extra}
 {plymouth_block}
 
 if [ "{cfg.init_system}" = "openrc" ]; then
+{textwrap.indent(nm_cleanup, "  ")}
 {textwrap.indent(enable_openrc, "  ")}
   echo 'rc_parallel="YES"' >> /etc/rc.conf || true
 else
@@ -1319,6 +1539,7 @@ if [ "{cfg.network_stack}" = "netifrc" ]; then
   rc-update add net.{netifrc_iface} default || true
 fi
 
+{final_checks}
 echo "Chroot configuration complete."
 """
 
@@ -1387,16 +1608,42 @@ def _plymouth_script(cfg: InstallConfig) -> str:
     grub = ""
     if "grub" in selected_bootloaders(cfg):
         grub = """
-mkdir -p /etc/default
-if [ -f /etc/default/grub ]; then
-  sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"/' /etc/default/grub || true
+mkdir -p /etc/default /boot/grub
+if [ ! -f /etc/default/grub ]; then
+  echo 'GRUB_CMDLINE_LINUX_DEFAULT=""' > /etc/default/grub
 fi
-grep -q GRUB_CMDLINE_LINUX_DEFAULT /etc/default/grub 2>/dev/null || echo 'GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"' >> /etc/default/grub
-grub-mkconfig -o /boot/grub/grub.cfg || true
+sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"/' /etc/default/grub || true
+"""
+    # Theme must be selected before dracut packs the initramfs, and grub.cfg
+    # must be regenerated after that initramfs exists.
+    refresh = """
+if command -v dracut >/dev/null 2>&1; then
+  kver=$(ls -1 /lib/modules 2>/dev/null | tail -n1 || true)
+  if [ -n "$kver" ]; then
+    dracut --force --kver "$kver" || echo ">> dracut failed" >&2
+  fi
+fi
+"""
+    if grub:
+        refresh += """
+if command -v grub-mkconfig >/dev/null 2>&1; then
+  grub-mkconfig -o /boot/grub/grub.cfg || echo ">> grub-mkconfig failed" >&2
+else
+  echo ">> grub-mkconfig does not exist" >&2
+fi
 """
     return f"""
-plymouth-set-default-theme {shlex.quote(theme_name)} || true
+if ! command -v plymouth-set-default-theme >/dev/null 2>&1; then
+  echo ">> installing sys-boot/plymouth"
+  emerge --ask=n sys-boot/plymouth || emerge --ask=n --usepkg=n sys-boot/plymouth || echo ">> plymouth emerge failed" >&2
+fi
+if command -v plymouth-set-default-theme >/dev/null 2>&1; then
+  plymouth-set-default-theme {shlex.quote(theme_name)} || echo ">> plymouth theme failed" >&2
+else
+  echo ">> plymouth-set-default-theme does not exist" >&2
+fi
 {grub}
+{refresh}
 """
 
 
@@ -1407,12 +1654,18 @@ def _install_bootloaders(cfg: InstallConfig, devices: dict[str, str], loaders: l
         if bl == "grub":
             if cfg.firmware == "uefi":
                 grub_target = "arm64-efi" if cfg.architecture == "arm64" else "x86_64-efi"
-                cmds.append(
-                    f"grub-install --target={grub_target} --efi-directory=/boot --bootloader-id=Gentoo"
-                )
+                cmds.append(_grub_uefi_install(grub_target))
             else:
-                cmds.append(f"grub-install {shlex.quote(cfg.target_disk)}")
-            cmds.append("grub-mkconfig -o /boot/grub/grub.cfg")
+                disk = shlex.quote(cfg.target_disk)
+                cmds.append(
+                    "\n".join(
+                        [
+                            "mkdir -p /boot/grub",
+                            f"grub-install {disk} || echo '>> grub-install failed' >&2",
+                            "grub-mkconfig -o /boot/grub/grub.cfg || echo '>> grub-mkconfig failed' >&2",
+                        ]
+                    )
+                )
             if cfg.grub_password:
                 cmds.append(
                     """
@@ -1425,7 +1678,8 @@ echo 'set superusers="root"'
 echo "password_pbkdf2 root $HASH"
 EOF
   chmod 700 /etc/grub.d/01_password
-  grub-mkconfig -o /boot/grub/grub.cfg
+  mkdir -p /boot/grub
+  grub-mkconfig -o /boot/grub/grub.cfg || echo ">> grub-mkconfig failed" >&2
 fi
 """
                 )
