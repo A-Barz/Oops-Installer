@@ -592,7 +592,7 @@ def _finalize(cfg: InstallConfig) -> None:
             cfg.display_manager = ui.menu(
                 "Display manager (graphical login)",
                 [
-                    ("auto", "Auto — LightDM/SDDM/GDM matching the DE"),
+                    ("auto", "Auto — start a login screen at boot for this desktop or your window managers"),
                     ("lightdm", "LightDM — common for Xfce/MATE/Cinnamon"),
                     ("sddm", "SDDM — usual choice for Plasma"),
                     ("gdm", "GDM — usual choice for GNOME"),
@@ -690,6 +690,17 @@ def _packages(cfg: InstallConfig) -> None:
     ui.ok(f"{len(cfg.extra_packages)} package atoms queued for emerge")
 
 
+def _login_manager_label(cfg: InstallConfig) -> str:
+    name = catalog.resolved_display_manager(
+        cfg.display_manager,
+        cfg.desktop,
+        cfg.extra_packages + cfg.window_managers + cfg.selected_packages,
+    )
+    if name == "none":
+        return "text console"
+    return f"{name} — starts at boot"
+
+
 def _review(cfg: InstallConfig) -> None:
     """Last safe abort point. User must re-type the disk path before execute()."""
     ui.chapter("✓", "Review — target disk has not been changed", HANDBOOK)
@@ -715,6 +726,10 @@ def _review(cfg: InstallConfig) -> None:
         ("User", cfg.username or "(root only)"),
         ("Desktop", cfg.desktop),
         ("Window managers", ", ".join(cfg.window_managers) or "none"),
+        (
+            "Login manager",
+            _login_manager_label(cfg),
+        ),
         ("Overlays", ", ".join(cfg.overlays) or "none"),
         ("Extra packages", str(len(cfg.extra_packages))),
         ("Binhost", str(cfg.binhost)),

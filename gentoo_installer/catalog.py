@@ -109,6 +109,120 @@ X11_WINDOW_MANAGERS: list[Pkg] = [
 
 WINDOW_MANAGERS: list[Pkg] = WAYLAND_COMPOSITORS + X11_WINDOW_MANAGERS
 
+# Compositors that are libraries or greeter helpers, not a desktop session.
+_NOT_A_SESSION = {"kde-plasma/kwin", "x11-wm/mutter", "gui-wm/cage"}
+
+# (title, Exec=, "wayland"|"x11") when the package name is not the command.
+_SESSION_OVERRIDE: dict[str, tuple[str, str, str] | None] = {
+    "gui-wm/hyprland": ("Hyprland", "Hyprland", "wayland"),
+    "gui-wm/swayfx": ("SwayFX", "swayfx", "wayland"),
+    "gui-wm/qtile": ("Qtile (Wayland)", "qtile start -b wayland", "wayland"),
+    "x11-wm/qtile": ("Qtile", "qtile start", "x11"),
+    "x11-wm/enlightenment": ("Enlightenment", "enlightenment_start", "x11"),
+    "x11-wm/openbox": ("Openbox", "openbox-session", "x11"),
+    "x11-wm/fluxbox": ("Fluxbox", "startfluxbox", "x11"),
+    "x11-wm/icewm": ("IceWM", "icewm-session", "x11"),
+    "x11-wm/windowmaker": ("Window Maker", "wmaker", "x11"),
+    "x11-wm/fvwm3": ("FVWM3", "fvwm3", "x11"),
+    "dev-libs/weston": ("Weston", "weston", "wayland"),
+    "gui-liri/liri-shell": ("Liri", "liri-shell", "wayland"),
+    "kde-plasma/kwin": None,
+    "x11-wm/mutter": None,
+    "gui-wm/cage": None,
+}
+
+_DE_SESSIONS: dict[str, list[tuple[str, str, str]]] = {
+    "plasma": [
+        ("Plasma (Wayland)", "startplasma-wayland", "wayland"),
+        ("Plasma (X11)", "startplasma-x11", "x11"),
+    ],
+    "gnome": [("GNOME", "gnome-session", "wayland")],
+    "xfce": [("Xfce", "startxfce4", "x11")],
+    "mate": [("MATE", "mate-session", "x11")],
+    "cinnamon": [("Cinnamon", "cinnamon-session", "x11")],
+    "i3": [("i3", "i3", "x11")],
+}
+
+
+def _pkg_title(atom: str) -> str:
+    for pkg in WINDOW_MANAGERS:
+        if pkg.atom == atom:
+            return pkg.desc.split("—", 1)[0].strip()
+    return atom.rsplit("/", 1)[-1]
+
+
+def login_sessions(desktop: str, atoms: list[str]) -> list[tuple[str, str, str]]:
+    """Sessions the greeter should offer: (title, exec, wayland|x11)."""
+    sessions: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(title: str, command: str, kind: str) -> None:
+        key = (command, kind)
+        if not command or key in seen:
+            return
+        seen.add(key)
+        sessions.append((title, command, kind))
+
+    for title, command, kind in _DE_SESSIONS.get(desktop, []):
+        add(title, command, kind)
+    for atom in atoms:
+        if atom in _NOT_A_SESSION:
+            continue
+        if atom in _SESSION_OVERRIDE:
+            override = _SESSION_OVERRIDE[atom]
+            if override:
+                add(*override)
+            continue
+        known = {p.atom for p in WINDOW_MANAGERS}
+        if atom not in known:
+            continue
+        kind = "wayland" if any(p.atom == atom for p in WAYLAND_COMPOSITORS) else "x11"
+        command = atom.rsplit("/", 1)[-1]
+        add(_pkg_title(atom), command, kind)
+    return sessions
+
+
+def resolved_display_manager(display_manager: str, desktop: str, atoms: list[str]) -> str:
+    """Login manager that should be running after GRUB hands off to Gentoo.
+
+    An explicit chapter-11 choice wins. A display manager picked in the package
+    list wins over Auto. Auto follows the desktop, and uses SDDM when a Wayland
+    compositor was selected so its session shows up next to any X11 session.
+    "none" stays on the text console.
+    """
+    choice = (display_manager or "auto").strip()
+    picked = set(atoms)
+    if choice in {"sddm", "gdm", "lightdm", "greetd", "ly", "slim"}:
+        return choice
+    if "gui-libs/greetd" in picked or "gui-apps/tuigreet" in picked or "gui-apps/gtkgreet" in picked:
+        return "greetd"
+    if "x11-misc/ly" in picked:
+        return "ly"
+    if "x11-misc/slim" in picked:
+        return "slim"
+    if "x11-misc/sddm" in picked:
+        return "sddm"
+    if "gnome-base/gdm" in picked:
+        return "gdm"
+    if "x11-misc/lightdm" in picked:
+        return "lightdm"
+    if choice == "none":
+        return "none"
+    wayland = any(p.atom in picked and p.atom not in _NOT_A_SESSION for p in WAYLAND_COMPOSITORS)
+    x11 = any(p.atom in picked for p in X11_WINDOW_MANAGERS) or desktop in {
+        "xfce",
+        "mate",
+        "cinnamon",
+        "i3",
+    }
+    if desktop == "gnome":
+        return "gdm"
+    if desktop == "plasma" or wayland:
+        return "sddm"
+    if x11 or desktop not in {"", "none"}:
+        return "lightdm"
+    return "none"
+
 
 def wm_choices() -> list[tuple[str, str]]:
     """Tagged rows for the window-manager checklist (Wayland vs X11)."""

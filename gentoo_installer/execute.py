@@ -1427,6 +1427,136 @@ def _grub_uefi_install(target: str) -> str:
     )
 
 
+def _graphical_atoms(cfg: InstallConfig) -> list[str]:
+    return list(dict.fromkeys(cfg.extra_packages + cfg.window_managers + cfg.selected_packages))
+
+
+def _resolved_dm(cfg: InstallConfig) -> str:
+    return catalog.resolved_display_manager(cfg.display_manager, cfg.desktop, _graphical_atoms(cfg))
+
+
+def _greetd_uses_tuigreet(cfg: InstallConfig) -> bool:
+    atoms = set(_graphical_atoms(cfg))
+    return "gui-apps/gtkgreet" not in atoms or "gui-apps/tuigreet" in atoms
+
+
+def _display_manager_tools(cfg: InstallConfig) -> list[tuple[str, tuple[str, ...]]]:
+    """Packages for the greeter that must exist before rc-update."""
+    dm = _resolved_dm(cfg)
+    if dm == "none":
+        return []
+    openrc = cfg.init_system == "openrc"
+    tools: list[tuple[str, tuple[str, ...]]] = []
+    if dm == "sddm":
+        tools.append(("x11-misc/sddm", _service_probe(openrc, "sddm")))
+    elif dm == "gdm":
+        tools.append(("gnome-base/gdm", _service_probe(openrc, "gdm")))
+    elif dm == "lightdm":
+        tools.append(("x11-misc/lightdm", _service_probe(openrc, "lightdm")))
+        tools.append(("x11-misc/lightdm-gtk-greeter", ("command", "-v", "lightdm-gtk-greeter")))
+    elif dm == "greetd":
+        tools.append(("gui-libs/greetd", _service_probe(openrc, "greetd")))
+        if _greetd_uses_tuigreet(cfg):
+            tools.append(("gui-apps/tuigreet", ("command", "-v", "tuigreet")))
+        else:
+            tools.append(("gui-apps/gtkgreet", ("command", "-v", "gtkgreet")))
+            tools.append(("gui-wm/cage", ("command", "-v", "cage")))
+    elif dm == "ly":
+        tools.append(("x11-misc/ly", _service_probe(openrc, "ly")))
+    elif dm == "slim":
+        tools.append(("x11-misc/slim", _service_probe(openrc, "slim")))
+    if openrc:
+        tools.append(("sys-apps/dbus", _service_probe(True, "dbus")))
+        tools.append(("sys-auth/elogind", _service_probe(True, "elogind")))
+    return tools
+
+
+def _session_desktop(title: str, command: str, kind: str) -> str:
+    lines = [
+        "[Desktop Entry]",
+        f"Name={title}",
+        "Comment=Session installed by gentoo-live-installer",
+        f"Exec={command}",
+        "Type=Application",
+    ]
+    if kind == "wayland":
+        lines.append("X-LightDM-Session-Type=wayland")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _display_manager_script(cfg: InstallConfig) -> str:
+    """Install the greeter, register every selected session, and leave it enabled.
+
+    The greeter is the screen after GRUB. It does not skip the password.
+    """
+    dm = _resolved_dm(cfg)
+    if dm == "none":
+        return ""
+    lines = [f'echo ">> login manager: {dm}"']
+    for atom, test in _display_manager_tools(cfg):
+        lines.append(_emerge_checked_call(atom, test))
+    lines.append("mkdir -p /usr/share/wayland-sessions /usr/share/xsessions")
+    for title, command, kind in catalog.login_sessions(cfg.desktop, _graphical_atoms(cfg)):
+        folder = "/usr/share/wayland-sessions" if kind == "wayland" else "/usr/share/xsessions"
+        slug = re.sub(r"[^A-Za-z0-9]+", "-", title).strip("-").lower() or "session"
+        path = f"{folder}/installer-{slug}.desktop"
+        body = _session_desktop(title, command, kind)
+        lines.append(f"if ! grep -RFqs {shlex.quote(command)} /usr/share/wayland-sessions /usr/share/xsessions 2>/dev/null; then")
+        lines.append(f"cat > {shlex.quote(path)} << 'EOF'")
+        lines.append(body.rstrip("\n"))
+        lines.append("EOF")
+        lines.append("fi")
+    if dm == "lightdm":
+        lines.extend(
+            [
+                "mkdir -p /etc/lightdm",
+                "touch /etc/lightdm/lightdm.conf",
+                "grep -q '^greeter-session=' /etc/lightdm/lightdm.conf || printf '\\n[Seat:*]\\ngreeter-session=lightdm-gtk-greeter\\n' >> /etc/lightdm/lightdm.conf",
+            ]
+        )
+    elif dm == "greetd":
+        if _greetd_uses_tuigreet(cfg):
+            command = "/usr/bin/tuigreet --time --remember --remember-user-session --sessions /usr/share/wayland-sessions:/usr/share/xsessions"
+        else:
+            commands = []
+            for _title, exec_cmd, _kind in catalog.login_sessions(cfg.desktop, _graphical_atoms(cfg)):
+                commands.append("-c")
+                commands.append(exec_cmd)
+            joined = " ".join(shlex.quote(part) for part in commands)
+            command = f"/usr/bin/cage -s -- /usr/bin/gtkgreet {joined}".strip()
+        lines.extend(
+            [
+                "mkdir -p /etc/greetd",
+                'if [ "$KEEP_EXISTING" = 1 ] && [ -f /etc/greetd/config.toml ]; then',
+                '  echo ">> skip existing greetd config"',
+                "else",
+                "cat > /etc/greetd/config.toml << 'EOF'",
+                "[terminal]",
+                "vt = 1",
+                "",
+                "[default_session]",
+                f'command = "{command}"',
+                'user = "greetd"',
+                "EOF",
+                "fi",
+            ]
+        )
+    elif dm == "sddm":
+        lines.extend(
+            [
+                "mkdir -p /etc/sddm.conf.d",
+                "cat > /etc/sddm.conf.d/installer.conf << 'EOF'",
+                "[General]",
+                "DisplayServer=x11",
+                "EOF",
+            ]
+        )
+    if cfg.username:
+        lines.append(f"usermod -aG video,seat {shlex.quote(cfg.username)} || true")
+    return "\n".join(lines) + "\n"
+
+
 def _package_use_text(cfg: InstallConfig) -> str:
     """Per-package USE so OpenRC init scripts and Plymouth can actually be installed.
 
@@ -1449,6 +1579,22 @@ def _package_use_text(cfg: InstallConfig) -> str:
             "sys-apps/dbus systemd",
             f"net-misc/networkmanager systemd -elogind {wifi} tools",
         ]
+    dm = catalog.resolved_display_manager(
+        cfg.display_manager,
+        cfg.desktop,
+        _graphical_atoms(cfg),
+    )
+    if cfg.init_system == "openrc":
+        if dm == "sddm":
+            lines.append("x11-misc/sddm elogind -systemd")
+        elif dm == "lightdm":
+            lines.append("x11-misc/lightdm elogind -systemd")
+        elif dm == "gdm":
+            lines.append("gnome-base/gdm elogind -systemd")
+    elif dm == "sddm":
+        lines.append("x11-misc/sddm systemd -elogind")
+    elif dm == "gdm":
+        lines.append("gnome-base/gdm systemd -elogind")
     return "\n".join(lines) + "\n"
 
 
@@ -1462,6 +1608,17 @@ def _keyword_text(cfg: InstallConfig) -> str:
         # plymouth-openrc-plugin is keyworded ~arch. Leaving it masked aborts the
         # whole emerge calculation, so NetworkManager and chrony never install.
         lines.append(f"sys-boot/plymouth-openrc-plugin {keyword}")
+    dm = catalog.resolved_display_manager(
+        cfg.display_manager,
+        cfg.desktop,
+        _graphical_atoms(cfg),
+    )
+    if dm == "greetd":
+        lines.append(f"gui-libs/greetd {keyword}")
+        lines.append(f"gui-apps/tuigreet {keyword}")
+        lines.append(f"gui-apps/gtkgreet {keyword}")
+    elif dm == "ly":
+        lines.append(f"x11-misc/ly {keyword}")
     if not lines:
         return ""
     return "\n".join(lines) + "\n"
@@ -1645,9 +1802,12 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
         for atom in dict.fromkeys(boot_pkgs + net_pkgs)
         if atom and atom not in required_set and atom not in theme_pkgs
     ]
+    dm_atoms = [atom for atom, _test in _display_manager_tools(cfg)]
     late_atoms = [
         atom
-        for atom in dict.fromkeys(theme_pkgs + de_pkgs + cfg.extra_packages + cfg.window_managers)
+        for atom in dict.fromkeys(
+            theme_pkgs + de_pkgs + cfg.extra_packages + cfg.window_managers + dm_atoms
+        )
         if atom and not atom.startswith("flatpak-app/") and atom not in required_set
     ]
     fetch_atoms_extra = list(dict.fromkeys(required_atoms + missed + extra_fw + late_atoms))
@@ -1668,11 +1828,7 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
     source_setup = _source_setup_script()
     resume_prelude = _resume_prelude(cfg)
 
-    dm = cfg.display_manager
-    if dm == "auto":
-        dm = {"plasma": "sddm", "gnome": "gdm", "xfce": "lightdm", "mate": "lightdm", "cinnamon": "lightdm", "i3": "lightdm"}.get(
-            cfg.desktop, "none"
-        )
+    dm = _resolved_dm(cfg)
 
     openrc_services = []
     systemd_services = []
@@ -1698,13 +1854,15 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
     if cfg.init_system == "openrc" and cfg.cron != "none":
         openrc_services.append("cronie" if cfg.cron == "cronie" else cfg.cron)
     if dm not in {"none", "auto", ""}:
+        if cfg.init_system == "openrc" and "dbus" not in openrc_services:
+            openrc_services.append("dbus")
         openrc_services.append(dm)
         systemd_services.append(dm)
 
     enable_openrc = "\n".join(_openrc_enable_line(s) for s in openrc_services)
     enable_systemd = "\n".join(_systemd_enable_line(s) for s in systemd_services)
     boot_enable = ""
-    if cfg.init_system == "openrc" and cfg.network_stack == "networkmanager":
+    if cfg.init_system == "openrc" and (cfg.network_stack == "networkmanager" or dm != "none"):
         boot_enable = _openrc_enable_line("elogind", "boot")
     rc_plymouth = ""
     if cfg.plymouth and cfg.init_system == "openrc":
@@ -1899,6 +2057,7 @@ EOF
     overlay_block = _overlay_script(cfg)
     stores_block = _app_stores_script(cfg)
     plymouth_block = _plymouth_script(cfg)
+    dm_setup = _display_manager_script(cfg)
     level = getattr(cfg, "stage_level", "stage3") or "stage3"
     bootstrap = ""
     if level == "stage1":
@@ -2013,6 +2172,7 @@ fi
 
 {grub_install}
 {plymouth_block}
+{dm_setup}
 
 if [ "{cfg.init_system}" = "openrc" ]; then
 {textwrap.indent(nm_cleanup, "  ")}
@@ -2067,7 +2227,10 @@ def _app_stores_script(cfg: InstallConfig) -> str:
 def _overlay_script(cfg: InstallConfig) -> str:
     """Chroot snippet: eselect-repository enable + sync + ~arch keywords per overlay."""
     overlays = catalog.overlays_required_by(
-        cfg.extra_packages + cfg.window_managers + cfg.selected_packages,
+        cfg.extra_packages
+        + cfg.window_managers
+        + cfg.selected_packages
+        + [atom for atom, _test in _display_manager_tools(cfg)],
         cfg.overlays,
     )
     if not overlays:
