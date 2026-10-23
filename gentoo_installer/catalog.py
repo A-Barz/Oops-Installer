@@ -489,11 +489,9 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
         _pkgs(
             Pkg("www-client/firefox-bin", "Firefox — official binary (no compile)"),
             Pkg("www-client/firefox", "Firefox — compile from source (hours)"),
-            Pkg("www-client/chromium", "Chromium — open-source Chrome (long compile)"),
             Pkg("www-client/google-chrome", "Google Chrome — official binary"),
             Pkg("www-client/librewolf", "LibreWolf — privacy-forked Firefox", "librewolf"),
             Pkg("www-client/brave-bin", "Brave — Chromium-based browser binary", "guru"),
-            Pkg("www-client/ungoogled-chromium", "Ungoogled Chromium — Chrome without Google services", "guru"),
             Pkg("www-client/qutebrowser", "qutebrowser — keyboard-driven Qt browser"),
             Pkg("www-client/falkon", "Falkon — KDE Qt WebEngine browser"),
             Pkg("www-client/epiphany", "GNOME Web — GTK WebKit browser"),

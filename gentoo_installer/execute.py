@@ -2409,8 +2409,6 @@ def _desktop_packages(cfg: InstallConfig) -> list[str]:
         pkgs.append("www-client/firefox-bin")
     elif cfg.browser == "firefox":
         pkgs.append("www-client/firefox")
-    elif cfg.browser == "chromium":
-        pkgs.append("www-client/chromium")
     if cfg.kde_games:
         pkgs.extend(["kde-apps/kpat", "kde-apps/kmines", "kde-apps/kbounce"])
     if cfg.flatpak:

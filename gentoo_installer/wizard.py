@@ -606,7 +606,6 @@ def _finalize(cfg: InstallConfig) -> None:
                 [
                     ("firefox-bin", "Firefox official binary — no compile"),
                     ("firefox", "Firefox compiled from source — many hours"),
-                    ("chromium", "Chromium from source — very long compile"),
                     ("none", "No browser from this chapter (you can pick one in chapter 12)"),
                 ],
                 "firefox-bin",
