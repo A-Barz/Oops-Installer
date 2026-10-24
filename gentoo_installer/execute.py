@@ -86,6 +86,10 @@ def execute(cfg: InstallConfig) -> None:
     os.environ.pop("PORTAGE_FEATURES", None)
     os.environ.pop("USE", None)
 
+    from .wizard import queue_saved_software
+
+    queue_saved_software(cfg)
+
     runner = Runner(dry_run=cfg.dry_run)
     state = State(cfg.state_file)
     root = cfg.mountpoint
@@ -367,8 +371,17 @@ def _mount_if_needed(
         "\n".join(
             [
                 f"if ! mountpoint -q {dst}; then",
+                f"  dest_path={dst}",
                 f"  findmnt -rn -o TARGET -S {src} 2>/dev/null | while IFS= read -r other; do",
-                f'    [ "$other" = {dst} ] && continue',
+                '    [ -z "$other" ] && continue',
+                # Btrfs subvolumes are one block device. /mnt/gentoo is already
+                # mounted when /mnt/gentoo/home is mounted. Unmounting that
+                # parent removes the mount point, and mount(2) then fails
+                # with "No such file or directory" (exit 32, dmesg(1)).
+                '    [ "$other" = "$dest_path" ] && continue',
+                '    case "$dest_path" in',
+                '      "$other"|"$other"/*) continue ;;',
+                "    esac",
                 '    umount "$other" || umount -l "$other" || true',
                 "  done",
                 "  for _try in 1 2 3 4 5 6 7 8 9 10; do",
@@ -377,7 +390,12 @@ def _mount_if_needed(
                 "    sleep 0.3",
                 "  done",
                 f'  if [ ! -b {src} ]; then echo ">> block device {source} is missing" >&2; exit 1; fi',
-                f"  mount -t {fstype} {opt}{src} {dst}",
+                f"  mkdir --parents {dst}",
+                f"  if ! mount -t {fstype} {opt}{src} {dst}; then",
+                f'    echo ">> mount {source} on {dest} failed" >&2',
+                "    dmesg | tail -n 15 >&2 || true",
+                "    exit 1",
+                "  fi",
                 "fi",
             ]
         )
@@ -895,7 +913,7 @@ def _mount_tree(
     if cfg.layout == "btrfs-subvols":
         if create_subvols and not _mountpoint_q(root):
             ui.info("Creating Btrfs subvolumes @ @home @log @cache @tmp @swap")
-            _mount_if_needed(runner, devices["root"], root, fstype="btrfs")
+            _mount_if_needed(runner, devices["root"], root, "subvolid=5", fstype="btrfs")
             quoted_root = shlex.quote(root)
             for sub in ("@", "@home", "@log", "@cache", "@tmp", "@swap"):
                 runner.shell(
@@ -2305,7 +2323,7 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
     late_atoms = [
         atom
         for atom in dict.fromkeys(
-            de_pkgs + support_atoms + cfg.extra_packages + _window_managers(cfg) + dm_atoms
+            de_pkgs + support_atoms + cfg.extra_packages + cfg.selected_packages + _window_managers(cfg) + dm_atoms
         )
         if atom
         and _atom_allowed(cfg, atom)

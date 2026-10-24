@@ -82,10 +82,16 @@ Useful options:
       Answer the wizard, save the profile, do not install yet.
 
   sudo python3 install.py --config ./gentoo-install.yaml
-      Skip the wizard. Use a saved profile. Passwords are asked again
-      unless you saved them with --include-secrets. If /mnt/gentoo is
-      already mounted or a state file exists, you are asked whether to
-      resume instead of wiping.
+      Skip the wizard. Compositors, the shell, and the apps saved in
+      that file are what gets installed. If the file has no software,
+      the selection is taken from gentoo-install.yaml or
+      /var/tmp/gentoo-install.yaml from the first attempt. Passwords
+      are asked again unless you saved them with --include-secrets.
+      If /mnt/gentoo is already mounted or a state file exists, you
+      are asked whether to resume instead of wiping.
+
+Starting install.py again, with no flags, loads gentoo-install.yaml
+when that file still has a disk or a software selection.
 
   sudo python3 install.py --resume
       Continue after a crash. Completed phases in

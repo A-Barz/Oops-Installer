@@ -18,7 +18,80 @@ from .estimate import estimate_minutes, format_duration
 HANDBOOK = "https://wiki.gentoo.org/wiki/Handbook:AMD64"
 
 
-def fill_missing_secrets(cfg: InstallConfig) -> None:
+def profile_has_software(cfg: InstallConfig) -> bool:
+    """True when a saved profile still has the compositors or apps from an attempt."""
+    if cfg.window_managers or cfg.selected_packages or cfg.extra_packages:
+        return True
+    return bool(cfg.shell and cfg.shell != "none")
+
+
+def queue_saved_software(cfg: InstallConfig) -> None:
+    """Rebuild the emerge set from the software stored in a loaded profile.
+
+    The first attempt records window managers, the shell, and the ticked apps.
+    Loading that YAML must install those atoms again. Compositor requirements
+    are added back. Apps the user unticked are not put back on the list.
+    """
+    known_wm = {pkg.atom for pkg in catalog.WINDOW_MANAGERS}
+    managers: list[str] = []
+    for atom in list(cfg.window_managers) + list(cfg.extra_packages) + list(cfg.selected_packages):
+        bare = atom.split("::", 1)[0]
+        if bare in known_wm and bare not in managers:
+            managers.append(bare)
+    if cfg.shell not in {"", "none"} and not catalog.wayland_selected(managers):
+        if "gui-wm/labwc" not in managers:
+            managers.append("gui-wm/labwc")
+    cfg.window_managers = managers
+    needed_atoms = {
+        pkg.atom for pkg in catalog.packages_for_selection(managers, cfg.shell, cfg.pipewire)
+    }
+    # selected_packages is the ticked list. extra_packages is that list plus
+    # requirements, so it is only the source when the ticks were not saved.
+    sources = list(cfg.selected_packages) if cfg.selected_packages else list(cfg.extra_packages)
+    picked: list[str] = []
+    for atom in sources:
+        bare = atom.split("::", 1)[0]
+        if bare in known_wm or atom in needed_atoms or bare in needed_atoms:
+            continue
+        if atom not in picked:
+            picked.append(atom)
+    allowed = catalog.offered_guru_atoms(cfg.shell)
+    kept: list[str] = []
+    for atom in picked:
+        bare, _, suffix = atom.partition("::")
+        overlay = suffix or catalog.atom_overlay(bare)
+        if overlay == "guru" and bare not in allowed:
+            continue
+        kept.append(atom)
+    cfg.selected_packages = kept
+    needed = [pkg.atom for pkg in catalog.packages_for_selection(managers, cfg.shell, cfg.pipewire)]
+    cfg.extra_packages = list(dict.fromkeys(managers + needed + kept))
+    cfg.overlays = [name for name in cfg.overlays if name != "guru"]
+    cfg.overlays = catalog.overlays_required_by(cfg.extra_packages, cfg.overlays)
+    if managers or any("wayland" in atom or "gui-wm/" in atom for atom in cfg.extra_packages):
+        if "wayland" not in cfg.extra_use:
+            cfg.extra_use.append("wayland")
+    if profile_has_software(cfg):
+        setattr(cfg, "_software_loaded", True)
+
+
+def announce_saved_software(cfg: InstallConfig) -> None:
+    """Tell the user which saved compositors and apps will be installed."""
+    queue_saved_software(cfg)
+    session = list(cfg.window_managers)
+    if cfg.shell not in {"", "none"}:
+        session.append(f"shell {cfg.shell}")
+    if not session and not cfg.selected_packages:
+        ui.warn("The saved profile has no compositors or extra apps.")
+        return
+    ui.ok("Software from the saved profile will be installed.")
+    if session:
+        ui.info("Session: " + ", ".join(session))
+    if cfg.selected_packages:
+        ui.info("Apps: " + ", ".join(cfg.selected_packages))
+
+
+def fill_missing_secrets(cfg: InstallConfig) -> bool:
     """After --config, ask for passwords that were not stored in the YAML/JSON file."""
     ui.chapter("cfg", "Loaded profile — secrets and confirmation", HANDBOOK)
     ui.info("Non-secret choices were imported. Enter credentials that were not saved.")
@@ -53,10 +126,13 @@ def fill_missing_secrets(cfg: InstallConfig) -> None:
                 cfg.resume = False
                 ui.warn("Full restart: the disk will be unmounted, then wiped if this profile says so.")
     _announce_estimate(cfg)
+    announce_saved_software(cfg)
     _warn_before_wipe(cfg)
     if not ui.ask_yes_no("Continue with these imported settings?", False):
-        raise SystemExit("Aborted after loading config.")
+        ui.info("The wizard will open with the saved software already ticked.")
+        return False
     _confirm_disk(cfg)
+    return True
 
 
 def warn_if_ntfs_present() -> None:
@@ -707,12 +783,15 @@ def _packages(cfg: InstallConfig) -> None:
 
     picked: list[str] = list(cfg.selected_packages)
     niri_rows = catalog.niri_app_rows() if "gui-wm/niri" in cfg.window_managers else []
-    if niri_rows:
+    if niri_rows and not getattr(cfg, "_software_loaded", False):
         for atom in catalog.niri_preselected(cfg.shell):
             if atom not in picked:
                 picked.append(atom)
-        if cfg.shell == "none":
+    if niri_rows:
+        if cfg.shell == "none" and not getattr(cfg, "_software_loaded", False):
             ui.info("Niri apps are preselected. Untick any you do not want, including with Select all.")
+        elif cfg.shell == "none":
+            ui.info("Niri apps from the saved profile stay ticked. Untick any you do not want.")
         else:
             ui.info("The shell covers the bar and launcher. Niri apps are listed if you still want them.")
     if ui.ask_yes_no("Browse suckless tools, shared Wayland utilities, and popular apps?", True):
