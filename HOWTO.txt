@@ -190,7 +190,13 @@ If it fails part-way
 --------------------
 Read the log. Fix the problem (network, disk full, emerge conflict).
 
-Then, from the same live session if the mounts are still there:
+If the target is still mounted, including the chroot binds under
+/mnt/gentoo, the installer asks whether to resume. Resume keeps the
+mounts and continues the finished phases. Answering no unmounts the
+chroot and the disk, then starts the wizard again from the first
+question.
+
+You can also start that choice yourself:
 
   sudo python3 install.py --resume --config ./gentoo-install.yaml
 

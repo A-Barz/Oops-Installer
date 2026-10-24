@@ -16,6 +16,7 @@ Phase names in execute() match runner.State so --resume can skip finished work.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
@@ -124,14 +125,31 @@ def execute(cfg: InstallConfig) -> None:
     gallop = None if cfg.dry_run else ui.InstallGallop(minutes)
     if gallop is not None:
         gallop.start()
+    error: BaseException | None = None
     try:
         _run_phases(cfg, runner, state, phases, root, rerun_on_resume)
+    except (SystemExit, KeyboardInterrupt) as exc:
+        error = exc
     finally:
         if gallop is not None:
-            if "done" in state.done:
+            if error is None and "done" in state.done:
                 gallop.finish()
             else:
                 gallop.stop()
+    if error is None:
+        return
+    decision = ask_resume_or_unmount(cfg)
+    if decision == "resume":
+        ui.ok("Resuming the interrupted install. The target stays mounted.")
+        execute(cfg)
+        return
+    if decision == "fresh":
+        raise RestartFromBeginning()
+    if isinstance(error, KeyboardInterrupt):
+        print()
+        ui.warn("Interrupted.")
+        raise SystemExit(130) from error
+    raise error
 
 
 def _run_phases(cfg: InstallConfig, runner: Runner, state: State, phases, root: str, rerun_on_resume: set[str]) -> None:
@@ -295,21 +313,129 @@ def _mount_if_needed(
     )
 
 
+def _unmount_path(runner: Runner, path: str) -> None:
+    """Unmount path when it is a mountpoint. A chroot bind is detached before the root."""
+    quoted = shlex.quote(path)
+    runner.shell(
+        f"if mountpoint -q {quoted}; then umount -R {quoted} || umount -l {quoted} || true; fi"
+    )
+
+
 def _unmount_target(cfg: InstallConfig, runner: Runner) -> None:
-    """Drop mounts/swap/LUKS so wipefs can run. Safe if nothing is mounted."""
-    root = cfg.mountpoint
+    """Drop chroot binds, the target, swap, and LUKS so a new install can use the disk."""
+    root = cfg.mountpoint.rstrip("/") or "/"
     ui.info(f"Unmounting {root} if it is busy from a previous run")
+    for rel in ("dev/shm", "dev/pts", "dev", "sys", "proc", "run", "boot/efi", "efi", "boot"):
+        _unmount_path(runner, root + "/" + rel)
     _release_disk_mounts(runner, cfg.target_disk)
     if cfg.extra_raid_disk:
         _release_disk_mounts(runner, cfg.extra_raid_disk)
-    runner.shell(
-        f"umount -R {shlex.quote(root)} || umount -Rl {shlex.quote(root)} || true"
-    )
+    _unmount_path(runner, root)
     runner.shell("swapoff -a || true")
     runner.shell("cryptsetup close swap || true")
     runner.shell("cryptsetup close root || true")
     if cfg.layout in {"lvm", "lvm-luks"}:
         runner.shell("vgchange -an vg0 || true")
+
+
+class RestartFromBeginning(Exception):
+    """The user declined resume, and the failed target has been unmounted."""
+
+
+def _target_mounted(mountpoint: str) -> bool:
+    """True when the install root or one of its chroot binds is still mounted."""
+    if not mountpoint:
+        return False
+    root = Path(mountpoint)
+    if detect.is_mounted(mountpoint):
+        return True
+    return any(detect.is_mounted(str(root / name)) for name in ("proc", "sys", "dev", "run", "boot"))
+
+
+def _chroot_binds_mounted(mountpoint: str) -> bool:
+    root = Path(mountpoint)
+    return any(detect.is_mounted(str(root / name)) for name in ("proc", "sys", "dev", "run"))
+
+
+def failed_install_is_mounted(cfg: InstallConfig) -> bool:
+    """A failed install left this mountpoint mounted. A finished install does not count."""
+    if not detect.is_linux() or not _target_mounted(cfg.mountpoint):
+        return False
+    return "done" not in State(cfg.state_file).done
+
+
+def _find_failed_mount(cfg: InstallConfig) -> InstallConfig | None:
+    """The mounted config to unmount or resume. Saved profiles supply the real mountpoint."""
+    if cfg.dry_run or not detect.is_linux():
+        return None
+    ordered: list[InstallConfig] = [cfg]
+    for path in (Path("gentoo-install.yaml"), Path("/var/tmp/gentoo-install.yaml")):
+        if not path.is_file():
+            continue
+        try:
+            loaded = InstallConfig.load(path)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+        ordered.append(loaded)
+    seen: set[str] = set()
+    for item in ordered:
+        mount = item.mountpoint or ""
+        if mount in seen:
+            continue
+        seen.add(mount)
+        if failed_install_is_mounted(item):
+            return item
+    return None
+
+
+def _clear_install_state(cfg: InstallConfig) -> None:
+    path = Path(cfg.state_file)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        ui.warn(f"Could not remove {path}: {exc}")
+
+
+def _unmount_failed_target(cfg: InstallConfig) -> None:
+    """Unmount a failed chroot. Stop if the tree is still mounted."""
+    runner = Runner(dry_run=False)
+    _unmount_target(cfg, runner)
+    if _target_mounted(cfg.mountpoint):
+        ui.error(
+            f"{cfg.mountpoint} is still mounted. Close anything using it, then start the installer again."
+        )
+        raise SystemExit(1)
+    _clear_install_state(cfg)
+    ui.ok(f"Unmounted {cfg.mountpoint}.")
+
+
+def ask_resume_or_unmount(cfg: InstallConfig) -> str:
+    """Ask what to do with a failed, still-mounted install.
+
+    Returns "resume", "fresh", or "none". "fresh" means the target was unmounted
+    and the caller should start the wizard from the first question.
+    """
+    mounted = _find_failed_mount(cfg)
+    if mounted is None:
+        return "none"
+    if _chroot_binds_mounted(mounted.mountpoint):
+        ui.warn(f"The install did not finish. {mounted.mountpoint} is still chrooted and mounted.")
+    else:
+        ui.warn(f"The install did not finish. {mounted.mountpoint} is still mounted.")
+    if ui.ask_yes_no("Resume the interrupted install?", True):
+        cfg.resume = True
+        cfg.wipe_disk = False
+        cfg.mountpoint = mounted.mountpoint
+        cfg.state_file = mounted.state_file
+        setattr(cfg, "_resume_decided", True)
+        ui.ok("Resume enabled. Existing mounts stay in place.")
+        return "resume"
+    ui.warn("The target will be unmounted, and the installer will start from the beginning.")
+    _unmount_failed_target(mounted)
+    cfg.resume = False
+    setattr(cfg, "_resume_decided", True)
+    ui.info("Starting the installer from the beginning.")
+    return "fresh"
 
 
 def _luks_open_only(cfg: InstallConfig, runner: Runner, device: str, name: str) -> None:

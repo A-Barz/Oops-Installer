@@ -32,25 +32,26 @@ def fill_missing_secrets(cfg: InstallConfig) -> None:
         cfg.wifi_psk = ui.ask_password("Wi-Fi passphrase", confirm=False)
     if not cfg.grub_password and ui.ask_yes_no("Set a GRUB password (was not in the saved file)?", False):
         cfg.grub_password = ui.ask_password("GRUB password")
-    state = Path(cfg.state_file)
-    mounted = detect.is_mounted(cfg.mountpoint)
-    if state.exists() or mounted:
-        ui.info(
-            "An incomplete install was found"
-            + (f" (state {cfg.state_file})" if state.exists() else "")
-            + (f"; {cfg.mountpoint} is already mounted" if mounted else "")
-            + "."
-        )
-        if ui.ask_yes_no(
-            "Resume (re-run package installs, keep files already on the disk, do not format or repartition)?",
-            True,
-        ):
-            cfg.resume = True
-            cfg.wipe_disk = False
-            ui.ok("Resume enabled — existing mounts will be reused.")
-        else:
-            cfg.resume = False
-            ui.warn("Full restart: the disk will be unmounted, then wiped if this profile says so.")
+    if not getattr(cfg, "_resume_decided", False):
+        state = Path(cfg.state_file)
+        mounted = detect.is_mounted(cfg.mountpoint)
+        if state.exists() or mounted:
+            ui.info(
+                "An incomplete install was found"
+                + (f" (state {cfg.state_file})" if state.exists() else "")
+                + (f"; {cfg.mountpoint} is already mounted" if mounted else "")
+                + "."
+            )
+            if ui.ask_yes_no(
+                "Resume (re-run package installs, keep files already on the disk, do not format or repartition)?",
+                True,
+            ):
+                cfg.resume = True
+                cfg.wipe_disk = False
+                ui.ok("Resume enabled — existing mounts will be reused.")
+            else:
+                cfg.resume = False
+                ui.warn("Full restart: the disk will be unmounted, then wiped if this profile says so.")
     _announce_estimate(cfg)
     _warn_before_wipe(cfg)
     if not ui.ask_yes_no("Continue with these imported settings?", False):
@@ -110,7 +111,13 @@ def _about(cfg: InstallConfig) -> None:
     ui.info("A live Ubuntu XFCE session is used as the host instead of the Gentoo minimal ISO.")
     ui.info("After you answer every chapter, a summary is shown before any disk is touched.")
     cfg.dry_run = ui.ask_yes_no("Dry-run only (print commands, do not change disks)?", False)
-    cfg.resume = ui.ask_yes_no("Resume a previous interrupted install?", False)
+    if getattr(cfg, "_resume_decided", False):
+        if cfg.resume:
+            ui.info("Resuming the interrupted install. The mounted target is kept.")
+        else:
+            ui.info("The previous target was unmounted. This install starts from the beginning.")
+    else:
+        cfg.resume = ui.ask_yes_no("Resume a previous interrupted install?", False)
     cfg.mountpoint = ui.prompt("Target mountpoint", cfg.mountpoint)
 
 

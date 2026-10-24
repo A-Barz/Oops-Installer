@@ -22,7 +22,7 @@ from pathlib import Path
 
 from gentoo_installer import ui
 from gentoo_installer.config import InstallConfig
-from gentoo_installer.execute import execute
+from gentoo_installer.execute import RestartFromBeginning, ask_resume_or_unmount, execute
 from gentoo_installer.wizard import fill_missing_secrets, run_wizard, warn_if_ntfs_present
 
 
@@ -61,10 +61,26 @@ def _write_profile(path: str, cfg: InstallConfig, include_secrets: bool = False)
     ui.ok(f"Wrote {dest.resolve()}")
 
 
-def main() -> int:
-    ui.banner()
-    warn_if_ntfs_present()
-    args = parse_args()
+def _begin_again(args: argparse.Namespace) -> int:
+    """Wizard from the first question after a failed mount was unmounted."""
+    cfg = InstallConfig()
+    cfg.resume = False
+    setattr(cfg, "_resume_decided", True)
+    if args.dry_run:
+        cfg.dry_run = True
+    cfg = run_wizard(cfg)
+    starter = Path(args.config) if args.config else Path("gentoo-install.yaml")
+    _write_profile(str(starter), cfg, include_secrets=bool(args.config and args.include_secrets))
+    if args.save_config:
+        _write_profile(args.save_config, cfg, include_secrets=args.include_secrets)
+    if args.wizard_only:
+        ui.info("Wizard-only mode; not executing.")
+        return 0
+    execute(cfg)
+    return 0
+
+
+def _run_session(args: argparse.Namespace) -> int:
     ran_wizard = False
     # The profile has to exist before the wizard finishes. A missing
     # --config used to raise "No such file or directory" ("not created yet").
@@ -73,35 +89,34 @@ def main() -> int:
         if config_path.is_file():
             cfg = InstallConfig.load(config_path)
             ui.ok(f"Loaded config {config_path.resolve()}")
-            if args.dry_run:
-                cfg.dry_run = True
-            if args.resume:
-                cfg.resume = True
-            fill_missing_secrets(cfg)
         else:
             ui.warn(f"{config_path} is not created yet. Creating it, then starting the wizard.")
             cfg = InstallConfig()
             _write_profile(str(config_path), cfg)
-            if args.dry_run:
-                cfg.dry_run = True
-            if args.resume:
-                cfg.resume = True
-            cfg = run_wizard(cfg)
             ran_wizard = True
-            _write_profile(str(config_path), cfg, include_secrets=args.include_secrets)
     else:
         cfg = InstallConfig()
         starter = Path("gentoo-install.yaml")
         if not starter.exists():
             ui.info("Creating gentoo-install.yaml for this install.")
             _write_profile(str(starter), cfg)
-        if args.dry_run:
-            cfg.dry_run = True
+        ran_wizard = True
+    if args.dry_run:
+        cfg.dry_run = True
+    if args.resume:
+        cfg.resume = True
+        setattr(cfg, "_resume_decided", True)
+    elif not args.wizard_only and ask_resume_or_unmount(cfg) == "fresh":
+        raise RestartFromBeginning()
+    if args.config and Path(args.config).is_file() and not ran_wizard:
+        fill_missing_secrets(cfg)
+    else:
         if args.resume:
             cfg.resume = True
         cfg = run_wizard(cfg)
         ran_wizard = True
-        _write_profile(str(starter), cfg)
+        dest = args.config if args.config else "gentoo-install.yaml"
+        _write_profile(dest, cfg, include_secrets=bool(args.config and args.include_secrets))
     if args.dry_run:
         cfg.dry_run = True
     if args.resume:
@@ -118,6 +133,22 @@ def main() -> int:
         return 0
     execute(cfg)
     return 0
+
+
+def main() -> int:
+    ui.banner()
+    warn_if_ntfs_present()
+    args = parse_args()
+    # A declined resume can happen at startup or after a later failure.
+    # Each decline unmounts the target and comes back through the wizard.
+    begin = False
+    while True:
+        try:
+            if begin:
+                return _begin_again(args)
+            return _run_session(args)
+        except RestartFromBeginning:
+            begin = True
 
 
 if __name__ == "__main__":
