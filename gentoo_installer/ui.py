@@ -156,86 +156,21 @@ def step(msg: str) -> None:
     print(paint("  »  ", C.PURPLE, C.BOLD) + msg)
 
 
-# Side-view gallop, head to the right. "~" is the mane and is drawn in Gentoo green.
-_HORSE_FRAMES: tuple[tuple[str, ...], ...] = (
-    (
-        r"       ,~~,    ",
-        r"      /    \   ",
-        r"  ___/  ~   )  ",
-        r" /         _/  ",
-        r"/    .----'    ",
-        r" \__/   \__/   ",
-    ),
-    (
-        r"       ,~~,    ",
-        r"      /    \   ",
-        r"  ___/  ~   )  ",
-        r" /         _/  ",
-        r"|    .----'|   ",
-        r" \__/    | \   ",
-    ),
-    (
-        r"       ,~~,    ",
-        r"      /    \   ",
-        r"  ___/  ~   )\ ",
-        r" /         _/ |",
-        r"/    .----'   |",
-        r" \__/        \_",
-    ),
-    (
-        r"       ,~~,    ",
-        r"      /    \   ",
-        r"  ___/  ~   )  ",
-        r" /         _/  ",
-        r" |   .----'    ",
-        r"/ \_/   \__/   ",
-    ),
-)
-
-
-def _paint_gentoo_ascii(line: str) -> str:
-    """Purple body, green where the line uses ~ (mane)."""
-    parts: list[str] = []
-    chunk: list[str] = []
-    accent: bool | None = None
-
-    def flush() -> None:
-        nonlocal accent
-        if not chunk:
-            return
-        color = C.GREEN if accent else C.PURPLE
-        parts.append(paint("".join(chunk), C.BOLD, color))
-        chunk.clear()
-
-    for ch in line:
-        is_accent = ch == "~"
-        if accent is not None and is_accent != accent:
-            flush()
-        accent = is_accent
-        chunk.append(ch)
-    flush()
-    return "".join(parts)
-
-
-def horse_progress(percent: int, remaining: str, frame: int = 0) -> None:
-    """ASCII horse in Gentoo purple and green. percent is how far the estimate has run."""
+def progress_bar(percent: int, remaining: str) -> None:
+    """One line. Command output above it stays on screen."""
     percent = max(0, min(100, int(percent)))
-    art = _HORSE_FRAMES[frame % len(_HORSE_FRAMES)]
-    art_w = max(len(row) for row in art)
-    track_w = 40
-    shift = percent * max(0, track_w - art_w) // 100
-    pad = " " * shift
-    print()
-    for row in art:
-        print("  " + pad + _paint_gentoo_ascii(row.ljust(art_w)))
-    filled = percent * track_w // 100
-    bar = paint("=" * filled, C.BOLD, C.GREEN) + paint("-" * (track_w - filled), C.DIM, C.PURPLE)
+    cells = 32
+    filled = percent * cells // 100
+    bar = paint("#" * filled, C.BOLD, C.GREEN) + paint("-" * (cells - filled), C.DIM, C.PURPLE)
     label = paint(f"{percent:3d}%", C.BOLD, C.GREEN) + "  " + paint(remaining, C.PURPLE)
-    print(f"  {bar}  {label}")
+    print(f"  [{bar}]  {label}", flush=True)
 
 
-class InstallGallop:
-    """Reprint the horse while host commands block, from elapsed / estimate."""
+class InstallProgress:
+    """Print a bar and the remaining estimate while host commands run.
+
+    Each update is its own line, so emerge and apt output is not overwritten.
+    """
 
     def __init__(self, minutes: int) -> None:
         import threading
@@ -245,39 +180,33 @@ class InstallGallop:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._started = 0.0
-        self._frame = 0
 
     def start(self) -> None:
         import time
 
         self._started = time.monotonic()
         self.tick()
-        self._thread = self._threading.Thread(target=self._loop, name="install-gallop", daemon=True)
+        self._thread = self._threading.Thread(target=self._loop, name="install-progress", daemon=True)
         self._thread.start()
 
     def tick(self) -> None:
+        import math
         import time
 
         from .estimate import format_remaining
-
-        import math
 
         elapsed = time.monotonic() - self._started if self._started else 0.0
         percent = min(99, int(elapsed / self.total_seconds * 100))
         left = max(0, math.ceil((self.total_seconds - elapsed) / 60))
         try:
-            horse_progress(percent, format_remaining(left), self._frame)
-            self._frame += 1
+            progress_bar(percent, format_remaining(left))
         except Exception:
             return
 
     def finish(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2)
-            self._thread = None
+        self.stop()
         try:
-            horse_progress(100, "done")
+            progress_bar(100, "done")
         except Exception:
             return
 

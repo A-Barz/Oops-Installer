@@ -122,20 +122,20 @@ def execute(cfg: InstallConfig) -> None:
     minutes = estimate_minutes(cfg)
     ui.info("Go outside for some fresh air and walk around a bit. This may take a while.")
     ui.ok(f"Estimated install time: {format_duration(minutes)}.")
-    gallop = None if cfg.dry_run else ui.InstallGallop(minutes)
-    if gallop is not None:
-        gallop.start()
+    progress = None if cfg.dry_run else ui.InstallProgress(minutes)
+    if progress is not None:
+        progress.start()
     error: BaseException | None = None
     try:
         _run_phases(cfg, runner, state, phases, root, rerun_on_resume)
     except (SystemExit, KeyboardInterrupt) as exc:
         error = exc
     finally:
-        if gallop is not None:
+        if progress is not None:
             if error is None and "done" in state.done:
-                gallop.finish()
+                progress.finish()
             else:
-                gallop.stop()
+                progress.stop()
     if error is None:
         return
     decision = ask_resume_or_unmount(cfg)
@@ -245,10 +245,81 @@ def _mountpoint_q(path: str) -> bool:
     return detect.is_mounted(path)
 
 
+def _leave_tree(mountpoint: str) -> None:
+    """chdir to / when this process is standing inside the install tree.
+
+    Unmounting /mnt/gentoo deletes the current directory. The next bash then
+    fails before it can run `mkdir --parents /mnt/gentoo`.
+    """
+    root = os.path.abspath(mountpoint or "/")
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        os.chdir("/")
+        return
+    if cwd == root or cwd.startswith(root + os.sep):
+        os.chdir("/")
+
+
+def _prepare_mountpoint(runner: Runner, dest: str) -> None:
+    """Handbook: `mkdir --parents` the mount point, then mount onto a directory.
+
+    `mkdir --parents` still exits "File exists" when the path is a symlink or a
+    regular file, which a live session or an earlier download can leave behind.
+    A wiped filesystem that is still mounted makes the same mkdir fail with an
+    I/O error. Replace a non-directory, drop a stale mount, then create it.
+    """
+    if not dest or not str(dest).startswith("/"):
+        raise SystemExit(f"Mount point must be an absolute path, not {dest!r}.")
+    linux_path = str(dest).replace("\\", "/").rstrip("/") or "/"
+    if linux_path == "/":
+        raise SystemExit("Refusing to use / as the Gentoo mount point.")
+    _leave_tree(dest)
+    quoted = shlex.quote(dest)
+    runner.shell(
+        "\n".join(
+            [
+                f"dest={quoted}",
+                'if [ -L "$dest" ] || { [ -e "$dest" ] && [ ! -d "$dest" ]; }; then',
+                '  rm -f "$dest" || { echo ">> $dest exists and is not a directory" >&2; exit 1; }',
+                "fi",
+                'if mountpoint -q "$dest" 2>/dev/null && ! stat "$dest" >/dev/null 2>&1; then',
+                '  echo ">> $dest is a stale mount; detaching it"',
+                '  umount -R "$dest" || umount -l "$dest" || { echo ">> could not unmount $dest" >&2; exit 1; }',
+                "  for _try in 1 2 3 4 5 6 7 8 9 10; do",
+                '    mountpoint -q "$dest" || break',
+                "    sleep 0.3",
+                "  done",
+                '  if mountpoint -q "$dest"; then echo ">> $dest is still mounted" >&2; exit 1; fi',
+                "fi",
+                'mkdir --parents "$dest" || {',
+                '  echo ">> mkdir --parents $dest failed" >&2',
+                '  ls -ld "$dest" "$(dirname "$dest")" >&2 || true',
+                "  exit 1",
+                "}",
+            ]
+        )
+    )
+
+
 def _root_fstype(cfg: InstallConfig) -> str:
     return {"ext4": "ext4", "xfs": "xfs", "btrfs": "btrfs", "f2fs": "f2fs", "jfs": "jfs"}.get(
         cfg.filesystem, "ext4"
     )
+
+
+def _efi_mount(cfg: InstallConfig) -> str:
+    """Handbook UEFI: ESP is mounted at /efi. /boot stays on the root filesystem."""
+    return cfg.mountpoint.rstrip("/") + "/efi"
+
+
+def _linux_root_type(cfg: InstallConfig) -> str:
+    """sgdisk type for the root partition. Handbook fdisk type 23 is 8304 on amd64."""
+    if cfg.luks:
+        return "8309"
+    if cfg.architecture == "arm64":
+        return "8305"
+    return "8304"
 
 
 def _release_disk_mounts(runner: Runner, disk: str) -> None:
@@ -288,7 +359,7 @@ def _mount_if_needed(
     allowed = {"ext4", "vfat", "btrfs", "xfs", "f2fs", "jfs"}
     if fstype not in allowed:
         fstype = "ext4"
-    runner.shell(f"mkdir -p {shlex.quote(dest)}")
+    _prepare_mountpoint(runner, dest)
     src = shlex.quote(source)
     dst = shlex.quote(dest)
     opt = f"-o {shlex.quote(options)} " if options else ""
@@ -324,6 +395,7 @@ def _unmount_path(runner: Runner, path: str) -> None:
 def _unmount_target(cfg: InstallConfig, runner: Runner) -> None:
     """Drop chroot binds, the target, swap, and LUKS so a new install can use the disk."""
     root = cfg.mountpoint.rstrip("/") or "/"
+    _leave_tree(root)
     ui.info(f"Unmounting {root} if it is busy from a previous run")
     for rel in ("dev/shm", "dev/pts", "dev", "sys", "proc", "run", "boot/efi", "efi", "boot"):
         _unmount_path(runner, root + "/" + rel)
@@ -520,9 +592,9 @@ def _ensure_target_mounted(cfg: InstallConfig, runner: Runner) -> None:
     else:
         ui.info(f"{cfg.mountpoint} is already mounted; leaving it in place.")
         if cfg.firmware == "uefi" and devices.get("esp"):
-            boot = cfg.mountpoint + "/boot"
-            if not _mountpoint_q(boot):
-                _mount_if_needed(runner, devices["esp"], boot, fstype="vfat")
+            efi = _efi_mount(cfg)
+            if not _mountpoint_q(efi):
+                _mount_if_needed(runner, devices["esp"], efi, fstype="vfat")
     cfg._devices = devices  # type: ignore[attr-defined]
     ui.ok("Target filesystems are mounted")
 
@@ -603,6 +675,8 @@ def phase_disks(cfg: InstallConfig, runner: Runner) -> None:
 
 def _wants_partition_swap(cfg: InstallConfig) -> bool:
     """True when swap should be a real partition (not an LVM LV or ZFS dataset)."""
+    if int(cfg.swap_size_gib or 0) < 1:
+        return False
     return cfg.swap_mode in {"partition", "both"} and cfg.layout not in {
         "lvm",
         "lvm-luks",
@@ -624,7 +698,7 @@ def _gpt_root_index(cfg: InstallConfig) -> int:
 
 
 def _sgdisk_gpt(cfg: InstallConfig, runner: Runner, disk: str) -> None:
-    """GPT: ESP or BIOS-boot, optional swap, then Linux root (8300 / 8309 if LUKS)."""
+    """GPT: ESP or BIOS-boot, optional swap, then Linux root (8304, or 8309 if LUKS)."""
     runner.shell(f"sgdisk --zap-all {shlex.quote(disk)}")
     n = 1
     if cfg.firmware == "uefi":
@@ -638,7 +712,7 @@ def _sgdisk_gpt(cfg: InstallConfig, runner: Runner, disk: str) -> None:
     if _wants_partition_swap(cfg):
         runner.shell(f"sgdisk -n {n}:0:+{cfg.swap_size_gib}G -t {n}:8200 -c {n}:SWAP {shlex.quote(disk)}")
         n += 1
-    ptype = "8309" if cfg.luks else "8300"
+    ptype = _linux_root_type(cfg)
     runner.shell(f"sgdisk -n {n}:0:0 -t {n}:{ptype} -c {n}:ROOT {shlex.quote(disk)}")
 
 
@@ -694,9 +768,10 @@ def _layout_zfs(cfg: InstallConfig, runner: Runner) -> None:
     runner.shell("zpool set bootfs=rpool/ROOT/gentoo rpool")
     runner.shell("zfs umount -a || true")
     runner.shell("zpool export rpool || true")
+    _prepare_mountpoint(runner, cfg.mountpoint)
     runner.shell(f"zpool import -R {shlex.quote(cfg.mountpoint)} rpool")
     if cfg.firmware == "uefi":
-        _mount_if_needed(runner, part_name(disk, 1), cfg.mountpoint + "/boot", fstype="vfat")
+        _mount_if_needed(runner, part_name(disk, 1), _efi_mount(cfg), fstype="vfat")
 
 
 def _map_devices(cfg: InstallConfig) -> dict[str, str]:
@@ -749,6 +824,27 @@ def _map_devices(cfg: InstallConfig) -> dict[str, str]:
     return {"esp": "", "boot": boot, "swap": "", "root": part_name(disk, 2), "luks_source": part_name(disk, 2)}
 
 
+def _mkfs_ext4(device: str) -> str:
+    """ext4 create. Handbook: partitions under 8 GiB need -T small or inodes run out."""
+    quoted = shlex.quote(device)
+    return (
+        f"bytes=$(blockdev --getsize64 {quoted} 2>/dev/null || echo 0); "
+        f'if [ "$bytes" -gt 0 ] && [ "$bytes" -lt 8589934592 ]; then '
+        f"mkfs.ext4 -F -T small {quoted}; else mkfs.ext4 -F {quoted}; fi"
+    )
+
+
+def _mkfs_xfs(device: str) -> str:
+    """xfs create. Handbook: xfsprogs 6.18 defaults are not readable by the LTS kernel."""
+    quoted = shlex.quote(device)
+    conf = "/usr/share/xfsprogs/mkfs/lts_6.18.conf"
+    return (
+        f"if [ -f {shlex.quote(conf)} ]; then "
+        f"mkfs.xfs -f -c options={shlex.quote(conf)} {quoted}; "
+        f"else mkfs.xfs -f {quoted}; fi"
+    )
+
+
 def _mkfs(cfg: InstallConfig, runner: Runner, devices: dict[str, str]) -> None:
     """Format ESP as FAT32, swap with mkswap, root with the chosen filesystem."""
     for node in (devices.get("esp"), devices.get("boot"), devices.get("swap"), devices.get("root")):
@@ -763,16 +859,16 @@ def _mkfs(cfg: InstallConfig, runner: Runner, devices: dict[str, str]) -> None:
     if devices.get("esp") and cfg.firmware == "uefi":
         runner.shell(f"mkfs.vfat -F32 {shlex.quote(devices['esp'])}")
     if devices.get("boot") and devices["boot"] != devices.get("esp"):
-        runner.shell(f"mkfs.ext4 -F {shlex.quote(devices['boot'])}")
+        runner.shell(_mkfs_ext4(devices["boot"]))
     if devices.get("swap") and cfg.swap_mode in {"partition", "both"}:
         runner.shell(f"mkswap {shlex.quote(devices['swap'])}")
         runner.shell(f"swapon {shlex.quote(devices['swap'])} || true")
     root = devices["root"]
     fs = cfg.filesystem
     if fs == "ext4":
-        runner.shell(f"mkfs.ext4 -F {shlex.quote(root)}")
+        runner.shell(_mkfs_ext4(root))
     elif fs == "xfs":
-        runner.shell(f"mkfs.xfs -f {shlex.quote(root)}")
+        runner.shell(_mkfs_xfs(root))
     elif fs == "btrfs":
         # A previous Windows volume leaves an NTFS boot sector at the start of
         # this partition. wipefs on the whole disk does not reach it, and
@@ -793,7 +889,7 @@ def _mount_tree(
 ) -> None:
     """Mount root (and Btrfs subvols / ESP) under cfg.mountpoint for stage3 extract."""
     root = cfg.mountpoint
-    runner.shell(f"mkdir -p {shlex.quote(root)}")
+    _prepare_mountpoint(runner, root)
     if cfg.layout == "zfs":
         return
     if cfg.layout == "btrfs-subvols":
@@ -818,9 +914,12 @@ def _mount_tree(
             _mount_if_needed(runner, devices["root"], root + "/" + mp, f"{extra},subvol={sub}", fstype="btrfs")
     else:
         _mount_if_needed(runner, devices["root"], root, fstype=_root_fstype(cfg))
+    # Handbook: mount the root partition first. For UEFI, mkdir /mnt/gentoo/efi
+    # and mount the ESP there. /boot is created by the stage3 tarball on the
+    # root filesystem. Mounting the ESP on /boot before extract puts the stage
+    # tarball's /boot onto FAT, which rejects the permissions tar tries to set.
     if cfg.firmware == "uefi" and devices.get("esp"):
-        runner.shell(f"mkdir -p {shlex.quote(root + '/efi')} {shlex.quote(root + '/boot')}")
-        _mount_if_needed(runner, devices["esp"], root + "/boot", fstype="vfat")
+        _mount_if_needed(runner, devices["esp"], _efi_mount(cfg), fstype="vfat")
     elif devices.get("boot") and devices["boot"] != devices.get("esp") and devices["boot"] != devices.get("root"):
         _mount_if_needed(runner, devices["boot"], root + "/boot", fstype="ext4")
 
@@ -862,7 +961,7 @@ def phase_stage3(cfg: InstallConfig, runner: Runner, root: str) -> None:
     latest = f"https://distfiles.gentoo.org/releases/{cfg.architecture}/autobuilds/latest-{flavor}.txt"
     ui.info(f"Resolving latest {flavor}")
     pointer = f"{root}/latest-stage.txt"
-    runner.shell(f"mkdir -p {shlex.quote(root)}")
+    _prepare_mountpoint(runner, root)
     runner.shell(f"wget -O {shlex.quote(pointer)} {shlex.quote(latest)}")
     if cfg.dry_run:
         tarball = f"{flavor}-DATE.tar.xz"
@@ -909,13 +1008,29 @@ def phase_chroot_mounts(cfg: InstallConfig, runner: Runner, root: str) -> None:
     sysfs = shlex.quote(root + "/sys")
     dev = shlex.quote(root + "/dev")
     run = shlex.quote(root + "/run")
-    runner.shell(f"mkdir -p {proc} {sysfs} {dev} {run}")
+    # Handbook, non-Gentoo live media: /dev/shm is often a symlink to /run/shm.
+    # After rbind that link points nowhere inside the chroot.
+    runner.shell(
+        "\n".join(
+            [
+                "if [ -L /dev/shm ]; then rm /dev/shm && mkdir /dev/shm; fi",
+                "if ! mountpoint -q /dev/shm; then mount --types tmpfs --options nosuid,nodev,noexec shm /dev/shm || true; fi",
+                "chmod 1777 /dev/shm || true",
+                "if [ -d /run/shm ]; then chmod 1777 /run/shm || true; fi",
+            ]
+        )
+    )
+    _prepare_mountpoint(runner, root + "/proc")
+    _prepare_mountpoint(runner, root + "/sys")
+    _prepare_mountpoint(runner, root + "/dev")
+    _prepare_mountpoint(runner, root + "/run")
     runner.shell(f"mountpoint -q {proc} || mount --types proc /proc {proc}")
     runner.shell(f"mountpoint -q {sysfs} || mount --rbind /sys {sysfs}")
     runner.shell(f"mount --make-rslave {sysfs} || true")
     runner.shell(f"mountpoint -q {dev} || mount --rbind /dev {dev}")
     runner.shell(f"mount --make-rslave {dev} || true")
     runner.shell(f"mountpoint -q {run} || mount --bind /run {run} || true")
+    runner.shell(f"mount --make-slave {run} || true")
     runner.shell(f"cp /etc/resolv.conf {shlex.quote(root + '/etc/resolv.conf')} || true")
 
 
@@ -1503,7 +1618,7 @@ def _final_tool_checks(cfg: InstallConfig, loaders: list[str]) -> str:
         "missing=0",
         "kernel_ok=0",
         "boot_ok=0",
-        "if ls /boot/vmlinuz* >/dev/null 2>&1 || ls /boot/EFI/Linux/*.efi >/dev/null 2>&1; then kernel_ok=1; fi",
+        "if ls /boot/vmlinuz* >/dev/null 2>&1 || ls /efi/EFI/Linux/*.efi /boot/EFI/Linux/*.efi >/dev/null 2>&1; then kernel_ok=1; fi",
     ]
     for test, label in checks:
         lines.append(f"if ! {{ {test}; }}; then echo \">> still missing: {label}\" >&2; fi")
@@ -1762,23 +1877,24 @@ def _grub_uefi_install(target: str) -> str:
             "  mountpoint -q /sys/firmware/efi/efivars || mount -t efivarfs efivarfs /sys/firmware/efi/efivars || true",
             "  mount -o remount,rw,nosuid,nodev,noexec -t efivarfs efivarfs /sys/firmware/efi/efivars || true",
             "fi",
-            "mkdir -p /boot/grub /boot/EFI",
+            "mkdir --parents /efi /boot/grub",
+            "if ! mountpoint -q /efi; then echo '>> /efi is not mounted; the ESP belongs there (handbook)' >&2; fi",
             "if ! command -v grub-install >/dev/null 2>&1; then",
             '  echo ">> grub-install does not exist; building sys-boot/grub from source"',
             "  emerge --ask=n --usepkg=n --getbinpkg=n sys-boot/grub || echo '>> grub source build failed' >&2",
             "fi",
-            f"grub-install --target={target} --efi-directory=/boot --bootloader-id=Gentoo",
+            f"grub-install --target={target} --efi-directory=/efi --bootloader-id=Gentoo",
             "grub_status=$?",
             'if [ "$grub_status" -eq 132 ]; then',
             '  echo ">> grub-install: illegal instruction; rebuilding sys-boot/grub from source"',
             "  disable_binpkgs",
             "  emerge --ask=n --usepkg=n --getbinpkg=n sys-boot/grub || echo '>> grub source build failed' >&2",
-            f"  grub-install --target={target} --efi-directory=/boot --bootloader-id=Gentoo",
+            f"  grub-install --target={target} --efi-directory=/efi --bootloader-id=Gentoo",
             "  grub_status=$?",
             "fi",
             'if [ "$grub_status" -ne 0 ]; then',
             '  echo ">> grub-install could not register NVRAM; writing the removable EFI fallback"',
-            f"  grub-install --target={target} --efi-directory=/boot --bootloader-id=Gentoo --removable --no-nvram || echo '>> grub-install failed' >&2",
+            f"  grub-install --target={target} --efi-directory=/efi --bootloader-id=Gentoo --removable --no-nvram || echo '>> grub-install failed' >&2",
             "fi",
             "if command -v grub-mkconfig >/dev/null 2>&1; then",
             "  grub-mkconfig -o /boot/grub/grub.cfg || echo '>> grub-mkconfig failed' >&2",
@@ -2794,7 +2910,7 @@ fi
                 )
         elif bl == "systemd-boot":
             atom = "sys-apps/systemd" if cfg.init_system == "systemd" else "sys-apps/systemd-utils"
-            cmds.append(_retry_sigill(atom, "bootctl install"))
+            cmds.append(_retry_sigill(atom, "bootctl install --esp-path=/efi"))
         elif bl == "refind":
             cmds.append(_retry_sigill("sys-boot/refind", "refind-install"))
         elif bl == "syslinux":
@@ -3103,17 +3219,18 @@ INITRD=$(ls -1 /boot/initramfs* /boot/initrd* 2>/dev/null | tail -n1 || true)
     part = detect.partition_number(esp) if esp else 1
     loader = "\\EFI\\BOOT\\" + efi_bin
     return f"""
-mkdir -p /boot/EFI/BOOT /boot/EFI/limine
-cp -v /usr/share/limine/{efi_bin} /boot/EFI/BOOT/{efi_bin}
-cp -v /usr/share/limine/{efi_bin} /boot/EFI/limine/{efi_bin} || true
-cat > /boot/limine.conf << 'LIMINE'
+mkdir --parents /efi/EFI/BOOT /efi/EFI/limine
+cp -v /usr/share/limine/{efi_bin} /efi/EFI/BOOT/{efi_bin}
+cp -v /usr/share/limine/{efi_bin} /efi/EFI/limine/{efi_bin} || true
+cat > /efi/limine.conf << 'LIMINE'
 {conf}
 LIMINE
-cp /boot/limine.conf /boot/EFI/BOOT/limine.conf || true
+cp /efi/limine.conf /efi/EFI/BOOT/limine.conf || true
 KERNEL=$(ls -1 /boot/vmlinuz-* 2>/dev/null | tail -n1 || true)
 INITRD=$(ls -1 /boot/initramfs* /boot/initrd* 2>/dev/null | tail -n1 || true)
-[ -n "$KERNEL" ] && ln -sfn "$(basename "$KERNEL")" /boot/vmlinuz
-[ -n "$INITRD" ] && ln -sfn "$(basename "$INITRD")" /boot/initramfs
+# The ESP is FAT. Symlinks are refused, and Limine loads boot(): from that partition.
+[ -n "$KERNEL" ] && cp -f "$KERNEL" /efi/vmlinuz
+[ -n "$INITRD" ] && cp -f "$INITRD" /efi/initramfs
 if command -v efibootmgr >/dev/null 2>&1; then
   efibootmgr --create --disk {shlex.quote(disk)} --part {part} --label "Gentoo Limine" --loader '{loader}' --unicode || true
 fi
@@ -3135,7 +3252,7 @@ def _fstab(cfg: InstallConfig, devices: dict[str, str]) -> str:
     elif cfg.filesystem != "zfs":
         lines.append(f"{root} / {fs} noatime 0 1")
     if cfg.firmware == "uefi" and devices.get("esp"):
-        lines.append(f"{devices['esp']} /boot vfat noatime 0 2")
+        lines.append(f"{devices['esp']} /efi vfat noatime 0 2")
     elif devices.get("boot") and devices["boot"] != devices.get("esp"):
         lines.append(f"{devices['boot']} /boot ext4 noatime 0 2")
     if devices.get("swap") and cfg.swap_mode in {"partition", "both"}:

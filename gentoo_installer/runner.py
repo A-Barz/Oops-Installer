@@ -22,6 +22,22 @@ from typing import Sequence
 from . import ui
 
 
+def _safe_cwd(preferred: str | None) -> str:
+    """Directory for a child process.
+
+    After `umount /mnt/gentoo`, a shell whose cwd was that tree cannot start.
+    The following handbook command is `mkdir --parents /mnt/gentoo`, so the
+    failure is reported there. An explicit cwd is kept; a vanished one becomes /.
+    """
+    if preferred:
+        return preferred
+    try:
+        return os.getcwd()
+    except OSError:
+        os.chdir("/")
+        return "/"
+
+
 class Runner:
     def __init__(self, dry_run: bool = False, log_path: str = "/var/tmp/gentoo-live-installer.log") -> None:
         self.dry_run = dry_run
@@ -65,7 +81,7 @@ class Runner:
             text=True,
             capture_output=capture,
             env=merged,
-            cwd=cwd,
+            cwd=_safe_cwd(cwd),
             input=input_text,
         )
         if proc.stdout:
@@ -92,7 +108,7 @@ class Runner:
         env = os.environ.copy()
         env.pop("FEATURES", None)
         env.pop("PORTAGE_FEATURES", None)
-        proc = subprocess.run(["bash", "-c", script], check=False, text=True, env=env)
+        proc = subprocess.run(["bash", "-c", script], check=False, text=True, env=env, cwd=_safe_cwd(None))
         if check and proc.returncode != 0:
             ui.error(f"Shell command failed ({proc.returncode})")
             sys.exit(proc.returncode)

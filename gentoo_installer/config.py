@@ -300,8 +300,11 @@ def part_name(disk: str, number: int) -> str:
 
     NVMe / MMC / loop devices use pN (/dev/nvme0n1p1).
     SCSI/SATA/VirtIO use N (/dev/sda1).
+    An empty disk used to raise IndexError before mkdir /mnt/gentoo.
     """
-    disk = disk.rstrip("/")
+    disk = (disk or "").strip().rstrip("/")
+    if not disk or number < 1:
+        return ""
     if disk[-1].isdigit() or "nvme" in disk or "mmcblk" in disk or "loop" in disk:
         return f"{disk}p{number}"
     return f"{disk}{number}"

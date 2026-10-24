@@ -160,6 +160,9 @@ How long it takes
 Downloading stage3 is minutes on a decent link. Emerging a full desktop
 can take many hours, especially without binary packages.
 
+The install prints a one-line progress bar with the estimate and the time
+remaining. apt, wget, and emerge output keeps scrolling above that line.
+
 For a first install, prefer:
 
   * Official binhost (binary packages) when the wizard offers it
@@ -183,9 +186,9 @@ Remove the Ubuntu live USB so firmware boots the Gentoo disk.
 If you enabled LUKS, you will type the passphrase at boot (unless you later
 enroll TPM2 yourself; this installer only drops a helper script).
 
-If you used Limine, kernel upgrades later may need you to refresh
-/boot/limine.conf or the vmlinuz symlink. GRUB's grub-mkconfig path is
-the more automatic handbook default.
+If you used Limine on UEFI, kernel upgrades later may need you to refresh
+/efi/limine.conf and copy the kernel onto the ESP. BIOS Limine uses
+/boot/limine.conf. GRUB's grub-mkconfig path is the more automatic handbook default.
 
 If it fails part-way
 --------------------

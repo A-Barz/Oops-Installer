@@ -300,6 +300,7 @@ def _disks(cfg: InstallConfig) -> None:
         )
     if cfg.firmware == "uefi":
         cfg.esp_size_mib = int(ui.prompt("EFI System Partition size in MiB", str(cfg.esp_size_mib)))
+        ui.info("The ESP is mounted at /efi. /boot stays on the root filesystem (handbook).")
 
 
 def _stage(cfg: InstallConfig) -> None:
