@@ -12,7 +12,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from . import catalog, detect, ui
-from .config import InstallConfig
+from .config import InstallConfig, part_name
+from .estimate import estimate_minutes, format_duration
 
 HANDBOOK = "https://wiki.gentoo.org/wiki/Handbook:AMD64"
 
@@ -50,10 +51,30 @@ def fill_missing_secrets(cfg: InstallConfig) -> None:
         else:
             cfg.resume = False
             ui.warn("Full restart: the disk will be unmounted, then wiped if this profile says so.")
-    ui.danger(f"This saved profile will operate on {cfg.target_disk}")
+    _announce_estimate(cfg)
+    _warn_before_wipe(cfg)
     if not ui.ask_yes_no("Continue with these imported settings?", False):
         raise SystemExit("Aborted after loading config.")
     _confirm_disk(cfg)
+
+
+def warn_if_ntfs_present() -> None:
+    """Stop at startup when a Windows filesystem is visible.
+
+    The scan is the whole machine, before a target disk is chosen.
+    Dual boot is not supported, so an NTFS volume has to be acknowledged.
+    """
+    found = [part for part in detect.list_partitions() if detect.partition_is_ntfs(part)]
+    if not found:
+        return
+    ui.danger("NTFS filesystems were found. Oops-Installer does not support dual boot.")
+    for part in found:
+        label = f"  {part['label']}" if part.get("label") else ""
+        ui.warn(f"{part['path']}  {part['size']}  NTFS{label}  on {part['disk']}")
+    ui.warn("A later confirmation can wipe the disk you choose, including these NTFS partitions.")
+    ui.warn("Continue only if you know what you are doing.")
+    if not ui.ask_yes_no("You know what you are doing. Continue the installer?", False):
+        raise SystemExit("Aborted. NTFS partitions are present and dual boot is not supported.")
 
 
 def run_wizard(cfg: InstallConfig) -> InstallConfig:
@@ -751,6 +772,120 @@ def _login_manager_label(cfg: InstallConfig) -> str:
     return f"{name} — starts at boot"
 
 
+def _swap_uses_partition(cfg: InstallConfig) -> bool:
+    return cfg.swap_mode in {"partition", "both"} and cfg.layout not in {
+        "lvm",
+        "lvm-luks",
+        "zfs",
+        "existing",
+    }
+
+
+def _layout_partition_paths(cfg: InstallConfig, disk: str) -> list[str]:
+    """Partition nodes this layout will format after the table is written."""
+    if not disk:
+        return []
+    if cfg.firmware == "uefi" and cfg.partition_table == "gpt":
+        paths = [part_name(disk, 1)]
+        idx = 2
+        if _swap_uses_partition(cfg):
+            paths.append(part_name(disk, idx))
+            idx += 1
+        paths.append(part_name(disk, idx))
+        return paths
+    if cfg.partition_table == "gpt":
+        paths = [part_name(disk, 2)]
+        idx = 3
+        if _swap_uses_partition(cfg):
+            paths.append(part_name(disk, idx))
+            idx += 1
+        paths.append(part_name(disk, idx))
+        return paths
+    paths = [part_name(disk, 1)]
+    if _swap_uses_partition(cfg):
+        paths.extend([part_name(disk, 2), part_name(disk, 3)])
+    else:
+        paths.append(part_name(disk, 2))
+    return paths
+
+
+def _wipe_devices(cfg: InstallConfig) -> list[str]:
+    """Disks and partitions this commit will destroy. Empty on resume."""
+    if cfg.resume:
+        return []
+    if cfg.layout == "existing":
+        named = [cfg.existing_esp, cfg.existing_boot, cfg.existing_root, cfg.existing_swap]
+        return [path for path in named if path]
+    disks = [cfg.target_disk]
+    if cfg.layout == "mdraid1" and cfg.extra_raid_disk:
+        disks.append(cfg.extra_raid_disk)
+    disks = [disk for disk in disks if disk]
+    if cfg.wipe_disk:
+        known = detect.list_partitions()
+        paths: list[str] = []
+        for disk in disks:
+            paths.append(disk)
+            paths.extend(part["path"] for part in known if part.get("disk") == disk)
+        return paths
+    paths = []
+    for disk in disks:
+        paths.extend(_layout_partition_paths(cfg, disk))
+    return paths
+
+
+def _warn_before_wipe(cfg: InstallConfig) -> None:
+    """Name every disk and partition the commit will wipe, including Windows ones."""
+    ui.danger("Oops-Installer does not support dual boot.")
+    if cfg.resume:
+        ui.info("Resume keeps the files already on the target. This confirmation will not wipe it.")
+        return
+    if cfg.dry_run:
+        ui.info("Dry-run prints the wipe commands and does not change the disk.")
+    devices = _wipe_devices(cfg)
+    if not devices:
+        ui.warn("No disk was selected. Continuing will not wipe a device until one is set.")
+        return
+    known = {part["path"]: part for part in detect.list_partitions()}
+    ui.danger("Committing to this install wipes these disks and partitions:")
+    microsoft: list[str] = []
+    for path in devices:
+        part = known.get(path)
+        if part is None and path in {cfg.target_disk, cfg.extra_raid_disk}:
+            ui.warn(f"{path}  whole disk — every partition on it")
+            continue
+        if part is None:
+            ui.warn(f"{path}  will be formatted")
+            continue
+        bits = [path, str(part.get("size") or "?")]
+        if part.get("fstype"):
+            bits.append(str(part["fstype"]))
+        if part.get("label"):
+            bits.append(str(part["label"]))
+        if part.get("parttype"):
+            bits.append(str(part["parttype"]))
+        if detect.partition_is_microsoft(part):
+            bits.append("WILL BE WIPED")
+            microsoft.append(path)
+        ui.warn("  ".join(bits))
+    if microsoft:
+        ui.danger(
+            "A Microsoft partition is in that list. It will be wiped with the rest: "
+            + ", ".join(microsoft)
+        )
+    elif cfg.wipe_disk and not any(path in known for path in devices):
+        ui.warn("Filesystems on that disk could not be read. A Microsoft or NTFS partition on it will be wiped too.")
+    question = "Continue the dry-run?" if cfg.dry_run else "Wipe these disks and partitions?"
+    if not ui.ask_yes_no(question, False):
+        raise SystemExit("Aborted before wiping disks or partitions.")
+
+
+def _announce_estimate(cfg: InstallConfig) -> None:
+    """Tell the user to step away, then say how long this selection should take."""
+    minutes = estimate_minutes(cfg)
+    ui.info("Go outside for some fresh air and walk around a bit. This may take a while.")
+    ui.ok(f"Estimated install time: {format_duration(minutes)}.")
+
+
 def _review(cfg: InstallConfig) -> None:
     """Last safe abort point. User must re-type the disk path before execute()."""
     ui.chapter("✓", "Review — target disk has not been changed", HANDBOOK)
@@ -785,8 +920,11 @@ def _review(cfg: InstallConfig) -> None:
         ("Extra packages", str(len(cfg.extra_packages))),
         ("Binhost", str(cfg.binhost)),
         ("Dry-run", str(cfg.dry_run)),
+        ("Estimate", format_duration(estimate_minutes(cfg))),
     ]
     ui.summary_table(rows)
+    _announce_estimate(cfg)
+    _warn_before_wipe(cfg)
     ui.danger(f"Continuing will operate on {cfg.target_disk}")
     if not ui.ask_yes_no("Proceed with these settings?", False):
         raise SystemExit("Aborted by user before any disk changes.")

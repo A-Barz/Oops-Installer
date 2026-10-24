@@ -47,6 +47,8 @@ WAYLAND_COMPOSITORS: list[Pkg] = [
     Pkg("gui-wm/labwc", "Labwc — Openbox-style stacking compositor"),
     Pkg("gui-wm/dwl", "dwl — suckless dwm for Wayland"),
     Pkg("x11-wm/qtile", "Qtile — Python WM on Wayland"),
+    Pkg("dev-libs/weston", "Weston — Wayland reference compositor"),
+    Pkg("gui-wm/gamescope", "Gamescope — micro-compositor"),
 ]
 
 # Suckless dwm and i3. The long X11/DE window-manager list is not offered.
@@ -61,6 +63,8 @@ WINDOW_MANAGERS: list[Pkg] = WAYLAND_COMPOSITORS + X11_WINDOW_MANAGERS
 _SESSION_OVERRIDE: dict[str, tuple[str, str, str] | None] = {
     "gui-wm/hyprland": ("Hyprland", "Hyprland", "wayland"),
     "x11-wm/qtile": ("Qtile (Wayland)", "qtile start -b wayland", "wayland"),
+    "dev-libs/weston": ("Weston", "weston", "wayland"),
+    "gui-wm/gamescope": ("Gamescope", "gamescope -- foot", "wayland"),
     "x11-wm/dwm": ("dwm", "start-dwm", "x11"),
     "x11-wm/i3": ("i3", "i3", "x11"),
 }
@@ -112,6 +116,18 @@ REMOVED_GURU_ATOMS = frozenset(
     }
 )
 
+# Offered packages that are still ~arch on a stable system. Keywording them
+# keeps one masked atom from failing its emerge.
+TESTING_ATOMS = frozenset(
+    {
+        "gui-wm/gamescope",
+        "x11-themes/kvantum",
+        "x11-themes/tela-icon-theme",
+        "x11-themes/numix-icon-theme-circle",
+        "media-fonts/iosevka",
+    }
+)
+
 # Installed for every selected Wayland compositor. These work on Hyprland,
 # Sway, Wayfire, labwc, dwl, and Qtile. They are not a separate checklist.
 WAYLAND_BASE: list[Pkg] = [
@@ -155,6 +171,12 @@ WM_REQUIREMENTS: dict[str, list[Pkg]] = {
     ],
     "x11-wm/qtile": [
         Pkg("x11-terms/alacritty", "Alacritty"),
+    ],
+    "dev-libs/weston": [
+        Pkg("gui-apps/foot", "foot terminal"),
+    ],
+    "gui-wm/gamescope": [
+        Pkg("gui-apps/foot", "foot terminal"),
     ],
     "x11-wm/dwm": [
         Pkg("x11-base/xorg-server", "X.Org server"),
@@ -685,18 +707,64 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
         ),
     ),
     (
-        "fonts-themes",
-        "Fonts & themes",
+        "icon-themes",
+        "Icon themes",
+        _pkgs(
+            Pkg("x11-themes/papirus-icon-theme", "Papirus icons"),
+            Pkg("x11-themes/adwaita-icon-theme", "Adwaita icons"),
+            Pkg("x11-themes/tela-icon-theme", "Tela icons"),
+            Pkg("x11-themes/numix-icon-theme-circle", "Numix Circle icons"),
+            Pkg("kde-frameworks/breeze-icons", "Breeze icons"),
+        ),
+    ),
+    (
+        "gtk-themes",
+        "GTK themes",
+        _pkgs(
+            Pkg("x11-themes/arc-theme", "Arc"),
+            Pkg("x11-themes/greybird", "Greybird"),
+            Pkg("x11-themes/numix-gtk-theme", "Numix"),
+            Pkg("x11-themes/clearlooks-phenix", "Clearlooks Phenix"),
+            Pkg("x11-themes/adapta-gtk-theme", "Adapta"),
+        ),
+    ),
+    (
+        "qt-themes",
+        "Qt themes",
+        _pkgs(
+            Pkg("x11-themes/kvantum", "Kvantum — SVG theme engine"),
+            Pkg("x11-themes/adwaita-qt", "Adwaita Qt"),
+            Pkg("x11-themes/qtcurve", "QtCurve"),
+            Pkg("kde-plasma/breeze", "Breeze Qt style"),
+        ),
+    ),
+    (
+        "fonts",
+        "Fonts",
         _pkgs(
             Pkg("media-fonts/fonts-meta", "fonts-meta"),
             Pkg("media-fonts/noto", "Noto"),
             Pkg("media-fonts/noto-emoji", "Noto Emoji"),
+            Pkg("media-fonts/noto-cjk", "Noto CJK"),
             Pkg("media-fonts/hack", "Hack"),
             Pkg("media-fonts/jetbrains-mono", "JetBrains Mono"),
             Pkg("media-fonts/fira-code", "Fira Code"),
-            Pkg("x11-themes/papirus-icon-theme", "Papirus icons"),
-            Pkg("x11-themes/arc-theme", "Arc GTK theme"),
-            Pkg("x11-themes/adwaita-icon-theme", "Adwaita icons"),
+            Pkg("media-fonts/fira-mono", "Fira Mono"),
+            Pkg("media-fonts/fira-sans", "Fira Sans"),
+            Pkg("media-fonts/iosevka", "Iosevka"),
+            Pkg("media-fonts/cascadia-code", "Cascadia Code"),
+            Pkg("media-fonts/fantasque-sans-mono", "Fantasque Sans Mono"),
+            Pkg("media-fonts/liberation-fonts", "Liberation"),
+            Pkg("media-fonts/dejavu", "DejaVu"),
+            Pkg("media-fonts/roboto", "Roboto"),
+            Pkg("media-fonts/cantarell", "Cantarell"),
+            Pkg("media-fonts/droid", "Droid"),
+            Pkg("media-fonts/croscorefonts", "Croscore"),
+            Pkg("media-fonts/crosextrafonts-carlito", "Carlito"),
+            Pkg("media-fonts/crosextrafonts-caladea", "Caladea"),
+            Pkg("media-fonts/fontawesome", "Font Awesome"),
+            Pkg("media-fonts/terminus-font", "Terminus"),
+            Pkg("media-fonts/unifont", "Unifont"),
         ),
     ),
     (

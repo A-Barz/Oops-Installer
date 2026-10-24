@@ -25,6 +25,7 @@ from pathlib import Path
 
 from . import catalog, detect, ui
 from .config import InstallConfig, part_name
+from .estimate import estimate_minutes, format_duration
 from .rev import INSTALLER_REV
 from .runner import Runner, State
 
@@ -117,6 +118,23 @@ def execute(cfg: InstallConfig) -> None:
             "Existing files stay. Disks are not formatted or repartitioned."
         )
     ui.info(f"Oops Installer rev {INSTALLER_REV}")
+    minutes = estimate_minutes(cfg)
+    ui.info("Go outside for some fresh air and walk around a bit. This may take a while.")
+    ui.ok(f"Estimated install time: {format_duration(minutes)}.")
+    gallop = None if cfg.dry_run else ui.InstallGallop(minutes)
+    if gallop is not None:
+        gallop.start()
+    try:
+        _run_phases(cfg, runner, state, phases, root, rerun_on_resume)
+    finally:
+        if gallop is not None:
+            if "done" in state.done:
+                gallop.finish()
+            else:
+                gallop.stop()
+
+
+def _run_phases(cfg: InstallConfig, runner: Runner, state: State, phases, root: str, rerun_on_resume: set[str]) -> None:
     for name, fn in phases:
         ui.chapter("→", f"Phase: {name}", "https://wiki.gentoo.org/wiki/Handbook:AMD64")
         if cfg.resume and name in rerun_on_resume:
@@ -209,12 +227,71 @@ def _mountpoint_q(path: str) -> bool:
     return detect.is_mounted(path)
 
 
-def _mount_if_needed(runner: Runner, source: str, dest: str, options: str = "") -> None:
-    """Mount dest if it is not already a mountpoint (resume-safe)."""
-    runner.shell(f"mkdir -p {shlex.quote(dest)}")
-    opt = f"-o {options} " if options else ""
+def _root_fstype(cfg: InstallConfig) -> str:
+    return {"ext4": "ext4", "xfs": "xfs", "btrfs": "btrfs", "f2fs": "f2fs", "jfs": "jfs"}.get(
+        cfg.filesystem, "ext4"
+    )
+
+
+def _release_disk_mounts(runner: Runner, disk: str) -> None:
+    """Unmount live-desktop automounts of this disk so mkfs and mount can use it.
+
+    Ubuntu XFCE mounts a Windows volume as soon as it sees one. Leaving that
+    mount up makes the later Gentoo mount look at a busy or half-wiped NTFS.
+    """
+    if not disk or not disk.startswith("/dev/"):
+        return
+    q = shlex.quote(disk)
     runner.shell(
-        f"mountpoint -q {shlex.quote(dest)} || mount {opt}{shlex.quote(source)} {shlex.quote(dest)}"
+        "\n".join(
+            [
+                f"for part in $(lsblk -ln -o PATH {q} 2>/dev/null || true); do",
+                '  findmnt -rn -o TARGET -S "$part" 2>/dev/null | while IFS= read -r mnt; do',
+                '    umount "$mnt" || umount -l "$mnt" || true',
+                "  done",
+                "done",
+                "udevadm settle || true",
+            ]
+        )
+    )
+
+
+def _mount_if_needed(
+    runner: Runner, source: str, dest: str, options: str = "", fstype: str = ""
+) -> None:
+    """Mount dest if it is not already a mountpoint (resume-safe).
+
+    The type has to be explicit. A typeless mount on Ubuntu asks the in-kernel
+    ntfs3 driver first, and that driver fails the whole call with
+    "NTFS signature is missing". Btrfs is the case that always hits this:
+    mkfs.btrfs writes its magic at 64KiB, so the first sector is not a
+    filesystem signature and ntfs3 aborts the mount before subvolumes exist.
+    """
+    allowed = {"ext4", "vfat", "btrfs", "xfs", "f2fs", "jfs"}
+    if fstype not in allowed:
+        fstype = "ext4"
+    runner.shell(f"mkdir -p {shlex.quote(dest)}")
+    src = shlex.quote(source)
+    dst = shlex.quote(dest)
+    opt = f"-o {shlex.quote(options)} " if options else ""
+    runner.shell(
+        "\n".join(
+            [
+                f"if ! mountpoint -q {dst}; then",
+                f"  findmnt -rn -o TARGET -S {src} 2>/dev/null | while IFS= read -r other; do",
+                f'    [ "$other" = {dst} ] && continue',
+                '    umount "$other" || umount -l "$other" || true',
+                "  done",
+                "  for _try in 1 2 3 4 5 6 7 8 9 10; do",
+                f"    [ -b {src} ] && break",
+                "    udevadm settle || true",
+                "    sleep 0.3",
+                "  done",
+                f'  if [ ! -b {src} ]; then echo ">> block device {source} is missing" >&2; exit 1; fi',
+                f"  mount -t {fstype} {opt}{src} {dst}",
+                "fi",
+            ]
+        )
     )
 
 
@@ -222,6 +299,9 @@ def _unmount_target(cfg: InstallConfig, runner: Runner) -> None:
     """Drop mounts/swap/LUKS so wipefs can run. Safe if nothing is mounted."""
     root = cfg.mountpoint
     ui.info(f"Unmounting {root} if it is busy from a previous run")
+    _release_disk_mounts(runner, cfg.target_disk)
+    if cfg.extra_raid_disk:
+        _release_disk_mounts(runner, cfg.extra_raid_disk)
     runner.shell(
         f"umount -R {shlex.quote(root)} || umount -Rl {shlex.quote(root)} || true"
     )
@@ -288,7 +368,7 @@ def _ensure_target_mounted(cfg: InstallConfig, runner: Runner) -> None:
         if cfg.firmware == "uefi" and devices.get("esp"):
             boot = cfg.mountpoint + "/boot"
             if not _mountpoint_q(boot):
-                _mount_if_needed(runner, devices["esp"], boot)
+                _mount_if_needed(runner, devices["esp"], boot, fstype="vfat")
     cfg._devices = devices  # type: ignore[attr-defined]
     ui.ok("Target filesystems are mounted")
 
@@ -324,7 +404,9 @@ def phase_disks(cfg: InstallConfig, runner: Runner) -> None:
         else:
             _parted_mbr(cfg, runner, disk)
         runner.shell("partprobe || true")
-        runner.shell("sleep 2 || true")
+        runner.shell("udevadm settle || true")
+        runner.shell("sleep 1 || true")
+        _release_disk_mounts(runner, disk)
 
     devices = _map_devices(cfg)
     # Encrypt the raw root partition, then treat /dev/mapper/root as the FS/LVM PV.
@@ -460,7 +542,7 @@ def _layout_zfs(cfg: InstallConfig, runner: Runner) -> None:
     runner.shell("zpool export rpool || true")
     runner.shell(f"zpool import -R {shlex.quote(cfg.mountpoint)} rpool")
     if cfg.firmware == "uefi":
-        _mount_if_needed(runner, part_name(disk, 1), cfg.mountpoint + "/boot")
+        _mount_if_needed(runner, part_name(disk, 1), cfg.mountpoint + "/boot", fstype="vfat")
 
 
 def _map_devices(cfg: InstallConfig) -> dict[str, str]:
@@ -515,6 +597,15 @@ def _map_devices(cfg: InstallConfig) -> dict[str, str]:
 
 def _mkfs(cfg: InstallConfig, runner: Runner, devices: dict[str, str]) -> None:
     """Format ESP as FAT32, swap with mkswap, root with the chosen filesystem."""
+    for node in (devices.get("esp"), devices.get("boot"), devices.get("swap"), devices.get("root")):
+        if not node or not str(node).startswith("/dev/"):
+            continue
+        quoted = shlex.quote(node)
+        runner.shell(
+            "findmnt -rn -o TARGET -S "
+            + quoted
+            + ' 2>/dev/null | while IFS= read -r mnt; do umount "$mnt" || umount -l "$mnt" || true; done'
+        )
     if devices.get("esp") and cfg.firmware == "uefi":
         runner.shell(f"mkfs.vfat -F32 {shlex.quote(devices['esp'])}")
     if devices.get("boot") and devices["boot"] != devices.get("esp"):
@@ -529,6 +620,10 @@ def _mkfs(cfg: InstallConfig, runner: Runner, devices: dict[str, str]) -> None:
     elif fs == "xfs":
         runner.shell(f"mkfs.xfs -f {shlex.quote(root)}")
     elif fs == "btrfs":
+        # A previous Windows volume leaves an NTFS boot sector at the start of
+        # this partition. wipefs on the whole disk does not reach it, and
+        # mkfs.btrfs does not put its own magic there.
+        runner.shell(f"wipefs -af {shlex.quote(root)} || true")
         runner.shell(f"mkfs.btrfs -f {shlex.quote(root)}")
     elif fs == "f2fs":
         runner.shell(f"mkfs.f2fs -f {shlex.quote(root)}")
@@ -547,27 +642,33 @@ def _mount_tree(
     runner.shell(f"mkdir -p {shlex.quote(root)}")
     if cfg.layout == "zfs":
         return
-    if cfg.layout == "btrfs-subvols" or cfg.filesystem == "btrfs" and cfg.layout == "btrfs-subvols":
+    if cfg.layout == "btrfs-subvols":
         if create_subvols and not _mountpoint_q(root):
-            _mount_if_needed(runner, devices["root"], root)
+            ui.info("Creating Btrfs subvolumes @ @home @log @cache @tmp @swap")
+            _mount_if_needed(runner, devices["root"], root, fstype="btrfs")
+            quoted_root = shlex.quote(root)
             for sub in ("@", "@home", "@log", "@cache", "@tmp", "@swap"):
                 runner.shell(
-                    f"btrfs subvolume list {shlex.quote(root)} | grep -q 'path {sub}$' "
+                    f"btrfs subvolume list {quoted_root} | grep -q 'path {sub}$' "
                     f"|| btrfs subvolume create {shlex.quote(root + '/' + sub)}"
                 )
-            runner.shell(f"umount {shlex.quote(root)} || true")
-        opts = "noatime,compress=zstd:3,ssd"
-        _mount_if_needed(runner, devices["root"], root, f"{opts},subvol=@")
+            runner.shell(f"btrfs subvolume set-default {shlex.quote(root + '/@')}")
+            runner.shell(
+                f"umount {quoted_root} || umount -l {quoted_root}\n"
+                f"if mountpoint -q {quoted_root}; then echo '>> {root} stayed mounted; cannot switch to subvol=@' >&2; exit 1; fi"
+            )
+        opts = "noatime,compress=zstd:3"
+        _mount_if_needed(runner, devices["root"], root, f"{opts},subvol=@", fstype="btrfs")
         for sub, mp in (("@home", "home"), ("@log", "var/log"), ("@cache", "var/cache"), ("@tmp", "tmp"), ("@swap", "swap")):
             extra = "noatime,nodatacow" if sub == "@swap" else opts
-            _mount_if_needed(runner, devices["root"], root + "/" + mp, f"{extra},subvol={sub}")
+            _mount_if_needed(runner, devices["root"], root + "/" + mp, f"{extra},subvol={sub}", fstype="btrfs")
     else:
-        _mount_if_needed(runner, devices["root"], root)
+        _mount_if_needed(runner, devices["root"], root, fstype=_root_fstype(cfg))
     if cfg.firmware == "uefi" and devices.get("esp"):
         runner.shell(f"mkdir -p {shlex.quote(root + '/efi')} {shlex.quote(root + '/boot')}")
-        _mount_if_needed(runner, devices["esp"], root + "/boot")
+        _mount_if_needed(runner, devices["esp"], root + "/boot", fstype="vfat")
     elif devices.get("boot") and devices["boot"] != devices.get("esp") and devices["boot"] != devices.get("root"):
-        _mount_if_needed(runner, devices["boot"], root + "/boot")
+        _mount_if_needed(runner, devices["boot"], root + "/boot", fstype="ext4")
 
 
 def stage_flavor(cfg: InstallConfig) -> str:
@@ -1731,6 +1832,10 @@ def _keyword_text(cfg: InstallConfig) -> str:
     shell_atoms = catalog.shell_atoms(getattr(cfg, "shell", ""))
     for atom in shell_atoms:
         lines.append(f"{atom} {keyword}")
+    queued = set(_graphical_atoms(cfg))
+    for atom in catalog.TESTING_ATOMS:
+        if atom in queued:
+            lines.append(f"{atom} {keyword}")
     if not lines:
         return ""
     return "\n".join(lines) + "\n"

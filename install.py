@@ -23,7 +23,7 @@ from pathlib import Path
 from gentoo_installer import ui
 from gentoo_installer.config import InstallConfig
 from gentoo_installer.execute import execute
-from gentoo_installer.wizard import fill_missing_secrets, run_wizard
+from gentoo_installer.wizard import fill_missing_secrets, run_wizard, warn_if_ntfs_present
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,6 +63,7 @@ def _write_profile(path: str, cfg: InstallConfig, include_secrets: bool = False)
 
 def main() -> int:
     ui.banner()
+    warn_if_ntfs_present()
     args = parse_args()
     ran_wizard = False
     # The profile has to exist before the wizard finishes. A missing

@@ -154,6 +154,69 @@ def list_disks() -> list[dict]:
     return disks
 
 
+def partitions_from_blockdevices(devices: list[dict]) -> list[dict]:
+    """Flatten an lsblk JSON blockdevices tree into partition records."""
+    rows: list[dict] = []
+
+    def walk(nodes: list[dict], parent_disk: str) -> None:
+        for dev in nodes or []:
+            name = str(dev.get("name") or "")
+            path = name if name.startswith("/dev/") else f"/dev/{name}"
+            kind = str(dev.get("type") or "").lower()
+            disk = path if kind == "disk" else parent_disk
+            if kind == "part":
+                rows.append(
+                    {
+                        "path": path,
+                        "disk": disk,
+                        "size": dev.get("size") or "?",
+                        "fstype": str(dev.get("fstype") or "").lower(),
+                        "label": str(dev.get("label") or "").strip(),
+                        "parttype": str(dev.get("parttypename") or "").strip(),
+                    }
+                )
+            walk(dev.get("children") or [], disk)
+
+    walk(devices, "")
+    return rows
+
+
+def partition_is_ntfs(part: dict) -> bool:
+    return str(part.get("fstype") or "").lower() in {"ntfs", "ntfs3"}
+
+
+def partition_is_microsoft(part: dict) -> bool:
+    """NTFS, or a partition type Windows uses (basic data, recovery, reserved)."""
+    if partition_is_ntfs(part):
+        return True
+    kind = str(part.get("parttype") or "").lower()
+    return "microsoft" in kind or "windows" in kind
+
+
+def list_partitions() -> list[dict]:
+    """Every partition lsblk can see, with filesystem and partition type."""
+    if not is_linux() or not shutil.which("lsblk"):
+        return []
+    columns = ("NAME,SIZE,TYPE,FSTYPE,LABEL,PARTTYPENAME", "NAME,SIZE,TYPE,FSTYPE,LABEL")
+    proc = None
+    for cols in columns:
+        proc = subprocess.run(
+            ["lsblk", "-J", "-n", "-o", cols],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode == 0:
+            break
+    if proc is None or proc.returncode != 0:
+        return []
+    try:
+        data = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return []
+    return partitions_from_blockdevices(data.get("blockdevices") or [])
+
+
 def live_boot_disk() -> str | None:
     """Best-effort parent disk of the live USB so we can warn 'do not wipe this'."""
     findmnt = shutil.which("findmnt")

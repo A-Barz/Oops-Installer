@@ -155,6 +155,78 @@ def step(msg: str) -> None:
     print(paint("  »  ", C.PURPLE, C.BOLD) + msg)
 
 
+def horse_progress(percent: int, remaining: str) -> None:
+    """One galloping-horse frame. percent is how far the estimate has run."""
+    percent = max(0, min(100, int(percent)))
+    poses = ("🐎ˎˊ", "🐎ˏˋ", "🐎-", "🐎~")
+    pose = poses[(percent // 4) % len(poses)]
+    width = 28
+    cells = ["·"] * width
+    pos = min(width - 1, percent * (width - 1) // 100)
+    for offset, ch in enumerate(pose):
+        at = pos + offset
+        if at < width:
+            cells[at] = ch
+    track = "".join(cells)
+    print(paint(f"  {track}  {percent:3d}%  {remaining}", C.BOLD, C.GREEN))
+
+
+class InstallGallop:
+    """Reprint the horse while host commands block, from elapsed / estimate."""
+
+    def __init__(self, minutes: int) -> None:
+        import threading
+
+        self.total_seconds = max(60, int(minutes) * 60)
+        self._threading = threading
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._started = 0.0
+
+    def start(self) -> None:
+        import time
+
+        self._started = time.monotonic()
+        self.tick()
+        self._thread = self._threading.Thread(target=self._loop, name="install-gallop", daemon=True)
+        self._thread.start()
+
+    def tick(self) -> None:
+        import time
+
+        from .estimate import format_remaining
+
+        import math
+
+        elapsed = time.monotonic() - self._started if self._started else 0.0
+        percent = min(99, int(elapsed / self.total_seconds * 100))
+        left = max(0, math.ceil((self.total_seconds - elapsed) / 60))
+        try:
+            horse_progress(percent, format_remaining(left))
+        except Exception:
+            return
+
+    def finish(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+            self._thread = None
+        try:
+            horse_progress(100, "done")
+        except Exception:
+            return
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+            self._thread = None
+
+    def _loop(self) -> None:
+        while not self._stop.wait(15):
+            self.tick()
+
+
 def danger(msg: str) -> None:
     """Destructive action (disk wipe). Keep wording explicit."""
     print(paint("  ⚠  DESTRUCTIVE: ", C.BOLD, C.WHITE, C.BG_RED) + " " + paint(msg, C.RED, C.BOLD))
