@@ -2,6 +2,10 @@
 
 Python installer that runs **in a terminal on Ubuntu XFCE live media** and installs **Gentoo Linux onto a hard disk**.
 
+## Notice
+
+This is a personal project. The name **Oops-Installer** is a poke at Gentoo: an installer misses the value of installing Gentoo by hand. That is a statement about open source. You can do whatever you want with it. Fork a project, contribute, or make your own. Code for the sake of it.
+
 The wizard is ordered like the [Gentoo AMD64 Handbook](https://wiki.gentoo.org/wiki/Handbook:AMD64) (linked from the [Gentoo wiki main page](https://wiki.gentoo.org/wiki/Main_Page)):
 
 1. About the installation  
