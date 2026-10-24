@@ -22,8 +22,9 @@ ends up on the target disk.
 Who should use it
 -----------------
 Use this if you want a guided Gentoo install with optional LUKS, LVM, RAID1,
-Btrfs, ZFS, several bootloaders, Plymouth, desktop environments, and extra
-packages (including overlay WMs such as niri and Hyprland).
+Btrfs, ZFS, several bootloaders, Plymouth, Wayland compositors (Hyprland,
+Sway, Wayfire, labwc, dwl, Qtile), suckless tools, and popular apps. Noctalia
+and DMS are optional shells.
 
 Do not use this as your first Linux install on a machine that holds unique
 data unless you have backups and have already practised in a virtual machine.
@@ -117,8 +118,8 @@ disk until the review at the end.
   8. System       Hostname, locale, timezone, root and user passwords
   9. Tools        NetworkManager / dhcpcd / netifrc, sshd, cron, CUPS
  10. Bootloader   GRUB (handbook default) and optional extras, Plymouth
- 11. Desktop      XFCE, Plasma, GNOME, etc.
- 12. Packages     Searchable catalogue, overlays, window managers
+ 11. Session      Wayland compositors, Noctalia or DMS, greetd
+ 12. Packages     Shared Wayland utilities, suckless tools, popular apps
 
 Menus (shown again at the start of the installer):
 

@@ -191,11 +191,16 @@ def _decode_csi(seq: str) -> str:
 
 
 def _read_escape_posix(fd: int) -> str:
-    """Read the rest of an escape sequence. Bytes often arrive one at a time."""
+    """Read the rest of an escape sequence. Bytes often arrive one at a time.
+
+    80ms was short enough on a busy live USB that the '[' or the final letter
+    was still in the kernel buffer. That press was ignored, and the leftover
+    letter made the next arrow look like it needed a second tap.
+    """
     import select
 
     seq = ""
-    wait = 0.08
+    wait = 0.2
     while len(seq) < 16:
         ready, _, _ = select.select([fd], [], [], wait)
         if not ready:
@@ -206,7 +211,7 @@ def _read_escape_posix(fd: int) -> str:
         seq += chunk.decode("latin-1")
         if seq[-1].isalpha() or seq.endswith("~"):
             break
-        wait = 0.03
+        wait = 0.12
     return _decode_csi(seq)
 
 
@@ -215,13 +220,13 @@ def _read_escape_nt() -> str:
     import msvcrt
 
     seq = ""
-    end = time.monotonic() + 0.08
+    end = time.monotonic() + 0.2
     while time.monotonic() < end and len(seq) < 16:
         if msvcrt.kbhit():
             seq += msvcrt.getwch()
             if seq[-1:].isalpha() or seq.endswith("~"):
                 break
-            end = time.monotonic() + 0.03
+            end = time.monotonic() + 0.12
         else:
             time.sleep(0.005)
     return _decode_csi(seq) if seq else "esc"

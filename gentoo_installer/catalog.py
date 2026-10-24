@@ -37,111 +37,155 @@ def _p(atom: str, desc: str, overlay: str = "gentoo") -> tuple[str, str]:
     return (atom, desc + tag)
 
 
-# Wayland compositors live in gui-wm (and a few DE packages). Many still
-# require GURU / hyproverlay / wayland-desktop rather than ::gentoo.
+# Compositors offered by the wizard. GURU-only compositors (niri, river, …)
+# are not options. Hyprland stays on hyproverlay, which is not GURU.
 
 WAYLAND_COMPOSITORS: list[Pkg] = [
     Pkg("gui-wm/hyprland", "Hyprland — dynamic tiling Wayland compositor", "hyproverlay"),
-    Pkg("gui-wm/niri", "Niri — scrollable-tiling Wayland compositor", "guru"),
     Pkg("gui-wm/sway", "Sway — i3-compatible wlroots compositor"),
-    Pkg("gui-wm/swayfx", "SwayFX — Sway with extra eye candy", "guru"),
-    Pkg("gui-wm/wayfire", "Wayfire — Compiz-like stacking compositor"),
-    Pkg("gui-wm/labwc", "Labwc — Openbox-inspired stacking compositor"),
-    Pkg("gui-wm/dwl", "dwl — dwm clone for Wayland (wlroots)"),
-    Pkg("gui-wm/river", "River — dynamic compositor with separate WM", "guru"),
-    Pkg("gui-wm/cage", "Cage — kiosk compositor (single fullscreen app)", "guru"),
-    Pkg("gui-wm/cagebreak", "Cagebreak — Ratpoison-like tiling compositor", "wayland-desktop"),
-    Pkg("gui-wm/kiwmi", "Kiwmi — Lua-configurable compositor", "wayland-desktop"),
-    Pkg("gui-wm/mangowm", "MangoWM — lightweight wlroots compositor", "guru"),
-    Pkg("gui-wm/miracle-wm", "Miracle — Mir-based tiling compositor", "guru"),
-    Pkg("gui-wm/newm", "newm — laptop/touchpad-oriented compositor", "wayland-desktop"),
-    Pkg("gui-wm/waybox", "Waybox — Openbox clone for Wayland", "wayland-desktop"),
-    Pkg("gui-liri/liri-shell", "Liri Shell — Qt Wayland shell", "wayland-desktop"),
-    Pkg("dev-libs/weston", "Weston — reference Wayland compositor"),
-    Pkg("kde-plasma/kwin", "KWin — KDE Plasma compositor (X11+Wayland)"),
-    Pkg("x11-wm/mutter", "Mutter — GNOME compositor (X11+Wayland)"),
-    Pkg("x11-wm/enlightenment", "Enlightenment — stacking compositor / DE"),
-    Pkg("x11-wm/qtile", "Qtile — Python WM (X11 and Wayland)"),
+    Pkg("gui-wm/wayfire", "Wayfire — stacking Wayland compositor"),
+    Pkg("gui-wm/labwc", "Labwc — Openbox-style stacking compositor"),
+    Pkg("gui-wm/dwl", "dwl — suckless dwm for Wayland"),
+    Pkg("x11-wm/qtile", "Qtile — Python WM on Wayland"),
 ]
 
-# Classic X11 WMs from the Gentoo Window manager wiki (x11-wm/*).
+# Suckless dwm and i3. The long X11/DE window-manager list is not offered.
 X11_WINDOW_MANAGERS: list[Pkg] = [
-    Pkg("x11-wm/i3", "i3 — tiling window manager"),
-    Pkg("x11-wm/awesome", "Awesome — dynamic WM, Lua config"),
-    Pkg("x11-wm/bspwm", "bspwm — binary-space tiling WM"),
-    Pkg("x11-wm/dwm", "dwm — suckless dynamic WM"),
-    Pkg("x11-wm/herbstluftwm", "herbstluftwm — manual tiling WM"),
-    Pkg("x11-wm/openbox", "Openbox — stacking WM"),
-    Pkg("x11-wm/fluxbox", "Fluxbox — stacking WM (Blackbox fork)"),
-    Pkg("x11-wm/icewm", "IceWM — lightweight stacking WM"),
-    Pkg("x11-wm/jwm", "JWM — extremely lightweight WM"),
-    Pkg("x11-wm/pekwm", "PekWM — dynamic stacking WM"),
-    Pkg("x11-wm/ratpoison", "ratpoison — screen-like tiling WM"),
-    Pkg("x11-wm/spectrwm", "spectrwm — small dynamic tiling WM"),
-    Pkg("x11-wm/xmonad", "xmonad — Haskell tiling WM"),
-    Pkg("x11-wm/stumpwm", "StumpWM — Common Lisp tiling WM"),
-    Pkg("x11-wm/notion", "Notion — tiling tabbed WM"),
-    Pkg("x11-wm/fvwm3", "FVWM3 — stacking WM"),
-    Pkg("x11-wm/windowmaker", "Window Maker — GNUstep WM"),
-    Pkg("x11-wm/blackbox", "Blackbox — stacking WM"),
-    Pkg("x11-wm/ctwm", "CTWM — lightweight stacking WM"),
-    Pkg("x11-wm/cwm", "cwm — OpenBSD stacking WM"),
-    Pkg("x11-wm/evilwm", "evilwm — tiny stacking WM"),
-    Pkg("x11-wm/twm", "twm — classic X WM"),
-    Pkg("x11-wm/lwm", "lwm — lightweight stacking WM"),
-    Pkg("x11-wm/goomwwm", "goomwwm — get out of my way WM"),
-    Pkg("x11-wm/echinus", "echinus — dwm fork, tiling+floating"),
-    Pkg("x11-wm/musca", "Musca — dynamic WM"),
-    Pkg("x11-wm/page", "page — mouse-friendly tiling WM"),
-    Pkg("x11-wm/amiwm", "amiwm — Amiga Workbench-like WM"),
-    Pkg("x11-wm/aewm", "aewm — minimal dynamic WM"),
-    Pkg("x11-wm/aewm++", "aewm++ — modernised aewm"),
-    Pkg("x11-wm/larswm", "larswm — 9wm-based tiling WM"),
-    Pkg("x11-wm/matwm2", "matwm2 — simple EWMH WM"),
-    Pkg("x11-wm/oroborus", "oroborus — small fast WM"),
-    Pkg("x11-wm/sithwm", "Sith WM — minimalist WM"),
-    Pkg("x11-wm/windowlab", "WindowLab — small novel WM"),
-    Pkg("x11-wm/wm2", "wm2 — minimalist WM"),
-    Pkg("x11-wm/marco", "Marco — MATE window manager"),
-    Pkg("x11-wm/muffin", "Muffin — Cinnamon window manager"),
-    Pkg("xfce-base/xfwm4", "Xfwm — Xfce window manager"),
+    Pkg("x11-wm/dwm", "dwm — suckless dynamic window manager"),
+    Pkg("x11-wm/i3", "i3 — popular X11 tiling window manager"),
 ]
 
 WINDOW_MANAGERS: list[Pkg] = WAYLAND_COMPOSITORS + X11_WINDOW_MANAGERS
 
-# Compositors that are libraries or greeter helpers, not a desktop session.
-_NOT_A_SESSION = {"kde-plasma/kwin", "x11-wm/mutter", "gui-wm/cage"}
-
 # (title, Exec=, "wayland"|"x11") when the package name is not the command.
 _SESSION_OVERRIDE: dict[str, tuple[str, str, str] | None] = {
     "gui-wm/hyprland": ("Hyprland", "Hyprland", "wayland"),
-    "gui-wm/swayfx": ("SwayFX", "swayfx", "wayland"),
-    "gui-wm/qtile": ("Qtile (Wayland)", "qtile start -b wayland", "wayland"),
-    "x11-wm/qtile": ("Qtile", "qtile start", "x11"),
-    "x11-wm/enlightenment": ("Enlightenment", "enlightenment_start", "x11"),
-    "x11-wm/openbox": ("Openbox", "openbox-session", "x11"),
-    "x11-wm/fluxbox": ("Fluxbox", "startfluxbox", "x11"),
-    "x11-wm/icewm": ("IceWM", "icewm-session", "x11"),
-    "x11-wm/windowmaker": ("Window Maker", "wmaker", "x11"),
-    "x11-wm/fvwm3": ("FVWM3", "fvwm3", "x11"),
-    "dev-libs/weston": ("Weston", "weston", "wayland"),
-    "gui-liri/liri-shell": ("Liri", "liri-shell", "wayland"),
-    "kde-plasma/kwin": None,
-    "x11-wm/mutter": None,
-    "gui-wm/cage": None,
+    "x11-wm/qtile": ("Qtile (Wayland)", "qtile start -b wayland", "wayland"),
+    "x11-wm/dwm": ("dwm", "start-dwm", "x11"),
+    "x11-wm/i3": ("i3", "i3", "x11"),
 }
 
-_DE_SESSIONS: dict[str, list[tuple[str, str, str]]] = {
-    "plasma": [
-        ("Plasma (Wayland)", "startplasma-wayland", "wayland"),
-        ("Plasma (X11)", "startplasma-x11", "x11"),
-    ],
-    "gnome": [("GNOME", "gnome-session", "wayland")],
-    "xfce": [("Xfce", "startxfce4", "x11")],
-    "mate": [("MATE", "mate-session", "x11")],
-    "cinnamon": [("Cinnamon", "cinnamon-session", "x11")],
-    "i3": [("i3", "i3", "x11")],
+# Shells the wizard can select. Both ebuilds live in GURU; the overlay is
+# enabled only after this choice, and GURU is not a package-list option.
+SHELL_CHOICES: list[tuple[str, str]] = [
+    ("none", "No shell — compositor plus shared utilities"),
+    ("noctalia", "Noctalia shell"),
+    ("dms", "DMS (DankMaterialShell)"),
+]
+
+SHELL_PACKAGES: dict[str, list[Pkg]] = {
+    "noctalia": [Pkg("gui-apps/noctalia-shell", "Noctalia shell", "guru")],
+    "dms": [Pkg("gui-apps/dankmaterialshell", "DMS (DankMaterialShell)", "guru")],
 }
+
+SHELL_EXEC: dict[str, str] = {
+    "noctalia": "noctalia-shell",
+    "dms": "dms",
+}
+
+# Previously offered from GURU. They are not menu options, and a saved profile
+# or a typed atom must not emerge them. The selected shell is the exception.
+REMOVED_GURU_ATOMS = frozenset(
+    {
+        "gui-wm/niri",
+        "gui-wm/swayfx",
+        "gui-wm/river",
+        "gui-wm/cage",
+        "gui-wm/mangowm",
+        "gui-wm/miracle-wm",
+        "gui-apps/fuzzel",
+        "gui-apps/swaylock-effects",
+        "gui-apps/xwayland-satellite",
+        "gui-apps/nwg-look",
+        "x11-misc/ly",
+        "gui-apps/tuigreet",
+        "www-client/brave-bin",
+        "app-editors/helix",
+        "app-editors/vscode",
+        "app-editors/vscodium",
+        "app-misc/fastfetch",
+        "app-office/onlyoffice-bin",
+        "net-im/discord",
+        "games-util/mangohud",
+        "games-emulation/retroarch",
+        "app-emulation/distrobox",
+    }
+)
+
+# Installed for every selected Wayland compositor. These work on Hyprland,
+# Sway, Wayfire, labwc, dwl, and Qtile. They are not a separate checklist.
+WAYLAND_BASE: list[Pkg] = [
+    Pkg("sys-apps/xdg-desktop-portal", "XDG desktop portal"),
+    Pkg("gui-libs/xdg-desktop-portal-wlr", "wlroots XDG portal"),
+    Pkg("sys-apps/xdg-desktop-portal-gtk", "GTK portal backend"),
+    Pkg("gui-apps/wl-clipboard", "wl-copy / wl-paste"),
+    Pkg("gui-apps/grim", "Grim screenshots"),
+    Pkg("gui-apps/slurp", "Slurp region select"),
+    Pkg("x11-base/xwayland", "Xwayland"),
+    Pkg("dev-qt/qtwayland", "Qt Wayland platform plugin"),
+    Pkg("media-fonts/noto", "Noto fonts"),
+    Pkg("media-fonts/noto-emoji", "Noto Emoji"),
+    Pkg("sys-auth/polkit", "polkit"),
+]
+
+# Extra packages a compositor needs that the shared set does not cover.
+WM_REQUIREMENTS: dict[str, list[Pkg]] = {
+    "gui-wm/hyprland": [
+        Pkg("gui-apps/xdg-desktop-portal-hyprland", "Hyprland XDG portal", "hyproverlay"),
+        Pkg("gui-apps/hyprpaper", "Hyprpaper wallpaper", "hyproverlay"),
+        Pkg("gui-apps/hypridle", "Hypridle", "hyproverlay"),
+        Pkg("gui-apps/hyprlock", "Hyprlock", "hyproverlay"),
+    ],
+    "gui-wm/sway": [
+        Pkg("gui-apps/swaybg", "SwayBG wallpaper"),
+        Pkg("gui-apps/swayidle", "Swayidle"),
+        Pkg("gui-apps/swaylock", "Swaylock"),
+        Pkg("gui-apps/foot", "foot terminal"),
+    ],
+    "gui-wm/wayfire": [
+        Pkg("gui-apps/wf-shell", "wf-shell — Wayfire panel and background"),
+    ],
+    "gui-wm/labwc": [
+        Pkg("gui-apps/swaybg", "Wallpaper"),
+        Pkg("gui-apps/swaylock", "Swaylock"),
+        Pkg("gui-apps/foot", "foot terminal"),
+    ],
+    "gui-wm/dwl": [
+        Pkg("gui-apps/foot", "foot terminal"),
+    ],
+    "x11-wm/qtile": [
+        Pkg("x11-terms/alacritty", "Alacritty"),
+    ],
+    "x11-wm/dwm": [
+        Pkg("x11-base/xorg-server", "X.Org server"),
+        Pkg("x11-apps/xinit", "xinit / startx"),
+        Pkg("x11-misc/dmenu", "dmenu"),
+        Pkg("x11-terms/st", "st terminal"),
+        Pkg("x11-misc/slstatus", "slstatus"),
+        Pkg("x11-misc/slock", "slock"),
+    ],
+    "x11-wm/i3": [
+        Pkg("x11-base/xorg-server", "X.Org server"),
+        Pkg("x11-apps/xinit", "xinit / startx"),
+        Pkg("x11-misc/dmenu", "dmenu"),
+        Pkg("x11-misc/i3status", "i3status"),
+        Pkg("x11-terms/st", "st terminal"),
+    ],
+}
+
+# Optional apps that run on every compositor this installer offers.
+WAYLAND_COMMON_UTILS: list[Pkg] = [
+    Pkg("gui-apps/foot", "foot — Wayland terminal"),
+    Pkg("x11-terms/alacritty", "Alacritty — GPU terminal"),
+    Pkg("x11-terms/kitty", "Kitty"),
+    Pkg("x11-terms/ghostty", "Ghostty"),
+    Pkg("media-gfx/imv", "imv — image viewer"),
+    Pkg("media-video/mpv", "mpv"),
+    Pkg("gui-apps/waybar", "Waybar — status bar"),
+    Pkg("gui-apps/wofi", "Wofi — launcher"),
+    Pkg("gui-apps/mako", "Mako — notifications"),
+    Pkg("gui-apps/kanshi", "Kanshi — output profiles"),
+]
 
 
 def _pkg_title(atom: str) -> str:
@@ -151,10 +195,54 @@ def _pkg_title(atom: str) -> str:
     return atom.rsplit("/", 1)[-1]
 
 
-def login_sessions(desktop: str, atoms: list[str]) -> list[tuple[str, str, str]]:
+def wayland_selected(atoms: list[str]) -> bool:
+    picked = set(atoms)
+    return any(p.atom in picked for p in WAYLAND_COMPOSITORS)
+
+
+def shell_atoms(shell: str) -> list[str]:
+    return [pkg.atom for pkg in SHELL_PACKAGES.get(shell, [])]
+
+
+def shell_exec(shell: str) -> str:
+    return SHELL_EXEC.get(shell, "")
+
+
+def packages_for_selection(wm_atoms: list[str], shell: str, pipewire: bool) -> list[Pkg]:
+    """Necessities for the chosen compositors, plus the shell if one was chosen.
+
+    Shared Wayland utilities are included once. GURU atoms are limited to the
+    selected shell.
+    """
+    allowed_guru = set(shell_atoms(shell))
+    pkgs: list[Pkg] = []
+    selected = [atom for atom in wm_atoms if atom]
+    if wayland_selected(selected) or shell in SHELL_PACKAGES:
+        pkgs.extend(WAYLAND_BASE)
+        if pipewire:
+            pkgs.append(Pkg("media-video/pipewire", "PipeWire"))
+            pkgs.append(Pkg("media-video/wireplumber", "WirePlumber"))
+    for atom in selected:
+        pkgs.extend(WM_REQUIREMENTS.get(atom, []))
+    pkgs.extend(SHELL_PACKAGES.get(shell, []))
+    seen: set[str] = set()
+    out: list[Pkg] = []
+    for pkg in pkgs:
+        if pkg.atom in seen:
+            continue
+        if pkg.overlay == "guru" and pkg.atom not in allowed_guru:
+            continue
+        seen.add(pkg.atom)
+        out.append(pkg)
+    return out
+
+
+def login_sessions(desktop: str, atoms: list[str], shell: str = "") -> list[tuple[str, str, str]]:
     """Sessions the greeter should offer: (title, exec, wayland|x11)."""
+    del desktop  # Desktop environments are not installed.
     sessions: list[tuple[str, str, str]] = []
     seen: set[tuple[str, str]] = set()
+    dwl_cmd = "start-dwl" if shell_exec(shell) else "dwl"
 
     def add(title: str, command: str, kind: str) -> None:
         key = (command, kind)
@@ -163,10 +251,12 @@ def login_sessions(desktop: str, atoms: list[str]) -> list[tuple[str, str, str]]
         seen.add(key)
         sessions.append((title, command, kind))
 
-    for title, command, kind in _DE_SESSIONS.get(desktop, []):
-        add(title, command, kind)
     for atom in atoms:
-        if atom in _NOT_A_SESSION:
+        if atom == "gui-wm/dwl":
+            add("dwl", dwl_cmd, "wayland")
+            continue
+        if atom == "x11-wm/qtile" and shell_exec(shell):
+            add("Qtile (Wayland)", "start-qtile", "wayland")
             continue
         if atom in _SESSION_OVERRIDE:
             override = _SESSION_OVERRIDE[atom]
@@ -183,21 +273,17 @@ def login_sessions(desktop: str, atoms: list[str]) -> list[tuple[str, str, str]]
 
 
 def resolved_display_manager(display_manager: str, desktop: str, atoms: list[str]) -> str:
-    """Login manager that should be running after GRUB hands off to Gentoo.
+    """Login manager after GRUB. Wayland sessions use greetd. X11 uses startx.
 
-    An explicit chapter-11 choice wins. A display manager picked in the package
-    list wins over Auto. Auto follows the desktop, and uses SDDM when a Wayland
-    compositor was selected so its session shows up next to any X11 session.
-    "none" stays on the text console.
+    An explicit greetd/sddm/lightdm/gdm choice still wins. "none" stays on the TTY.
     """
+    del desktop
     choice = (display_manager or "auto").strip()
     picked = set(atoms)
-    if choice in {"sddm", "gdm", "lightdm", "greetd", "ly", "slim"}:
+    if choice in {"sddm", "gdm", "lightdm", "greetd", "slim"}:
         return choice
-    if "gui-libs/greetd" in picked or "gui-apps/tuigreet" in picked or "gui-apps/gtkgreet" in picked:
+    if "gui-libs/greetd" in picked or "gui-apps/gtkgreet" in picked:
         return "greetd"
-    if "x11-misc/ly" in picked:
-        return "ly"
     if "x11-misc/slim" in picked:
         return "slim"
     if "x11-misc/sddm" in picked:
@@ -208,19 +294,10 @@ def resolved_display_manager(display_manager: str, desktop: str, atoms: list[str
         return "lightdm"
     if choice == "none":
         return "none"
-    wayland = any(p.atom in picked and p.atom not in _NOT_A_SESSION for p in WAYLAND_COMPOSITORS)
-    x11 = any(p.atom in picked for p in X11_WINDOW_MANAGERS) or desktop in {
-        "xfce",
-        "mate",
-        "cinnamon",
-        "i3",
-    }
-    if desktop == "gnome":
-        return "gdm"
-    if desktop == "plasma" or wayland:
-        return "sddm"
-    if x11 or desktop not in {"", "none"}:
-        return "lightdm"
+    if wayland_selected(list(picked)) or any(
+        atom in picked for atom in ("gui-apps/noctalia-shell", "gui-apps/dankmaterialshell")
+    ):
+        return "greetd"
     return "none"
 
 
@@ -234,8 +311,9 @@ def wm_choices() -> list[tuple[str, str]]:
 
 
 # Themes shipped inside sys-boot/plymouth (plymouth-set-default-theme --list).
+# spinner is Plymouth's own packaged theme. It is not this installer's default.
 PLYMOUTH_BUILTIN_THEMES: list[tuple[str, str]] = [
-    ("spinner", "Spinner (default, clean)"),
+    ("spinner", "Spinner — ring animation"),
     ("bgrt", "BGRT — firmware OEM logo"),
     ("fade-in", "Fade-in logo"),
     ("glow", "Glow"),
@@ -286,7 +364,6 @@ BOOTLOADERS = [
 
 # First page of the overlay checklist — the ones WM/Steam/science users actually need.
 FEATURED_OVERLAYS: list[tuple[str, str]] = [
-    ("guru", "Official user-maintained overlay (niri, river, many gui-apps)"),
     ("wayland-desktop", "Wayland compositors and tools not yet in ::gentoo"),
     ("hyproverlay", "Hyprland and Hypr* utilities"),
     ("steam-overlay", "Steam client and Steam-based games"),
@@ -378,7 +455,7 @@ def extra_overlays() -> list[tuple[str, str]]:
         "torbrowser", "ukui", "vapoursynth", "wine", "without-systemd", "x11",
         "xlibre", "zugaina", "pf4public", "tatsh-overlay", "thegreatmcpain",
         "sad", "sorrow", "yellow", "oddlama", "pentoo", "steam-overlay",
-        "wayland-desktop", "guru", "hyproverlay", "science", "kde", "qt",
+        "wayland-desktop", "hyproverlay", "science", "kde", "qt",
     ]
     featured = {n for n, _ in FEATURED_OVERLAYS}
     return [
@@ -389,55 +466,41 @@ def extra_overlays() -> list[tuple[str, str]]:
 
 
 def overlay_choices() -> list[tuple[str, str]]:
-    return [ov for ov in FEATURED_OVERLAYS if ov[0] != "gentoo"] + extra_overlays()
+    rows = [ov for ov in FEATURED_OVERLAYS if ov[0] not in {"gentoo", "guru"}]
+    rows.extend(ov for ov in extra_overlays() if ov[0] != "guru")
+    return rows
 
 
 # Wizard chapter 12 categories. Each tuple is (id, title, checklist rows).
 # Keep window-managers first; wizard.py treats that category separately.
 
 def _pkgs(*items: Pkg) -> list[tuple[str, str]]:
-    return [_p(p.atom, p.desc, p.overlay) for p in items]
+    """Checklist rows. Packages from the GURU overlay are not options."""
+    return [_p(p.atom, p.desc, p.overlay) for p in items if p.overlay != "guru"]
 
 
 CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
     (
         "window-managers",
-        "Window managers & Wayland compositors (niri, Hyprland, Sway, i3, …)",
+        "Window managers (Hyprland, Sway, dwl, dwm, i3)",
         wm_choices(),
     ),
     (
-        "wayland-utils",
-        "Wayland utilities (bars, lock, clipboard, portals)",
+        "wayland-common",
+        "Utilities that work with every Wayland compositor",
+        _pkgs(*WAYLAND_COMMON_UTILS),
+    ),
+    (
+        "suckless",
+        "Suckless tools",
         _pkgs(
-            Pkg("gui-apps/waybar", "Waybar status bar"),
-            Pkg("gui-apps/wofi", "Wofi launcher (rofi clone)"),
-            Pkg("gui-apps/wmenu", "wmenu — dmenu look for wlroots"),
-            Pkg("gui-apps/foot", "foot — fast Wayland terminal"),
-            Pkg("gui-apps/fuzzel", "Fuzzel launcher", "guru"),
-            Pkg("gui-apps/mako", "Mako notifications"),
-            Pkg("gui-apps/grim", "Grim screenshots"),
-            Pkg("gui-apps/slurp", "Slurp region select"),
-            Pkg("gui-apps/swappy", "Swappy screenshot editor"),
-            Pkg("gui-apps/wf-recorder", "wf-recorder screen recorder"),
-            Pkg("gui-apps/wl-clipboard", "wl-copy / wl-paste"),
-            Pkg("gui-apps/swaybg", "SwayBG wallpaper"),
-            Pkg("gui-apps/swaylock", "Swaylock"),
-            Pkg("gui-apps/swayidle", "Swayidle"),
-            Pkg("gui-apps/swaylock-effects", "Swaylock-effects", "guru"),
-            Pkg("gui-apps/hyprpaper", "Hyprpaper wallpaper", "hyproverlay"),
-            Pkg("gui-apps/hypridle", "Hypridle", "hyproverlay"),
-            Pkg("gui-apps/hyprlock", "Hyprlock", "hyproverlay"),
-            Pkg("gui-apps/xdg-desktop-portal-hyprland", "Hyprland XDG portal", "hyproverlay"),
-            Pkg("gui-libs/xdg-desktop-portal-wlr", "wlroots XDG portal"),
-            Pkg("sys-apps/xdg-desktop-portal", "XDG desktop portal"),
-            Pkg("gui-apps/xwayland-satellite", "Xwayland-satellite (needed by Niri)", "guru"),
-            Pkg("gui-apps/kanshi", "Kanshi output profiles"),
-            Pkg("gui-apps/waypipe", "Waypipe — Wayland over SSH"),
-            Pkg("gui-apps/wayvnc", "WayVNC server"),
-            Pkg("dev-libs/wayland", "Wayland protocol libraries"),
-            Pkg("dev-qt/qtwayland", "Qt Wayland platform plugin"),
-            Pkg("x11-base/xwayland", "Xwayland"),
-            Pkg("gui-apps/nwg-look", "GTK settings for wlroots", "guru"),
+            Pkg("x11-wm/dwm", "dwm — also offered with the window managers"),
+            Pkg("x11-misc/dmenu", "dmenu"),
+            Pkg("x11-terms/st", "st — simple terminal"),
+            Pkg("x11-misc/slock", "slock"),
+            Pkg("x11-misc/slstatus", "slstatus"),
+            Pkg("www-client/surf", "surf — suckless webkit browser"),
+            Pkg("x11-misc/tabbed", "tabbed"),
         ),
     ),
     (
@@ -454,32 +517,13 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
         ),
     ),
     (
-        "desktop-environments",
-        "Desktop environments",
-        _pkgs(
-            Pkg("xfce-base/xfce4-meta", "Xfce — lightweight GTK desktop (panels, file manager, settings)"),
-            Pkg("kde-plasma/plasma-meta", "KDE Plasma — full Qt desktop"),
-            Pkg("kde-apps/kde-apps-meta", "KDE Gear — Dolphin, Konsole, Gwenview, and other KDE apps"),
-            Pkg("gnome-base/gnome", "GNOME — full GTK desktop with mutter"),
-            Pkg("mate-base/mate", "MATE — traditional GTK desktop (GNOME 2 style)"),
-            Pkg("gnome-extra/cinnamon", "Cinnamon — GNOME-fork desktop used by Linux Mint"),
-            Pkg("lxde-base/lxde-meta", "LXDE — very light GTK2 desktop"),
-            Pkg("lxqt-base/lxqt-meta", "LXQt — light Qt desktop"),
-            Pkg("x11-wm/enlightenment", "Enlightenment — compositor plus desktop shell"),
-            Pkg("pantheon-base/pantheon", "Pantheon — elementary OS desktop (if the ebuild exists)"),
-        ),
-    ),
-    (
         "display-managers",
         "Display / login managers",
         _pkgs(
-            Pkg("x11-misc/lightdm", "LightDM — greeter used by Xfce/MATE/Cinnamon"),
-            Pkg("x11-misc/sddm", "SDDM — Plasma-friendly graphical login"),
-            Pkg("gnome-base/gdm", "GDM — GNOME display manager"),
-            Pkg("x11-misc/ly", "ly — TUI login manager (no X greeter)", "guru"),
-            Pkg("gui-libs/greetd", "greetd — minimal login daemon (often with tuigreet)"),
+            Pkg("gui-libs/greetd", "greetd — login daemon used for Wayland sessions"),
             Pkg("gui-apps/gtkgreet", "gtkgreet — GTK greeter for greetd"),
-            Pkg("gui-apps/tuigreet", "tuigreet — terminal greeter for greetd", "guru"),
+            Pkg("x11-misc/lightdm", "LightDM"),
+            Pkg("x11-misc/sddm", "SDDM"),
             Pkg("x11-misc/slim", "SLiM — legacy simple login manager"),
         ),
     ),
@@ -491,7 +535,6 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
             Pkg("www-client/firefox", "Firefox — compile from source (hours)"),
             Pkg("www-client/google-chrome", "Google Chrome — official binary"),
             Pkg("www-client/librewolf", "LibreWolf — privacy-forked Firefox", "librewolf"),
-            Pkg("www-client/brave-bin", "Brave — Chromium-based browser binary", "guru"),
             Pkg("www-client/qutebrowser", "qutebrowser — keyboard-driven Qt browser"),
             Pkg("www-client/falkon", "Falkon — KDE Qt WebEngine browser"),
             Pkg("www-client/epiphany", "GNOME Web — GTK WebKit browser"),
@@ -508,9 +551,6 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
             Pkg("app-editors/vim", "Vim"),
             Pkg("app-editors/emacs", "GNU Emacs"),
             Pkg("app-editors/nano", "nano"),
-            Pkg("app-editors/helix", "Helix", "guru"),
-            Pkg("app-editors/vscode", "VS Code", "guru"),
-            Pkg("app-editors/vscodium", "VSCodium", "guru"),
             Pkg("dev-util/geany", "Geany"),
             Pkg("app-editors/kate", "Kate"),
             Pkg("app-editors/gedit", "gedit"),
@@ -547,7 +587,6 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
             Pkg("sys-apps/bat", "bat"),
             Pkg("sys-apps/ripgrep", "ripgrep"),
             Pkg("sys-apps/fd", "fd"),
-            Pkg("app-misc/fastfetch", "fastfetch", "guru"),
             Pkg("app-misc/neofetch", "neofetch"),
             Pkg("app-portage/gentoolkit", "gentoolkit (equery, eclean)"),
             Pkg("app-portage/eix", "eix"),
@@ -583,7 +622,6 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
         _pkgs(
             Pkg("app-office/libreoffice-bin", "LibreOffice binary"),
             Pkg("app-office/libreoffice", "LibreOffice from source"),
-            Pkg("app-office/onlyoffice-bin", "ONLYOFFICE", "guru"),
             Pkg("app-text/zathura", "Zathura"),
             Pkg("app-text/evince", "Evince"),
             Pkg("kde-apps/okular", "Okular"),
@@ -605,7 +643,6 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
             Pkg("net-misc/curl", "curl"),
             Pkg("net-misc/rsync", "rsync"),
             Pkg("net-ftp/filezilla", "FileZilla"),
-            Pkg("net-im/discord", "Discord", "guru"),
             Pkg("net-im/telegram-desktop-bin", "Telegram Desktop bin"),
             Pkg("net-im/signal-desktop-bin", "Signal"),
             Pkg("net-analyzer/wireshark", "Wireshark"),
@@ -668,8 +705,6 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
         _pkgs(
             Pkg("games-util/steam-launcher", "Steam", "steam-overlay"),
             Pkg("games-util/gamemode", "GameMode"),
-            Pkg("games-util/mangohud", "MangoHud", "guru"),
-            Pkg("games-emulation/retroarch", "RetroArch", "guru"),
             Pkg("games-puzzle/gnome-tetravex", "GNOME Tetravex"),
             Pkg("kde-apps/kpat", "KPatience"),
             Pkg("kde-apps/kmines", "KMines"),
@@ -694,19 +729,29 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
             Pkg("app-backup/restic", "restic"),
             Pkg("app-backup/borgbackup", "Borg"),
             Pkg("sys-apps/flatpak", "Flatpak (also listed under App stores)"),
-            Pkg("app-emulation/distrobox", "Distrobox", "guru"),
         ),
     ),
 ]
 
 
+def _known_packages() -> list[Pkg]:
+    pkgs = list(WINDOW_MANAGERS) + list(WAYLAND_BASE) + list(WAYLAND_COMMON_UTILS)
+    pkgs.extend(PLYMOUTH_THEME_PACKAGES.values())
+    for group in list(WM_REQUIREMENTS.values()) + list(SHELL_PACKAGES.values()):
+        pkgs.extend(group)
+    return pkgs
+
+
 def atom_overlay(atom: str) -> str:
     """Which eselect overlay an atom needs, or 'gentoo' for the main tree."""
+    bare = atom.split("::", 1)[0]
+    if bare in REMOVED_GURU_ATOMS:
+        return "guru"
     if atom.startswith("flatpak-app/"):
         return "gentoo"
-    for p in WINDOW_MANAGERS + list(PLYMOUTH_THEME_PACKAGES.values()):
-        if p.atom == atom:
-            return p.overlay
+    for pkg in _known_packages():
+        if pkg.atom == atom:
+            return pkg.overlay
     for _, _, pkgs in CATEGORIES:
         for value, desc in pkgs:
             if value == atom and "::" in desc:

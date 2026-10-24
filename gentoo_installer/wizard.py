@@ -340,7 +340,9 @@ def _base(cfg: InstallConfig) -> None:
     """Handbook: Base system — profile, sync, binhost, USE, make.conf knobs."""
     ui.chapter("6", "Installing the Gentoo base system", f"{HANDBOOK}/Installation/Base")
     profile_choices = _profiles(cfg)
-    cfg.profile = ui.menu("Portage profile (23.0 tree)", profile_choices, profile_choices[0][0])
+    known_profiles = {key for key, _label in profile_choices}
+    preferred = cfg.profile if cfg.profile in known_profiles else profile_choices[0][0]
+    cfg.profile = ui.menu("Portage profile (23.0 tree)", profile_choices, preferred)
     cfg.sync_method = ui.menu(
         "Repository sync method",
         [
@@ -391,24 +393,20 @@ def _profiles(cfg: InstallConfig) -> list[tuple[str, str]]:
         return [(f"default/linux/{arch}/23.0/hardened{suffix}", "hardened")]
     systemd = cfg.init_system == "systemd"
     rows = [
+        (f"default/linux/{arch}/23.0/desktop", "Desktop — libraries for Wayland and X"),
         (f"default/linux/{arch}/23.0", "Base"),
-        (f"default/linux/{arch}/23.0/desktop", "Desktop"),
-        (f"default/linux/{arch}/23.0/desktop/gnome", "GNOME"),
-        (f"default/linux/{arch}/23.0/desktop/plasma", "KDE Plasma"),
     ]
     if systemd:
         rows = [
+            (f"default/linux/{arch}/23.0/desktop/systemd", "Desktop systemd — libraries for Wayland and X"),
             (f"default/linux/{arch}/23.0/systemd", "Base systemd"),
-            (f"default/linux/{arch}/23.0/desktop/systemd", "Desktop systemd"),
-            (f"default/linux/{arch}/23.0/desktop/gnome/systemd", "GNOME systemd"),
-            (f"default/linux/{arch}/23.0/desktop/plasma/systemd", "Plasma systemd"),
         ]
     return rows
 
 
 def _default_use(cfg: InstallConfig) -> list[str]:
     """Pre-tick USE flags that match the chosen init system and desktop type."""
-    flags = ["dist-kernel"]
+    flags = ["dist-kernel", "wayland"]
     if cfg.install_type == "desktop":
         flags.append("X")
     if cfg.init_system == "openrc":
@@ -543,21 +541,13 @@ def _bootloader(cfg: InstallConfig) -> None:
     )
     cfg.plymouth = ui.ask_yes_no("Install Plymouth boot splash?", cfg.install_type == "desktop")
     if cfg.plymouth:
-        cfg.plymouth_themes = ui.paged_checklist(
-            "Plymouth themes to install",
-            catalog.plymouth_theme_choices(),
-            selected=["spinner"],
-            page_size=12,
-        )
-        if not cfg.plymouth_themes:
-            cfg.plymouth_themes = ["spinner"]
-        cfg.plymouth_theme = ui.menu(
-            "Default Plymouth theme",
-            [(t, t) for t in cfg.plymouth_themes],
-            cfg.plymouth_themes[0],
-        )
+        _ask_plymouth_theme(cfg)
         if cfg.init_system == "openrc":
             cfg.plymouth_openrc_plugin = ui.ask_yes_no("Install plymouth-openrc-plugin?", True)
+    else:
+        cfg.plymouth_theme = ""
+        cfg.plymouth_themes = []
+        cfg.plymouth_openrc_plugin = False
     cfg.secure_boot = cfg.firmware == "uefi" and ui.ask_yes_no("Prepare Secure Boot (shim/mokutil notes and installkernel signing USE)?", False)
     if "grub" in cfg.bootloaders and ui.ask_yes_no("Set a GRUB password?", False):
         cfg.grub_password = ui.ask_password("GRUB password")
@@ -571,59 +561,101 @@ def _bootloader(cfg: InstallConfig) -> None:
             )
 
 
-def _finalize(cfg: InstallConfig) -> None:
-    """Handbook: Finalizing — DE, display manager, browser; packages follow in ch. 12."""
-    ui.chapter("11", "Finalizing the installation", f"{HANDBOOK}/Installation/Finalizing")
-    if cfg.install_type == "desktop":
-        cfg.desktop = ui.menu(
-            "Desktop environment",
-            [
-                ("none", "No DE — tiling WMs and extras are chosen in chapter 12"),
-                ("xfce", "Xfce — light GTK desktop (good default on a live USB)"),
-                ("plasma", "KDE Plasma — full Qt desktop"),
-                ("gnome", "GNOME — full GTK desktop"),
-                ("mate", "MATE — traditional GTK desktop"),
-                ("cinnamon", "Cinnamon — Mint-style desktop"),
-                ("i3", "i3 — X11 tiling window manager (not a full DE)"),
-            ],
-            "xfce",
+def _ask_plymouth_theme(cfg: InstallConfig) -> None:
+    """Record the splash the user checked. Never fill in spinner for them."""
+    choices = catalog.plymouth_theme_choices()
+    labels = dict(choices)
+    known = {theme_id for theme_id, _desc in choices}
+    cfg.plymouth_themes = ui.paged_checklist(
+        "Plymouth themes to install",
+        choices,
+        selected=[theme for theme in cfg.plymouth_themes if theme in known],
+        page_size=12,
+    )
+    if not cfg.plymouth_themes:
+        ui.warn("Nothing was checked. Spinner is not added unless you check it.")
+        cfg.plymouth_themes = ui.paged_checklist(
+            "Plymouth themes to install",
+            choices,
+            selected=[],
+            page_size=12,
         )
-        if cfg.desktop != "none":
-            cfg.display_manager = ui.menu(
-                "Display manager (graphical login)",
-                [
-                    ("auto", "Auto — start a login screen at boot for this desktop or your window managers"),
-                    ("lightdm", "LightDM — common for Xfce/MATE/Cinnamon"),
-                    ("sddm", "SDDM — usual choice for Plasma"),
-                    ("gdm", "GDM — usual choice for GNOME"),
-                    ("none", "None — log in on TTY and run startx"),
-                ],
-                "auto",
-            )
-            cfg.pipewire = ui.ask_yes_no("Install PipeWire audio?", True)
-            cfg.browser = ui.menu(
-                "Web browser",
-                [
-                    ("firefox-bin", "Firefox official binary — no compile"),
-                    ("firefox", "Firefox compiled from source — many hours"),
-                    ("none", "No browser from this chapter (you can pick one in chapter 12)"),
-                ],
-                "firefox-bin",
-            )
-            cfg.kde_games = cfg.desktop == "plasma" and ui.ask_yes_no("Install a small KDE games set?", False)
-            cfg.flatpak = ui.ask_yes_no("Install Flatpak?", False)
-    ui.info("The next chapter is a categorised emerge catalogue (window managers, overlays, extra packages).")
+    if not cfg.plymouth_themes:
+        ui.warn("Plymouth will be installed without changing its theme.")
+        cfg.plymouth_theme = ""
+        return
+    if len(cfg.plymouth_themes) == 1:
+        cfg.plymouth_theme = cfg.plymouth_themes[0]
+        ui.ok(f"Plymouth theme: {labels.get(cfg.plymouth_theme, cfg.plymouth_theme)}")
+        return
+    others = [theme for theme in cfg.plymouth_themes if theme != "spinner"]
+    # A list that still contains spinner must not highlight spinner when
+    # another theme was checked. One theme skips this menu entirely.
+    if cfg.plymouth_theme in others:
+        preferred = cfg.plymouth_theme
+    elif others:
+        preferred = others[0]
+    else:
+        preferred = cfg.plymouth_themes[0]
+    ui.info("The highlighted theme is the one that boots. The others are only installed.")
+    cfg.plymouth_theme = ui.menu(
+        "Which Plymouth theme should boot?",
+        [(theme, labels.get(theme, theme)) for theme in cfg.plymouth_themes],
+        preferred,
+    )
+
+
+def _finalize(cfg: InstallConfig) -> None:
+    """Wayland compositors, a shell, and greetd. No desktop environment."""
+    ui.chapter("11", "Wayland session", f"{HANDBOOK}/Installation/Finalizing")
+    cfg.desktop = "none"
+    cfg.kde_games = False
+    cfg.browser = "none"
+    ui.info("Each compositor installs its own required packages (portal, wallpaper, lock, terminal).")
+    ui.info("Utilities that work on every compositor are a separate list in the next chapter.")
+    cfg.window_managers = ui.paged_checklist(
+        "Wayland compositors, dwl, dwm, and i3",
+        catalog.wm_choices(),
+        selected=[atom for atom in cfg.window_managers if atom in {p.atom for p in catalog.WINDOW_MANAGERS}],
+        page_size=12,
+    )
+    cfg.shell = ui.menu(
+        "Wayland shell",
+        catalog.SHELL_CHOICES,
+        cfg.shell if cfg.shell in {key for key, _ in catalog.SHELL_CHOICES} else "none",
+    )
+    if cfg.shell != "none":
+        ui.info("Noctalia and DMS are installed from the GURU overlay, which is enabled only for that shell.")
+    graphical = bool(cfg.window_managers) or cfg.shell != "none"
+    cfg.pipewire = ui.ask_yes_no("Install PipeWire audio?", graphical)
+    if catalog.wayland_selected(cfg.window_managers) or cfg.shell != "none":
+        cfg.display_manager = ui.menu(
+            "Login",
+            [
+                ("greetd", "greetd + gtkgreet — Wayland login screen"),
+                ("none", "Text console — start the compositor yourself"),
+            ],
+            "greetd",
+        )
+    else:
+        cfg.display_manager = "none"
+        if cfg.window_managers:
+            ui.info("dwm and i3 start from the text console with startx.")
+    if cfg.shell != "none" and not catalog.wayland_selected(cfg.window_managers):
+        ui.info("Noctalia and DMS run on a Wayland compositor. labwc will be installed with the shell.")
+        cfg.window_managers.append("gui-wm/labwc")
+    ui.info("The next chapter is suckless tools and popular apps. There is no desktop list.")
 
 
 def _packages(cfg: InstallConfig) -> None:
-    """Extra chapter: overlays, window managers (niri/Hyprland/…), categorised emerge."""
+    """Suckless tools, shared Wayland utilities, and popular apps."""
     ui.chapter(
         "12",
-        "Packages, overlays, and window managers",
+        "Suckless tools and popular apps",
         "https://packages.gentoo.org/",
     )
-    ui.info("Browse Portage categories, enable overlays (guru, hyproverlay, wayland-desktop, …),")
-    ui.info("and pick window managers including niri, Hyprland, Sway, and the X11 set.")
+    ui.info("Compositor requirements are already queued. This list is optional apps.")
+    ui.info("GURU packages are not in these lists. Noctalia and DMS were chosen in the previous chapter.")
     ui.info("Search with /text  ·  n/p pages  ·  toggle numbers  ·  0 when a list is finished.")
 
     if ui.ask_yes_no("Enable extra Portage overlays (eselect repository)?", True):
@@ -637,18 +669,10 @@ def _packages(cfg: InstallConfig) -> None:
         if more.strip():
             cfg.overlays = list(dict.fromkeys(cfg.overlays + more.split()))
 
-    cfg.window_managers = ui.paged_checklist(
-        "Window managers & Wayland compositors",
-        catalog.wm_choices(),
-        selected=cfg.window_managers,
-        page_size=14,
-    )
-    if cfg.desktop == "i3" and "x11-wm/i3" not in cfg.window_managers:
-        cfg.window_managers.append("x11-wm/i3")
-
     picked: list[str] = list(cfg.selected_packages)
-    if ui.ask_yes_no("Browse more emerge categories (browsers, editors, games, …)?", True):
-        cats = [(key, title) for key, title, _ in catalog.CATEGORIES if key != "window-managers"]
+    if ui.ask_yes_no("Browse suckless tools, shared Wayland utilities, and popular apps?", True):
+        hidden = {"window-managers", "desktop-environments", "wayland-utils"}
+        cats = [(key, title) for key, title, _ in catalog.CATEGORIES if key not in hidden]
         cats.append(("done", "Done with categories"))
         while True:
             choice = ui.menu("Package category", cats, "done")
@@ -676,10 +700,26 @@ def _packages(cfg: InstallConfig) -> None:
     if any(a.startswith("sys-fs/fuse") for a in picked) or any("appimage" in a.lower() for a in picked):
         if "sys-fs/fuse:0" not in picked:
             picked.append("sys-fs/fuse:0")
+    allowed_guru = set(catalog.shell_atoms(cfg.shell))
+    kept: list[str] = []
+    for atom in picked:
+        bare, _, suffix = atom.partition("::")
+        overlay = suffix or catalog.atom_overlay(bare)
+        if overlay == "guru" and bare not in allowed_guru:
+            ui.warn(f"Skipping {atom} — GURU packages are not offered")
+            continue
+        kept.append(atom)
+    picked = kept
+    known_wm = {pkg.atom for pkg in catalog.WINDOW_MANAGERS}
+    for atom in picked:
+        bare = atom.split("::", 1)[0]
+        if bare in known_wm and bare not in cfg.window_managers:
+            cfg.window_managers.append(bare)
     cfg.selected_packages = picked
-    # extra_packages is the emerge set: catalogue picks + WMs + typed atoms.
-    cfg.extra_packages = list(dict.fromkeys(cfg.extra_packages + picked + cfg.window_managers))
-    # niri → guru, hyprland → hyproverlay, etc.
+    needed = [pkg.atom for pkg in catalog.packages_for_selection(cfg.window_managers, cfg.shell, cfg.pipewire)]
+    # extra_packages is the emerge set: catalogue picks + WMs + compositor requirements.
+    cfg.extra_packages = list(dict.fromkeys(cfg.window_managers + needed + picked))
+    cfg.overlays = [name for name in cfg.overlays if name != "guru"]
     cfg.overlays = catalog.overlays_required_by(cfg.extra_packages, cfg.overlays)
     if cfg.window_managers or any("wayland" in a or "gui-wm/" in a for a in cfg.extra_packages):
         if "wayland" not in cfg.extra_use:
@@ -687,6 +727,17 @@ def _packages(cfg: InstallConfig) -> None:
     if cfg.overlays:
         ui.ok("Overlays that will be enabled: " + ", ".join(cfg.overlays))
     ui.ok(f"{len(cfg.extra_packages)} package atoms queued for emerge")
+
+
+def _plymouth_review(cfg: InstallConfig) -> str:
+    if not cfg.plymouth:
+        return "no"
+    if not cfg.plymouth_theme:
+        return "installed, theme not selected"
+    extra = [theme for theme in cfg.plymouth_themes if theme != cfg.plymouth_theme]
+    if extra:
+        return cfg.plymouth_theme + " (also " + ", ".join(extra) + ")"
+    return cfg.plymouth_theme
 
 
 def _login_manager_label(cfg: InstallConfig) -> str:
@@ -718,13 +769,14 @@ def _review(cfg: InstallConfig) -> None:
         ("Profile", cfg.profile),
         ("Kernel", cfg.kernel),
         ("Bootloaders", ", ".join(cfg.bootloaders) + f" (primary {cfg.bootloader})"),
-        ("Plymouth", cfg.plymouth_theme if cfg.plymouth else "no"),
+        ("Plymouth", _plymouth_review(cfg)),
         ("Hostname", cfg.hostname),
         ("Timezone", cfg.timezone),
         ("Locale", cfg.locale),
         ("User", cfg.username or "(root only)"),
-        ("Desktop", cfg.desktop),
-        ("Window managers", ", ".join(cfg.window_managers) or "none"),
+        ("Compositors", ", ".join(cfg.window_managers) or "none"),
+        ("Shell", cfg.shell or "none"),
+        ("ZRAM", "yes" if cfg.zram else "no"),
         (
             "Login manager",
             _login_manager_label(cfg),

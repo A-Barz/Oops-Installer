@@ -1185,7 +1185,7 @@ def _required_tool_repairs(cfg: InstallConfig, loaders: list[str]) -> str:
     if tools:
         atoms = " ".join(shlex.quote(atom) for atom, _test in tools)
         lines.append(
-            "emerge --ask=n --keep-going --binpkg-respect-use=y $NR "
+            "emerge --ask=n --keep-going $RESPECT_USE $NR "
             + atoms
             + " || echo '>> some required packages failed; retrying one at a time' >&2"
         )
@@ -1198,8 +1198,8 @@ def _required_tool_repairs(cfg: InstallConfig, loaders: list[str]) -> str:
                 [
                     "if ! test -e /etc/init.d/NetworkManager; then",
                     '  echo ">> NetworkManager init script still missing; installing dbus and elogind first"',
-                    "  emerge --ask=n --binpkg-respect-use=y sys-apps/dbus || true",
-                    "  emerge --ask=n --binpkg-respect-use=y sys-auth/elogind || true",
+                    "  emerge --ask=n $RESPECT_USE sys-apps/dbus || true",
+                    "  emerge --ask=n $RESPECT_USE sys-auth/elogind || true",
                     "  emerge --ask=n --selective=n --usepkg=n --getbinpkg=n net-misc/networkmanager || echo '>> emerge failed: net-misc/networkmanager' >&2",
                     "fi",
                 ]
@@ -1238,6 +1238,11 @@ def _final_tool_checks(cfg: InstallConfig, loaders: list[str]) -> str:
         checks.append((f"[ -e /etc/init.d/{svc} ]", svc))
     if openrc and cfg.zram:
         checks.append(("[ -e /etc/init.d/zram-init ]", "zram-init"))
+        checks.append(
+            ("grep -q '^size0=\"[0-9][0-9]*\"' /etc/conf.d/zram-init", "zram-init size0")
+        )
+    elif cfg.zram:
+        checks.append(("[ -s /etc/systemd/zram-generator.conf ]", "zram-generator.conf"))
     lines = [
         'echo ">> verify kernel, bootloader, and services"',
         "missing=0",
@@ -1325,23 +1330,58 @@ disable_binpkgs() {
   done
 }
 
-emerge_with_source() {
-  # Distfiles are fetched even when a binpkg will be installed, so a later
-  # Illegal instruction can be rebuilt without another mirror lookup.
-  emerge --ask=n --fetchonly --usepkg=n --getbinpkg=n --keep-going "$@" || echo ">> some distfiles were not fetched" >&2
-  emerge --ask=n --keep-going $NR "$@"
-  status=$?
+# Stage3 Portage may not know --binpkg-respect-use. Leaving it in
+# EMERGE_DEFAULT_OPTS makes every later emerge exit before it builds anything.
+RESPECT_USE=""
+portage_prepare() {
+  emerge --help >/tmp/emerge-help.txt 2>/tmp/emerge-help.err || true
+  if grep -q 'binpkg-respect-use' /tmp/emerge-help.err 2>/dev/null; then
+    echo ">> this Portage rejects --binpkg-respect-use; removing it so emerge can run"
+    local conf
+    for conf in /etc/portage/make.conf /etc/portage/make.conf/*; do
+      [ -f "$conf" ] || continue
+      sed -i -E 's/ --binpkg-respect-use=[^" ]*//g' "$conf" || true
+    done
+    emerge --help >/tmp/emerge-help.txt 2>/tmp/emerge-help.err || true
+  fi
+  if grep -q 'binpkg-respect-use' /tmp/emerge-help.txt 2>/dev/null; then
+    RESPECT_USE="--binpkg-respect-use=y"
+  fi
+  rm -f /tmp/emerge-help.txt /tmp/emerge-help.err
+}
+portage_prepare
+
+# One atom. A batch emerge treats one masked or missing ebuild as a failed
+# calculation and installs nothing else in that command.
+emerge_one() {
+  local atom="$1"
+  [ -n "$atom" ] || return 0
+  echo ">> emerge $atom"
+  emerge --ask=n --keep-going $RESPECT_USE $NR "$atom"
+  local status=$?
   if [ "$status" -eq 0 ]; then
     return 0
   fi
   if [ "$status" -eq 132 ]; then
-    echo ">> emerge died with Illegal instruction; rebuilding from source" >&2
+    echo ">> emerge died with Illegal instruction; rebuilding $atom from source" >&2
     disable_binpkgs
-    emerge --ask=n --keep-going --usepkg=n --getbinpkg=n "$@"
-    return $?
+  else
+    echo ">> emerge failed ($status): $atom; building this package from source" >&2
   fi
-  echo ">> emerge failed ($status); required tools are rebuilt from source next" >&2
-  return "$status"
+  emerge --ask=n --fetchonly --usepkg=n --getbinpkg=n "$atom" || echo ">> distfile not fetched: $atom" >&2
+  if emerge --ask=n --keep-going --usepkg=n --getbinpkg=n "$atom"; then
+    return 0
+  fi
+  echo ">> emerge failed: $atom" >&2
+  return 1
+}
+
+emerge_with_source() {
+  local atom failed=0
+  for atom in "$@"; do
+    emerge_one "$atom" || failed=1
+  done
+  return "$failed"
 }
 
 # emerge_checked ATOM TEST...
@@ -1357,7 +1397,7 @@ emerge_checked() {
     return 0
   fi
   echo ">> installing $atom"
-  emerge --ask=n --keep-going --binpkg-respect-use=y "$atom"
+  emerge --ask=n --keep-going $RESPECT_USE "$atom"
   local st=$?
   if [ "$st" -eq 132 ]; then
     disable_binpkgs
@@ -1379,7 +1419,74 @@ emerge_checked() {
   echo ">> still missing after emerge: $atom" >&2
   return 1
 }
+
+# Set the theme the wizard recorded. Never substitute spinner.
+# breeze-plymouth also ships breeze-text; use that only when breeze is absent.
+apply_plymouth_theme() {
+  local want="$1"
+  local listed resolved="" current=""
+  [ -n "$want" ] || return 0
+  if ! command -v plymouth-set-default-theme >/dev/null 2>&1; then
+    echo ">> plymouth-set-default-theme does not exist" >&2
+    return 1
+  fi
+  listed=$(plymouth-set-default-theme --list 2>/dev/null || true)
+  if printf '%s\\n' "$listed" | grep -qx -- "$want"; then
+    resolved=$want
+  elif printf '%s\\n' "$listed" | grep -qx -- "${want}-text"; then
+    resolved="${want}-text"
+  elif resolved=$(printf '%s\\n' "$listed" | grep -m1 -- "^${want}" || true); [ -n "$resolved" ]; then
+    true
+  fi
+  if [ -z "$resolved" ]; then
+    echo ">> Plymouth theme '$want' is not installed; the splash was not changed" >&2
+    echo ">> themes on disk:" >&2
+    printf '%s\\n' "$listed" >&2
+    return 1
+  fi
+  plymouth-set-default-theme "$resolved" || {
+    echo ">> plymouth-set-default-theme $resolved failed" >&2
+    return 1
+  }
+  current=$(plymouth-set-default-theme 2>/dev/null | head -n1 | tr -d '[:space:]')
+  if [ -n "$current" ] && [ "$current" != "$resolved" ]; then
+    echo ">> Plymouth reports '$current' after setting '$resolved'" >&2
+    return 1
+  fi
+  echo ">> Plymouth theme is ${current:-$resolved}"
+}
+
+rebuild_initramfs() {
+  local dir kver
+  if ! command -v dracut >/dev/null 2>&1; then
+    return 0
+  fi
+  for dir in /lib/modules/*; do
+    [ -d "$dir" ] || continue
+    kver=$(basename "$dir")
+    dracut --force --kver "$kver" || echo ">> dracut failed for $kver" >&2
+  done
+}
 """
+
+
+def _chosen_plymouth_themes(cfg: InstallConfig) -> list[str]:
+    """Theme ids the user checked. An empty string is not a request for spinner."""
+    themes = [theme for theme in cfg.plymouth_themes if theme]
+    if not themes and cfg.plymouth_theme:
+        themes = [cfg.plymouth_theme]
+    return themes
+
+
+def _emerge_each_block(title: str, atoms: list[str]) -> str:
+    """Emerge each atom alone so one masked ebuild cannot skip the rest."""
+    clean = [atom for atom in dict.fromkeys(atoms) if atom]
+    if not clean:
+        return ""
+    lines = [f'echo ">> {title}"']
+    for atom in clean:
+        lines.append(f"emerge_one {shlex.quote(atom)} || true")
+    return "\n".join(lines) + "\n"
 
 
 def _grub_uefi_install(target: str) -> str:
@@ -1428,7 +1535,7 @@ def _grub_uefi_install(target: str) -> str:
 
 
 def _graphical_atoms(cfg: InstallConfig) -> list[str]:
-    return list(dict.fromkeys(cfg.extra_packages + cfg.window_managers + cfg.selected_packages))
+    return list(dict.fromkeys(cfg.extra_packages + _window_managers(cfg) + cfg.selected_packages))
 
 
 def _resolved_dm(cfg: InstallConfig) -> str:
@@ -1436,8 +1543,13 @@ def _resolved_dm(cfg: InstallConfig) -> str:
 
 
 def _greetd_uses_tuigreet(cfg: InstallConfig) -> bool:
+    """tuigreet is a GURU package. Use it only when a saved profile already names it."""
     atoms = set(_graphical_atoms(cfg))
-    return "gui-apps/gtkgreet" not in atoms or "gui-apps/tuigreet" in atoms
+    return (
+        "gui-apps/tuigreet" in atoms
+        and "gui-apps/gtkgreet" not in atoms
+        and _atom_allowed(cfg, "gui-apps/tuigreet")
+    )
 
 
 def _display_manager_tools(cfg: InstallConfig) -> list[tuple[str, tuple[str, ...]]]:
@@ -1460,7 +1572,7 @@ def _display_manager_tools(cfg: InstallConfig) -> list[tuple[str, tuple[str, ...
             tools.append(("gui-apps/tuigreet", ("command", "-v", "tuigreet")))
         else:
             tools.append(("gui-apps/gtkgreet", ("command", "-v", "gtkgreet")))
-            tools.append(("gui-wm/cage", ("command", "-v", "cage")))
+            tools.append(("gui-wm/labwc", ("command", "-v", "labwc")))
     elif dm == "ly":
         tools.append(("x11-misc/ly", _service_probe(openrc, "ly")))
     elif dm == "slim":
@@ -1497,7 +1609,9 @@ def _display_manager_script(cfg: InstallConfig) -> str:
     for atom, test in _display_manager_tools(cfg):
         lines.append(_emerge_checked_call(atom, test))
     lines.append("mkdir -p /usr/share/wayland-sessions /usr/share/xsessions")
-    for title, command, kind in catalog.login_sessions(cfg.desktop, _graphical_atoms(cfg)):
+    for title, command, kind in catalog.login_sessions(
+        cfg.desktop, _graphical_atoms(cfg), getattr(cfg, "shell", "") or ""
+    ):
         folder = "/usr/share/wayland-sessions" if kind == "wayland" else "/usr/share/xsessions"
         slug = re.sub(r"[^A-Za-z0-9]+", "-", title).strip("-").lower() or "session"
         path = f"{folder}/installer-{slug}.desktop"
@@ -1519,12 +1633,7 @@ def _display_manager_script(cfg: InstallConfig) -> str:
         if _greetd_uses_tuigreet(cfg):
             command = "/usr/bin/tuigreet --time --remember --remember-user-session --sessions /usr/share/wayland-sessions:/usr/share/xsessions"
         else:
-            commands = []
-            for _title, exec_cmd, _kind in catalog.login_sessions(cfg.desktop, _graphical_atoms(cfg)):
-                commands.append("-c")
-                commands.append(exec_cmd)
-            joined = " ".join(shlex.quote(part) for part in commands)
-            command = f"/usr/bin/cage -s -- /usr/bin/gtkgreet {joined}".strip()
+            command = "labwc -s gtkgreet"
         lines.extend(
             [
                 "mkdir -p /etc/greetd",
@@ -1540,6 +1649,7 @@ def _display_manager_script(cfg: InstallConfig) -> str:
                 'user = "greetd"',
                 "EOF",
                 "fi",
+                "usermod -aG video,seat,input greetd || true",
             ]
         )
     elif dm == "sddm":
@@ -1561,7 +1671,7 @@ def _package_use_text(cfg: InstallConfig) -> str:
     """Per-package USE so OpenRC init scripts and Plymouth can actually be installed.
 
     Plymouth's default gtk USE fails to compile when gtk+ is built without X
-    (Gentoo bug 850400). The spinner theme needs drm and pango, not gtk.
+    (Gentoo bug 850400). Themes need drm and pango, not gtk.
     A systemd binpkg of NetworkManager, dbus, or Plymouth does not ship
     /etc/init.d, so OpenRC installs must not reuse that USE.
     """
@@ -1615,10 +1725,12 @@ def _keyword_text(cfg: InstallConfig) -> str:
     )
     if dm == "greetd":
         lines.append(f"gui-libs/greetd {keyword}")
-        lines.append(f"gui-apps/tuigreet {keyword}")
         lines.append(f"gui-apps/gtkgreet {keyword}")
-    elif dm == "ly":
-        lines.append(f"x11-misc/ly {keyword}")
+        if _greetd_uses_tuigreet(cfg):
+            lines.append(f"gui-apps/tuigreet {keyword}")
+    shell_atoms = catalog.shell_atoms(getattr(cfg, "shell", ""))
+    for atom in shell_atoms:
+        lines.append(f"{atom} {keyword}")
     if not lines:
         return ""
     return "\n".join(lines) + "\n"
@@ -1771,10 +1883,10 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
     theme_pkgs: list[str] = []
     if cfg.plymouth:
         boot_pkgs.append("sys-boot/plymouth")
-        # Themes and the ~arch OpenRC plugin are not in the pre-kernel emerge.
-        # A masked theme aborts Portage's calculation and skips every service.
+        # Theme packages are emerged one at a time, before dracut runs.
+        # A masked theme used to sit in the same emerge as every other package.
         for extra_theme in catalog.plymouth_packages_for(
-            cfg.plymouth_themes or [cfg.plymouth_theme],
+            _chosen_plymouth_themes(cfg),
             cfg.plymouth_openrc_plugin and cfg.init_system == "openrc",
         ):
             theme_pkgs.append(extra_theme.atom)
@@ -1803,18 +1915,27 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
         if atom and atom not in required_set and atom not in theme_pkgs
     ]
     dm_atoms = [atom for atom, _test in _display_manager_tools(cfg)]
+    support_atoms = _support_atoms(cfg)
+    blocked = [
+        atom
+        for atom in dict.fromkeys(cfg.extra_packages + cfg.window_managers + cfg.selected_packages)
+        if atom and not _atom_allowed(cfg, atom)
+    ]
+    if blocked:
+        ui.warn("Not installing GURU packages: " + ", ".join(blocked))
     late_atoms = [
         atom
         for atom in dict.fromkeys(
-            theme_pkgs + de_pkgs + cfg.extra_packages + cfg.window_managers + dm_atoms
+            de_pkgs + support_atoms + cfg.extra_packages + _window_managers(cfg) + dm_atoms
         )
-        if atom and not atom.startswith("flatpak-app/") and atom not in required_set
+        if atom
+        and _atom_allowed(cfg, atom)
+        and not atom.startswith("flatpak-app/")
+        and atom not in required_set
+        and atom not in set(theme_pkgs)
     ]
-    fetch_atoms_extra = list(dict.fromkeys(required_atoms + missed + extra_fw + late_atoms))
+    fetch_atoms_extra = list(dict.fromkeys(required_atoms + missed + extra_fw + theme_pkgs + late_atoms))
     all_extra = " ".join(fetch_atoms_extra)
-    late_extra = " ".join(late_atoms)
-    missed_line = " ".join(shlex.quote(atom) for atom in missed)
-    firmware_line = " ".join(shlex.quote(atom) for atom in extra_fw)
     kernel_atom = f"sys-kernel/{pkgs_kernel}"
     # gentoo-kernel is the source dist-kernel. Fetch it even when the selected
     # kernel is a binpkg or gentoo-sources, so a SIGILL or a sources-only tree
@@ -1889,25 +2010,16 @@ EOF
 if [ ! -s /etc/locale.conf ]; then echo 'LANG="{locale_safe}"' > /etc/locale.conf; fi
 if [ ! -s /etc/conf.d/keymaps ]; then echo 'keymap="{keymap_safe}"' > /etc/conf.d/keymaps; fi
 """
-    firmware_block = ""
-    if firmware_line:
-        firmware_block = (
-            'echo ">> firmware"\n'
-            f"emerge --ask=n --keep-going --binpkg-respect-use=y $NR {firmware_line} "
-            '|| echo ">> firmware emerge failed" >&2\n'
-        )
-    missed_block = ""
-    if missed_line:
-        missed_block = (
-            'echo ">> remaining service packages"\n'
-            f"emerge --ask=n --keep-going --binpkg-respect-use=y $NR {missed_line} "
-            '|| echo ">> some service packages failed" >&2\n'
-        )
-    late_block = ""
-    if late_extra:
-        late_block = (
-            'echo ">> emerge desktop, themes, and extra packages"\n'
-            f"emerge_with_source {late_extra} || echo '>> some optional packages failed' >&2\n"
+    firmware_block = _emerge_each_block("firmware", extra_fw)
+    missed_block = _emerge_each_block("remaining service packages", missed)
+    late_block = _emerge_each_block("desktop and extra packages", late_atoms)
+    theme_block = _emerge_each_block("Plymouth theme packages", theme_pkgs)
+    plymouth_early = ""
+    if cfg.plymouth and cfg.plymouth_theme:
+        plymouth_early = (
+            'echo ">> set Plymouth theme before the initramfs is built"\n'
+            f"apply_plymouth_theme {shlex.quote(cfg.plymouth_theme)} || "
+            "echo '>> Plymouth theme was not applied yet' >&2\n"
         )
     nm_cleanup = ""
     if cfg.init_system == "openrc" and cfg.network_stack == "networkmanager":
@@ -1973,21 +2085,33 @@ if [ -f /root/.install-secrets ]; then
   echo "root:${ROOT_PW}" | chpasswd
 fi
 """
+    session_extra = _user_session_script(cfg)
 
     zram_block = ""
     if cfg.zram:
         if cfg.init_system == "systemd":
             zram_block = """
-mkdir -p /etc/systemd/zram-generator.conf.d
+echo ">> configure zram (half of RAM, zstd)"
+mkdir -p /etc/modules-load.d /etc/systemd
+echo zram > /etc/modules-load.d/zram.conf
 cat > /etc/systemd/zram-generator.conf << 'EOF'
 [zram0]
 zram-size = ram / 2
 compression-algorithm = zstd
+swap-priority = 100
 EOF
+if ! grep -q 'zram-size' /etc/systemd/zram-generator.conf; then
+  echo ">> zram-generator.conf was not written" >&2
+fi
 """
         else:
             zram_block = """
+echo ">> configure zram (half of RAM, zstd)"
+mkdir -p /etc/modules-load.d
+echo zram > /etc/modules-load.d/zram.conf
 emerge_checked sys-block/zram-init test -e /etc/init.d/zram-init || true
+zram_mib=$(awk '/MemTotal/ { m=int($2/2048); if (m<256) m=256; print m }' /proc/meminfo)
+if [ -z "$zram_mib" ]; then zram_mib=2048; fi
 if [ ! -e /etc/init.d/zram-init ]; then
   echo ">> writing a small OpenRC zram-init service"
   cat > /etc/init.d/zram-init << 'ZRAM'
@@ -1995,13 +2119,16 @@ if [ ! -e /etc/init.d/zram-init ]; then
 description="Compressed RAM swap"
 start() {
   modprobe zram || return 1
-  local kib bytes
-  kib=$(awk '/MemTotal/ {print int($2/2)}' /proc/meminfo)
-  bytes=$((kib * 1024))
+  if [ ! -e /sys/block/zram0 ]; then
+    echo 1 > /sys/class/zram-control/hot_add || return 1
+  fi
+  local mib bytes
+  mib=$(awk '/MemTotal/ { m=int($2/2048); if (m<256) m=256; print m }' /proc/meminfo)
+  bytes=$((mib * 1024 * 1024))
   echo zstd > /sys/block/zram0/comp_algorithm 2>/dev/null || true
   echo "$bytes" > /sys/block/zram0/disksize || return 1
   mkswap /dev/zram0 || return 1
-  swapon /dev/zram0
+  swapon -p 100 /dev/zram0
 }
 stop() {
   swapoff /dev/zram0 || true
@@ -2010,13 +2137,19 @@ stop() {
 ZRAM
   chmod 755 /etc/init.d/zram-init
 fi
-cat > /etc/conf.d/zram-init << 'EOF'
-load_on_start=yes
-num_devices=1
-type0=swap
-size0=$(($(awk '/MemTotal/ {print int($2/2)}' /proc/meminfo)))
-algo0=zstd
+cat > /etc/conf.d/zram-init << EOF
+load_on_start="yes"
+unload_on_stop="yes"
+num_devices="1"
+type0="swap"
+size0="${zram_mib}"
+algo0="zstd"
+pri0="100"
 EOF
+echo ">> zram-init size0=${zram_mib} MiB"
+if ! grep -q "^size0=\\\"${zram_mib}\\\"" /etc/conf.d/zram-init; then
+  echo ">> zram-init config is missing size0" >&2
+fi
 if [ -e /etc/init.d/zram-init ]; then rc-update add zram-init boot; else echo ">> OpenRC service zram-init does not exist" >&2; fi
 """
 
@@ -2124,12 +2257,14 @@ if command -v mirrorselect >/dev/null 2>&1; then
   mirrorselect -s3 -b10 || true
 fi
 echo ">> emerge @world"
-emerge --verbose --update --deep --newuse $NR @world
+emerge --verbose --update --deep --newuse --keep-going $NR @world
 world_status=$?
 if [ "$world_status" -eq 132 ]; then
   echo ">> @world died with Illegal instruction; rebuilding from source"
   disable_binpkgs
-  emerge --verbose --update --deep --newuse --usepkg=n --getbinpkg=n @world || echo ">> @world source rebuild failed" >&2
+  emerge --verbose --update --deep --newuse --keep-going --usepkg=n --getbinpkg=n @world || echo ">> @world source rebuild failed" >&2
+elif [ "$world_status" -ne 0 ]; then
+  echo ">> emerge @world failed ($world_status); continuing with the selected packages" >&2
 fi
 unset FEATURES
 if command -v cpuid2cpuflags >/dev/null 2>&1 || emerge --ask=n $NR app-portage/cpuid2cpuflags; then
@@ -2153,6 +2288,8 @@ emerge --ask=n --fetchonly --usepkg=n --getbinpkg=n --keep-going {fetch_line} ||
 # package's installkernel hook runs dracut. A later desktop failure must not
 # be in that same emerge.
 {repair_tools}
+{theme_block}
+{plymouth_early}
 {missed_block}
 {firmware_block}
 echo ">> emerge kernel"
@@ -2167,6 +2304,7 @@ fi
 {swapfile}
 {zram_block}
 {user_block}
+{session_extra}
 {tpm_script}
 {selinux_block}
 
@@ -2226,13 +2364,21 @@ def _app_stores_script(cfg: InstallConfig) -> str:
 
 def _overlay_script(cfg: InstallConfig) -> str:
     """Chroot snippet: eselect-repository enable + sync + ~arch keywords per overlay."""
-    overlays = catalog.overlays_required_by(
-        cfg.extra_packages
-        + cfg.window_managers
-        + cfg.selected_packages
-        + [atom for atom, _test in _display_manager_tools(cfg)],
-        cfg.overlays,
-    )
+    overlay_names = [name for name in cfg.overlays if name != "guru"]
+    if catalog.shell_atoms(getattr(cfg, "shell", "") or ""):
+        overlay_names.append("guru")
+    queued = [
+        atom
+        for atom in dict.fromkeys(
+            cfg.extra_packages
+            + _window_managers(cfg)
+            + cfg.selected_packages
+            + _support_atoms(cfg)
+            + [atom for atom, _test in _display_manager_tools(cfg)]
+        )
+        if atom and _atom_allowed(cfg, atom)
+    ]
+    overlays = catalog.overlays_required_by(queued, overlay_names)
     if not overlays:
         return ""
     arch_kw = "~amd64" if cfg.architecture == "amd64" else "~arm64"
@@ -2253,55 +2399,64 @@ def _overlay_script(cfg: InstallConfig) -> str:
 
 
 def _plymouth_script(cfg: InstallConfig) -> str:
-    """Set the default splash and add quiet splash to GRUB if GRUB was selected."""
+    """Apply the chosen splash, then rebuild every initramfs and grub.cfg.
+
+    The theme is also applied before the kernel emerge. This second pass
+    covers a theme package that failed the first time, and a dracut image
+    that was packed with Plymouth's packaged theme.
+    """
     if not cfg.plymouth:
         return ""
-    theme = cfg.plymouth_theme or "spinner"
-    if theme in catalog.PLYMOUTH_THEME_PACKAGES:
-        theme_name = "breeze" if theme == "breeze" else "dracula" if theme == "dracula" else theme
+    theme = (cfg.plymouth_theme or "").strip()
+    theme_lines = [
+        f"emerge_one {shlex.quote(pkg.atom)} || true"
+        for pkg in catalog.plymouth_packages_for(
+            _chosen_plymouth_themes(cfg),
+            cfg.plymouth_openrc_plugin and cfg.init_system == "openrc",
+        )
+    ]
+    if theme:
+        apply = (
+            f"apply_plymouth_theme {shlex.quote(theme)} || "
+            "echo '>> Plymouth theme was not applied' >&2"
+        )
     else:
-        theme_name = theme
+        apply = 'echo ">> no Plymouth theme was selected; the splash was not changed" >&2'
     grub = ""
     if "grub" in selected_bootloaders(cfg):
         grub = """
 mkdir -p /etc/default /boot/grub
 if [ ! -f /etc/default/grub ]; then
-  echo 'GRUB_CMDLINE_LINUX_DEFAULT=""' > /etc/default/grub
-fi
-sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"/' /etc/default/grub || true
-"""
-    # Theme must be selected before dracut packs the initramfs, and grub.cfg
-    # must be regenerated after that initramfs exists.
-    refresh = """
-if ! command -v btrfs >/dev/null 2>&1; then
-  emerge --ask=n --binpkg-respect-use=y sys-fs/btrfs-progs || true
-fi
-if command -v dracut >/dev/null 2>&1; then
-  kver=$(ls -1 /lib/modules 2>/dev/null | tail -n1 || true)
-  if [ -n "$kver" ]; then
-    dracut --force --kver "$kver" || echo ">> dracut failed" >&2
+  echo 'GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"' > /etc/default/grub
+elif grep -q '^GRUB_CMDLINE_LINUX_DEFAULT=' /etc/default/grub; then
+  if ! grep -Eq '^GRUB_CMDLINE_LINUX_DEFAULT=.*splash' /etc/default/grub; then
+    sed -i -E 's/^(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*)"/\\1 quiet splash"/' /etc/default/grub || true
   fi
+else
+  echo 'GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"' >> /etc/default/grub
 fi
 """
+    grub_cfg = ""
     if grub:
-        refresh += """
+        grub_cfg = """
 if command -v grub-mkconfig >/dev/null 2>&1; then
   grub-mkconfig -o /boot/grub/grub.cfg || echo ">> grub-mkconfig failed" >&2
 else
   echo ">> grub-mkconfig does not exist" >&2
 fi
 """
+    theme_retry = "\n".join(theme_lines)
     return f"""
 export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
 emerge_checked sys-boot/plymouth command -v plymouth-set-default-theme || true
-if command -v plymouth-set-default-theme >/dev/null 2>&1; then
-  plymouth-set-default-theme {shlex.quote(theme_name)} || echo ">> plymouth theme failed" >&2
-else
-  echo ">> plymouth emerge failed" >&2
-  echo ">> plymouth-set-default-theme does not exist" >&2
-fi
+{theme_retry}
+{apply}
 {grub}
-{refresh}
+if ! command -v btrfs >/dev/null 2>&1; then
+  emerge_one sys-fs/btrfs-progs || true
+fi
+rebuild_initramfs
+{grub_cfg}
 """
 
 
@@ -2391,26 +2546,184 @@ fi
     return "\n".join(cmds)
 
 
+def _window_managers(cfg: InstallConfig) -> list[str]:
+    """Compositors from the profile, plus labwc when a shell has no Wayland host."""
+    known = {pkg.atom for pkg in catalog.WINDOW_MANAGERS}
+    atoms: list[str] = []
+    for atom in list(cfg.window_managers) + list(cfg.extra_packages) + list(cfg.selected_packages):
+        if not atom or not _atom_allowed(cfg, atom):
+            continue
+        bare = atom.split("::", 1)[0]
+        if bare in known:
+            atoms.append(bare)
+    shell = getattr(cfg, "shell", "") or ""
+    if shell in catalog.SHELL_PACKAGES and not catalog.wayland_selected(atoms):
+        atoms.append("gui-wm/labwc")
+    return list(dict.fromkeys(atoms))
+
+
+def _support_atoms(cfg: InstallConfig) -> list[str]:
+    """Compositor requirements and the selected shell. GURU stays limited to that shell."""
+    shell = getattr(cfg, "shell", "") or ""
+    return [pkg.atom for pkg in catalog.packages_for_selection(_window_managers(cfg), shell, cfg.pipewire)]
+
+
+def _atom_allowed(cfg: InstallConfig, atom: str) -> bool:
+    if not atom or atom.startswith("flatpak-app/"):
+        return True
+    bare, _, suffix = atom.partition("::")
+    overlay = suffix or catalog.atom_overlay(bare)
+    if overlay != "guru":
+        return True
+    return bare in set(catalog.shell_atoms(getattr(cfg, "shell", "") or ""))
+
+
+def _user_session_script(cfg: InstallConfig) -> str:
+    """Write a first compositor config and dwm/dwl starters. Existing files stay."""
+    wms = set(_window_managers(cfg))
+    shell = catalog.shell_exec(getattr(cfg, "shell", "") or "")
+    keymap = _safe_token(cfg.keymap, "us")
+    lines: list[str] = []
+    if "x11-wm/dwm" in wms:
+        lines += [
+            "install -d /usr/local/bin",
+            "cat > /usr/local/bin/start-dwm << 'EOF'",
+            "#!/bin/sh",
+            "slstatus >/dev/null 2>&1 &",
+            "exec dwm",
+            "EOF",
+            "chmod 755 /usr/local/bin/start-dwm",
+        ]
+    if "gui-wm/dwl" in wms and shell:
+        lines += [
+            "install -d /usr/local/bin",
+            "cat > /usr/local/bin/start-dwl << 'EOF'",
+            "#!/bin/sh",
+            f"{shell} >/dev/null 2>&1 &",
+            "exec dwl",
+            "EOF",
+            "chmod 755 /usr/local/bin/start-dwl",
+        ]
+    if "x11-wm/qtile" in wms and shell:
+        lines += [
+            "install -d /usr/local/bin",
+            "cat > /usr/local/bin/start-qtile << 'EOF'",
+            "#!/bin/sh",
+            f"{shell} >/dev/null 2>&1 &",
+            "exec qtile start -b wayland",
+            "EOF",
+            "chmod 755 /usr/local/bin/start-qtile",
+        ]
+    if not cfg.username or not wms:
+        return "\n".join(lines) + ("\n" if lines else "")
+    user = shlex.quote(cfg.username)
+    lines += [
+        f"userhome=$(getent passwd {user} | cut -d: -f6 || true)",
+        'if [ -n "$userhome" ]; then',
+    ]
+    if "gui-wm/hyprland" in wms:
+        lines += [
+            '  install -d -m 755 "$userhome/.config/hypr"',
+            '  hypr="$userhome/.config/hypr/hyprland.conf"',
+            '  if [ ! -f "$hypr" ]; then',
+            '    cat > "$hypr" << EOF',
+            "monitor=,preferred,auto,1",
+            "input {",
+            f"  kb_layout = {keymap}",
+            "}",
+        ]
+        if shell:
+            lines.append(f"exec-once = {shell}")
+        lines += [
+            "EOF",
+            f'    chown -R {user}:{user} "$userhome/.config/hypr" || true',
+            "  fi",
+        ]
+        if shell:
+            lines += [
+                f'  if [ -f "$hypr" ] && ! grep -q {shlex.quote(shell)} "$hypr"; then',
+                f'    echo {shlex.quote("exec-once = " + shell)} >> "$hypr"',
+                "  fi",
+            ]
+    if "gui-wm/sway" in wms:
+        lines += [
+            '  install -d -m 755 "$userhome/.config/sway"',
+            '  swaycfg="$userhome/.config/sway/config"',
+            '  if [ ! -f "$swaycfg" ]; then',
+            '    if [ -f /etc/sway/config ]; then cp /etc/sway/config "$swaycfg"; else : > "$swaycfg"; fi',
+            f'    chown -R {user}:{user} "$userhome/.config/sway" || true',
+            "  fi",
+        ]
+        if shell:
+            lines += [
+                f'  if [ -f "$swaycfg" ] && ! grep -q {shlex.quote(shell)} "$swaycfg"; then',
+                f'    echo {shlex.quote("exec " + shell)} >> "$swaycfg"',
+                "  fi",
+            ]
+    if "gui-wm/labwc" in wms:
+        lines += [
+            '  install -d -m 755 "$userhome/.config/labwc"',
+            '  labauto="$userhome/.config/labwc/autostart"',
+            '  if [ ! -f "$labauto" ]; then : > "$labauto"; fi',
+        ]
+        if shell:
+            lines += [
+                f'  if ! grep -q {shlex.quote(shell)} "$labauto"; then',
+                f'    echo {shlex.quote(shell)} >> "$labauto"',
+                "  fi",
+            ]
+        lines.append(f'  chown -R {user}:{user} "$userhome/.config/labwc" || true')
+    if "gui-wm/wayfire" in wms:
+        lines += [
+            '  install -d -m 755 "$userhome/.config"',
+            '  wfcfg="$userhome/.config/wayfire.ini"',
+            '  if [ ! -f "$wfcfg" ]; then',
+            '    cat > "$wfcfg" << EOF',
+            "[autostart]",
+        ]
+        if shell:
+            lines.append(f"shell = {shell}")
+        lines += [
+            "EOF",
+            f'    chown {user}:{user} "$userhome/.config" "$wfcfg" || true',
+            "  fi",
+        ]
+        if shell:
+            lines += [
+                f'  if [ -f "$wfcfg" ] && ! grep -q {shlex.quote(shell)} "$wfcfg"; then',
+                '    printf "\\n[autostart]\\nshell = %s\\n" ' + shlex.quote(shell) + ' >> "$wfcfg"',
+                "  fi",
+            ]
+    if "x11-wm/dwm" in wms or "x11-wm/i3" in wms:
+        lines += [
+            '  xinit="$userhome/.xinitrc"',
+            '  if [ ! -f "$xinit" ]; then',
+            "    cat > \"$xinit\" << 'EOF'",
+            "#!/bin/sh",
+        ]
+        if "x11-wm/dwm" in wms:
+            lines += ["slstatus >/dev/null 2>&1 &", "exec dwm"]
+        else:
+            lines.append("exec i3")
+        lines += [
+            "EOF",
+            '    chmod 755 "$xinit"',
+            f'    chown {user}:{user} "$xinit" || true',
+            "  fi",
+        ]
+    lines.append("fi")
+    return "\n".join(lines) + "\n"
+
+
 def _desktop_packages(cfg: InstallConfig) -> list[str]:
-    """Meta packages for the DE chosen in chapter 11 (WMs from chapter 12 are separate)."""
+    """Browsers and Flatpak from the profile. Desktop metas are not installed."""
     pkgs: list[str] = []
-    mapping = {
-        "xfce": ["xfce-base/xfce4-meta", "x11-misc/lightdm"],
-        "plasma": ["kde-plasma/plasma-meta", "x11-misc/sddm"],
-        "gnome": ["gnome-base/gnome", "gnome-base/gdm"],
-        "mate": ["mate-base/mate", "x11-misc/lightdm"],
-        "cinnamon": ["gnome-extra/cinnamon", "x11-misc/lightdm"],
-        "i3": ["x11-wm/i3", "x11-misc/i3status", "x11-misc/lightdm", "x11-terms/xterm"],
-    }
-    pkgs.extend(mapping.get(cfg.desktop, []))
-    if cfg.pipewire and cfg.desktop != "none":
+    if cfg.pipewire:
         pkgs.extend(["media-video/pipewire", "media-video/wireplumber"])
     if cfg.browser == "firefox-bin":
         pkgs.append("www-client/firefox-bin")
     elif cfg.browser == "firefox":
         pkgs.append("www-client/firefox")
-    if cfg.kde_games:
-        pkgs.extend(["kde-apps/kpat", "kde-apps/kmines", "kde-apps/kbounce"])
     if cfg.flatpak:
         pkgs.append("sys-apps/flatpak")
     return pkgs

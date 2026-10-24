@@ -134,19 +134,24 @@ class InstallConfig:
     bootloader: str = "grub"
     bootloaders: list[str] = field(default_factory=lambda: ["grub"])
     plymouth: bool = False
-    plymouth_theme: str = "spinner"  # Default theme passed to plymouth-set-default-theme
-    plymouth_themes: list[str] = field(default_factory=list)  # Extra themes to emerge
+    # Empty until the wizard records a choice. Do not assume spinner.
+    plymouth_theme: str = ""
+    plymouth_themes: list[str] = field(default_factory=list)  # Themes to emerge / select
     plymouth_openrc_plugin: bool = False
     secure_boot: bool = False  # Prepares installkernel signing USE; MOK is post-install
     grub_password: str = ""
     selinux: bool = False  # Hardened variant only; boots permissive
     selinux_policy: str = "targeted"
 
-    # --- Handbook ch. 11–12: DE, WMs, overlays, extra emerge atoms ---
-    desktop: str = "none"  # none, xfce, plasma, gnome, mate, cinnamon, i3
+    # --- Handbook ch. 11–12: Wayland compositors, shell, suckless, popular apps ---
+    # desktop is unused by the wizard. Old profiles may still say plasma/xfce;
+    # the installer does not emerge those desktop metas.
+    desktop: str = "none"
     display_manager: str = "auto"
     pipewire: bool = True
-    browser: str = "firefox-bin"
+    browser: str = "none"
+    # none | noctalia | dms. Noctalia and DMS pull the GURU overlay themselves.
+    shell: str = "none"
     extra_packages: list[str] = field(default_factory=list)  # Final emerge set (atoms)
     selected_packages: list[str] = field(default_factory=list)  # Catalogue picks only
     window_managers: list[str] = field(default_factory=list)  # gui-wm/* and x11-wm/*

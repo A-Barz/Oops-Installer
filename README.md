@@ -14,12 +14,12 @@ The wizard is ordered like the [Gentoo AMD64 Handbook](https://wiki.gentoo.org/w
 8. System configuration  
 9. System tools  
 10. Bootloader (multiple loaders + Plymouth themes)  
-11. Finalising  
-12. Categorised packages, Portage overlays, and window managers (niri, Hyprland, Sway, …)  
+11. Wayland compositors, Noctalia or DMS, and greetd
+12. Shared Wayland utilities, suckless tools, and popular apps  
 
 GitHub installer research and the merged feature set: [RESEARCH.md](RESEARCH.md).
 
-In chapter 12 you can search (`/text`), page (`n`/`p`), and toggle packages. Overlays such as `guru`, `hyproverlay`, `wayland-desktop`, and `steam-overlay` are enabled with `eselect repository` when required. You can also type any extra `category/package` atom for emerge.
+In chapter 12 you can search (`/text`), page (`n`/`p`), and toggle packages. Overlays such as `hyproverlay`, `wayland-desktop`, and `steam-overlay` are enabled with `eselect repository` when a chosen package needs them. The GURU overlay is enabled only when you choose Noctalia or DMS. You can also type any extra `category/package` atom for emerge.
 
 ## Requirements
 
