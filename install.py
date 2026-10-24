@@ -22,7 +22,7 @@ from pathlib import Path
 
 from gentoo_installer import ui
 from gentoo_installer.config import InstallConfig
-from gentoo_installer.execute import RestartFromBeginning, ask_resume_or_unmount, execute
+from gentoo_installer.execute import RestartFromBeginning, adopt_resume_profile, ask_resume_or_unmount, execute
 from gentoo_installer.wizard import fill_missing_secrets, run_wizard, warn_if_ntfs_present
 
 
@@ -82,6 +82,7 @@ def _begin_again(args: argparse.Namespace) -> int:
 
 def _run_session(args: argparse.Namespace) -> int:
     ran_wizard = False
+    loaded_profile = False
     # The profile has to exist before the wizard finishes. A missing
     # --config used to raise "No such file or directory" ("not created yet").
     if args.config:
@@ -89,26 +90,30 @@ def _run_session(args: argparse.Namespace) -> int:
         if config_path.is_file():
             cfg = InstallConfig.load(config_path)
             ui.ok(f"Loaded config {config_path.resolve()}")
+            loaded_profile = True
         else:
             ui.warn(f"{config_path} is not created yet. Creating it, then starting the wizard.")
             cfg = InstallConfig()
             _write_profile(str(config_path), cfg)
-            ran_wizard = True
     else:
         cfg = InstallConfig()
         starter = Path("gentoo-install.yaml")
         if not starter.exists():
             ui.info("Creating gentoo-install.yaml for this install.")
             _write_profile(str(starter), cfg)
-        ran_wizard = True
     if args.dry_run:
         cfg.dry_run = True
     if args.resume:
+        adopt_resume_profile(cfg)
         cfg.resume = True
+        cfg.wipe_disk = False
         setattr(cfg, "_resume_decided", True)
     elif not args.wizard_only and ask_resume_or_unmount(cfg) == "fresh":
         raise RestartFromBeginning()
-    if args.config and Path(args.config).is_file() and not ran_wizard:
+    # Resume keeps the saved disk, packages, and keymap. A blank config used
+    # to walk the wizard and then emerge that blank selection onto the mount.
+    saved_resume = bool(getattr(cfg, "_resume_decided", False) and cfg.resume and cfg.target_disk)
+    if saved_resume or (loaded_profile and not ran_wizard):
         fill_missing_secrets(cfg)
     else:
         if args.resume:

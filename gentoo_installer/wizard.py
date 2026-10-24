@@ -647,6 +647,12 @@ def _finalize(cfg: InstallConfig) -> None:
         selected=[atom for atom in cfg.window_managers if atom in {p.atom for p in catalog.WINDOW_MANAGERS}],
         page_size=12,
     )
+    if "gui-wm/niri" in cfg.window_managers:
+        ui.info("Niri comes from the GURU overlay. That overlay is enabled only because Niri was selected.")
+        ui.info(
+            "Niri gets the GNOME portal, GNOME Keyring, and foot. "
+            "Waybar, Wofi, Mako, swaybg, swayidle, and swaylock are in the next chapter."
+        )
     cfg.shell = ui.menu(
         "Wayland shell",
         catalog.SHELL_CHOICES,
@@ -685,6 +691,7 @@ def _packages(cfg: InstallConfig) -> None:
     ui.info("Compositor requirements are already queued. This list is optional apps.")
     ui.info("GURU packages are not in these lists. Noctalia and DMS were chosen in the previous chapter.")
     ui.info("Search with /text  ·  n/p pages  ·  toggle numbers  ·  0 when a list is finished.")
+    ui.info("The top row, Select all, ticks every package in that section.")
 
     if ui.ask_yes_no("Enable extra Portage overlays (eselect repository)?", True):
         cfg.overlays = ui.paged_checklist(
@@ -698,17 +705,38 @@ def _packages(cfg: InstallConfig) -> None:
             cfg.overlays = list(dict.fromkeys(cfg.overlays + more.split()))
 
     picked: list[str] = list(cfg.selected_packages)
+    niri_rows = catalog.niri_app_rows() if "gui-wm/niri" in cfg.window_managers else []
+    if niri_rows:
+        for atom in catalog.niri_preselected(cfg.shell):
+            if atom not in picked:
+                picked.append(atom)
+        if cfg.shell == "none":
+            ui.info("Niri apps are preselected. Untick any you do not want, including with Select all.")
+        else:
+            ui.info("The shell covers the bar and launcher. Niri apps are listed if you still want them.")
     if ui.ask_yes_no("Browse suckless tools, shared Wayland utilities, and popular apps?", True):
         hidden = {"window-managers", "desktop-environments", "wayland-utils"}
         cats = [(key, title) for key, title, _ in catalog.CATEGORIES if key not in hidden]
+        if niri_rows:
+            cats.insert(0, ("niri-apps", "Niri"))
         cats.append(("done", "Done with categories"))
+        # Open on the Niri list once, so the preselected rows are visible.
+        # After that, Enter lands on Done instead of reopening the same list.
+        menu_default = "niri-apps" if niri_rows else "done"
         while True:
-            choice = ui.menu("Package category", cats, "done")
+            choice = ui.menu("Package category", cats, menu_default)
+            menu_default = "done"
             if choice == "done":
                 break
-            packages = next(pkgs for key, _title, pkgs in catalog.CATEGORIES if key == choice)
-            title = next(title for key, title, _ in catalog.CATEGORIES if key == choice)
-            selected = ui.paged_checklist(title, packages, selected=picked, page_size=14)
+            if choice == "niri-apps":
+                packages = niri_rows
+                title = "Niri"
+            else:
+                packages = next(pkgs for key, _title, pkgs in catalog.CATEGORIES if key == choice)
+                title = next(title for key, title, _ in catalog.CATEGORIES if key == choice)
+            selected = ui.paged_checklist(
+                title, packages, selected=picked, page_size=14, select_all=True
+            )
             for atom in selected:
                 if atom not in picked:
                     picked.append(atom)
@@ -728,7 +756,7 @@ def _packages(cfg: InstallConfig) -> None:
     if any(a.startswith("sys-fs/fuse") for a in picked) or any("appimage" in a.lower() for a in picked):
         if "sys-fs/fuse:0" not in picked:
             picked.append("sys-fs/fuse:0")
-    allowed_guru = set(catalog.shell_atoms(cfg.shell))
+    allowed_guru = catalog.offered_guru_atoms(cfg.shell)
     kept: list[str] = []
     for atom in picked:
         bare, _, suffix = atom.partition("::")

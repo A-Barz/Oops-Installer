@@ -129,6 +129,7 @@ Menus (shown again at the start of the installer):
   Left / Right  previous / next page
   /             search (packages, overlays, window managers)
   a / c         select all / clear the current page
+  Select all    top row of a package list — tick every package in that section
   y / n         yes / no shortcuts
 
 Typed answers are only used for  ?  prompts (disk paths, names, sizes).

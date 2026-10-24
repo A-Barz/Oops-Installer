@@ -377,15 +377,15 @@ def _find_failed_mount(cfg: InstallConfig) -> InstallConfig | None:
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             continue
         ordered.append(loaded)
-    seen: set[str] = set()
-    for item in ordered:
-        mount = item.mountpoint or ""
-        if mount in seen:
-            continue
-        seen.add(mount)
-        if failed_install_is_mounted(item):
-            return item
-    return None
+    failed = [item for item in ordered if item.mountpoint and failed_install_is_mounted(item)]
+    if not failed:
+        return None
+    same = [item for item in failed if item.mountpoint == cfg.mountpoint]
+    group = same or failed
+    # A blank session config shares /mnt/gentoo with the saved profile. Prefer
+    # the profile that still knows the target disk, or resume reinstalls defaults.
+    with_disk = [item for item in group if item.target_disk]
+    return with_disk[0] if with_disk else group[0]
 
 
 def _clear_install_state(cfg: InstallConfig) -> None:
@@ -409,6 +409,34 @@ def _unmount_failed_target(cfg: InstallConfig) -> None:
     ui.ok(f"Unmounted {cfg.mountpoint}.")
 
 
+def _copy_config(dst: InstallConfig, src: InstallConfig) -> None:
+    """Replace dst's fields with src's. Used when resume finds a saved profile."""
+    from dataclasses import asdict
+
+    for key, value in asdict(src).items():
+        setattr(dst, key, value)
+
+
+def adopt_resume_profile(cfg: InstallConfig) -> None:
+    """Fill an empty session from gentoo-install.yaml when that install is the one on disk."""
+    if cfg.target_disk:
+        return
+    mounted = _find_failed_mount(cfg)
+    if mounted is None or mounted is cfg or not mounted.target_disk:
+        for path in (Path("gentoo-install.yaml"), Path("/var/tmp/gentoo-install.yaml")):
+            if not path.is_file():
+                continue
+            try:
+                loaded = InstallConfig.load(path)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+            if loaded.target_disk:
+                _copy_config(cfg, loaded)
+                return
+        return
+    _copy_config(cfg, mounted)
+
+
 def ask_resume_or_unmount(cfg: InstallConfig) -> str:
     """Ask what to do with a failed, still-mounted install.
 
@@ -423,10 +451,10 @@ def ask_resume_or_unmount(cfg: InstallConfig) -> str:
     else:
         ui.warn(f"The install did not finish. {mounted.mountpoint} is still mounted.")
     if ui.ask_yes_no("Resume the interrupted install?", True):
+        if mounted is not cfg and mounted.target_disk:
+            _copy_config(cfg, mounted)
         cfg.resume = True
         cfg.wipe_disk = False
-        cfg.mountpoint = mounted.mountpoint
-        cfg.state_file = mounted.state_file
         setattr(cfg, "_resume_decided", True)
         ui.ok("Resume enabled. Existing mounts stay in place.")
         return "resume"
@@ -1932,6 +1960,10 @@ def _package_use_text(cfg: InstallConfig) -> str:
         lines.append("x11-misc/sddm systemd -elogind")
     elif dm == "gdm":
         lines.append("gnome-base/gdm systemd -elogind")
+    queued = set(_graphical_atoms(cfg))
+    if "gui-wm/niri" in queued and "gui-apps/waybar" in queued:
+        # Waybar's niri module is a local USE flag. Without it the bar has no workspaces.
+        lines.append("gui-apps/waybar niri")
     return "\n".join(lines) + "\n"
 
 
@@ -2806,7 +2838,7 @@ def _atom_allowed(cfg: InstallConfig, atom: str) -> bool:
     overlay = suffix or catalog.atom_overlay(bare)
     if overlay != "guru":
         return True
-    return bare in set(catalog.shell_atoms(getattr(cfg, "shell", "") or ""))
+    return bare in catalog.offered_guru_atoms(getattr(cfg, "shell", "") or "")
 
 
 def _user_session_script(cfg: InstallConfig) -> str:
@@ -2904,6 +2936,65 @@ def _user_session_script(cfg: InstallConfig) -> str:
                 "  fi",
             ]
         lines.append(f'  chown -R {user}:{user} "$userhome/.config/labwc" || true')
+    if "gui-wm/niri" in wms:
+        queued = set(_graphical_atoms(cfg))
+        spawns: list[str] = []
+        if shell:
+            spawns.append(f'spawn-at-startup "{shell}"')
+        if "gui-apps/waybar" in queued:
+            spawns.append('spawn-at-startup "waybar"')
+        if "gui-apps/mako" in queued:
+            spawns.append('spawn-at-startup "mako"')
+        if "gui-apps/swaybg" in queued:
+            spawns.append('spawn-at-startup "swaybg" "-c" "#54487A"')
+        if "gui-apps/swayidle" in queued and "gui-apps/swaylock" in queued:
+            spawns.append('spawn-at-startup "swayidle" "-w" "timeout" "300" "swaylock"')
+        binds = [
+            '    Mod+Return { spawn "foot"; }',
+            '    Mod+Q { close-window; }',
+            '    Mod+F { fullscreen-window; }',
+            "    Mod+Left { focus-column-left; }",
+            "    Mod+Right { focus-column-right; }",
+            "    Mod+Shift+E { quit; }",
+        ]
+        if "gui-apps/wofi" in queued:
+            binds.insert(1, '    Mod+D { spawn "wofi" "--show" "drun"; }')
+        if "gui-apps/swaylock" in queued:
+            binds.append('    Mod+Shift+L { spawn "swaylock"; }')
+        lines += [
+            '  install -d -m 755 "$userhome/.config/niri"',
+            '  niricfg="$userhome/.config/niri/config.kdl"',
+            '  if [ ! -f "$niricfg" ]; then',
+            "    copied=0",
+            "    for sample in /usr/share/niri/default-config.kdl /usr/share/niri/config.kdl /etc/niri/config.kdl; do",
+            '      if [ -f "$sample" ]; then cp "$sample" "$niricfg"; copied=1; break; fi',
+            "    done",
+            '    if [ "$copied" = 0 ]; then',
+            "      cat > \"$niricfg\" << 'EOF'",
+            "input {",
+            "    keyboard {",
+            "        xkb {",
+            f'            layout "{keymap}"',
+            "        }",
+            "    }",
+            "}",
+        ]
+        lines.extend(spawns)
+        lines.append("binds {")
+        lines.extend(binds)
+        lines += [
+            "}",
+            "EOF",
+            "    fi",
+            "  fi",
+        ]
+        for spawn in spawns:
+            lines.append(
+                f'  if [ -f "$niricfg" ] && ! grep -q {shlex.quote(spawn)} "$niricfg"; then'
+            )
+            lines.append(f'    echo {shlex.quote(spawn)} >> "$niricfg"')
+            lines.append("  fi")
+        lines.append(f'  chown -R {user}:{user} "$userhome/.config/niri" || true')
     if "gui-wm/wayfire" in wms:
         lines += [
             '  install -d -m 755 "$userhome/.config"',

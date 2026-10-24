@@ -37,8 +37,9 @@ def _p(atom: str, desc: str, overlay: str = "gentoo") -> tuple[str, str]:
     return (atom, desc + tag)
 
 
-# Compositors offered by the wizard. GURU-only compositors (niri, river, …)
-# are not options. Hyprland stays on hyproverlay, which is not GURU.
+# Compositors offered by the wizard. Other GURU compositors (river, swayfx, …)
+# are not options. Niri is the GURU exception, enabled only when it is selected.
+# Hyprland stays on hyproverlay, which is not GURU.
 
 WAYLAND_COMPOSITORS: list[Pkg] = [
     Pkg("gui-wm/hyprland", "Hyprland — dynamic tiling Wayland compositor", "hyproverlay"),
@@ -46,6 +47,7 @@ WAYLAND_COMPOSITORS: list[Pkg] = [
     Pkg("gui-wm/wayfire", "Wayfire — stacking Wayland compositor"),
     Pkg("gui-wm/labwc", "Labwc — Openbox-style stacking compositor"),
     Pkg("gui-wm/dwl", "dwl — suckless dwm for Wayland"),
+    Pkg("gui-wm/niri", "Niri — scrollable tiling Wayland compositor", "guru"),
     Pkg("x11-wm/qtile", "Qtile — Python WM on Wayland"),
     Pkg("dev-libs/weston", "Weston — Wayland reference compositor"),
     Pkg("gui-wm/gamescope", "Gamescope — micro-compositor"),
@@ -62,6 +64,7 @@ WINDOW_MANAGERS: list[Pkg] = WAYLAND_COMPOSITORS + X11_WINDOW_MANAGERS
 # (title, Exec=, "wayland"|"x11") when the package name is not the command.
 _SESSION_OVERRIDE: dict[str, tuple[str, str, str] | None] = {
     "gui-wm/hyprland": ("Hyprland", "Hyprland", "wayland"),
+    "gui-wm/niri": ("Niri", "niri-session", "wayland"),
     "x11-wm/qtile": ("Qtile (Wayland)", "qtile start -b wayland", "wayland"),
     "dev-libs/weston": ("Weston", "weston", "wayland"),
     "gui-wm/gamescope": ("Gamescope", "gamescope -- foot", "wayland"),
@@ -91,7 +94,6 @@ SHELL_EXEC: dict[str, str] = {
 # or a typed atom must not emerge them. The selected shell is the exception.
 REMOVED_GURU_ATOMS = frozenset(
     {
-        "gui-wm/niri",
         "gui-wm/swayfx",
         "gui-wm/river",
         "gui-wm/cage",
@@ -120,6 +122,7 @@ REMOVED_GURU_ATOMS = frozenset(
 # keeps one masked atom from failing its emerge.
 TESTING_ATOMS = frozenset(
     {
+        "gui-wm/niri",
         "gui-wm/gamescope",
         "x11-themes/kvantum",
         "x11-themes/tela-icon-theme",
@@ -128,8 +131,21 @@ TESTING_ATOMS = frozenset(
     }
 )
 
-# Installed for every selected Wayland compositor. These work on Hyprland,
-# Sway, Wayfire, labwc, dwl, and Qtile. They are not a separate checklist.
+# Compositors that speak the wlroots protocols grim, slurp, and portal-wlr need.
+# Niri, Weston, and Gamescope do not. Niri uses the GNOME portal instead.
+_WLR_HELPER_COMPOSITORS = frozenset(
+    {
+        "gui-wm/hyprland",
+        "gui-wm/sway",
+        "gui-wm/wayfire",
+        "gui-wm/labwc",
+        "gui-wm/dwl",
+        "x11-wm/qtile",
+    }
+)
+
+# Installed for every selected Wayland compositor. wlroots-only rows are
+# dropped for a Niri-only session. They are not a separate checklist.
 WAYLAND_BASE: list[Pkg] = [
     Pkg("sys-apps/xdg-desktop-portal", "XDG desktop portal"),
     Pkg("gui-libs/xdg-desktop-portal-wlr", "wlroots XDG portal"),
@@ -169,6 +185,11 @@ WM_REQUIREMENTS: dict[str, list[Pkg]] = {
     "gui-wm/dwl": [
         Pkg("gui-apps/foot", "foot terminal"),
     ],
+    "gui-wm/niri": [
+        Pkg("sys-apps/xdg-desktop-portal-gnome", "GNOME portal — file chooser and screencast on Niri"),
+        Pkg("gnome-base/gnome-keyring", "GNOME Keyring — secrets for that portal"),
+        Pkg("gui-apps/foot", "foot terminal"),
+    ],
     "x11-wm/qtile": [
         Pkg("x11-terms/alacritty", "Alacritty"),
     ],
@@ -194,6 +215,31 @@ WM_REQUIREMENTS: dict[str, list[Pkg]] = {
         Pkg("x11-terms/st", "st terminal"),
     ],
 }
+
+# Left out of a Niri-only install. grim and slurp need wlr-screencopy, which
+# Niri does not implement, and portal-wlr does not serve Niri clients.
+_NIRI_SKIP_BASE = frozenset(
+    {
+        "gui-libs/xdg-desktop-portal-wlr",
+        "gui-apps/grim",
+        "gui-apps/slurp",
+        "x11-base/xwayland",
+    }
+)
+
+# Apps that run on Niri (layer-shell, idle, lock, the niri waybar module).
+# Shown as their own list and preselected when Niri is chosen without a shell.
+NIRI_APPS: list[Pkg] = [
+    Pkg("gui-apps/waybar", "Waybar — bar, with the niri module"),
+    Pkg("gui-apps/wofi", "Wofi — application launcher"),
+    Pkg("gui-apps/mako", "Mako — notifications"),
+    Pkg("gui-apps/swaybg", "swaybg — wallpaper on Niri"),
+    Pkg("gui-apps/swayidle", "swayidle — idle on Niri"),
+    Pkg("gui-apps/swaylock", "swaylock — screen lock on Niri"),
+    Pkg("x11-terms/alacritty", "Alacritty — terminal"),
+    Pkg("media-gfx/imv", "imv — image viewer"),
+    Pkg("media-video/mpv", "mpv"),
+]
 
 # Optional apps that run on every compositor this installer offers.
 WAYLAND_COMMON_UTILS: list[Pkg] = [
@@ -230,17 +276,50 @@ def shell_exec(shell: str) -> str:
     return SHELL_EXEC.get(shell, "")
 
 
+def offered_guru_atoms(shell: str) -> set[str]:
+    """GURU atoms the wizard may emerge: the chosen shell, and Niri."""
+    allowed = set(shell_atoms(shell))
+    allowed.add("gui-wm/niri")
+    return allowed
+
+
+def niri_app_rows() -> list[tuple[str, str]]:
+    """Checklist rows for software that works on Niri."""
+    return [_p(pkg.atom, pkg.desc, pkg.overlay) for pkg in NIRI_APPS]
+
+
+def niri_preselected(shell: str) -> list[str]:
+    """Atoms ticked ahead of the package lists.
+
+    A shell already provides a bar, launcher, and notifications, so those stay
+    unticked. The portal, keyring, and foot are requirements and are not here.
+    """
+    if shell != "none":
+        return ["gui-apps/swaylock"]
+    return [
+        "gui-apps/waybar",
+        "gui-apps/wofi",
+        "gui-apps/mako",
+        "gui-apps/swaybg",
+        "gui-apps/swayidle",
+        "gui-apps/swaylock",
+    ]
+
+
 def packages_for_selection(wm_atoms: list[str], shell: str, pipewire: bool) -> list[Pkg]:
     """Necessities for the chosen compositors, plus the shell if one was chosen.
 
     Shared Wayland utilities are included once. GURU atoms are limited to the
-    selected shell.
+    selected shell and to Niri when that compositor is selected.
     """
-    allowed_guru = set(shell_atoms(shell))
+    allowed_guru = offered_guru_atoms(shell)
     pkgs: list[Pkg] = []
     selected = [atom for atom in wm_atoms if atom]
     if wayland_selected(selected) or shell in SHELL_PACKAGES:
-        pkgs.extend(WAYLAND_BASE)
+        base = list(WAYLAND_BASE)
+        if "gui-wm/niri" in selected and not any(atom in _WLR_HELPER_COMPOSITORS for atom in selected):
+            base = [pkg for pkg in base if pkg.atom not in _NIRI_SKIP_BASE]
+        pkgs.extend(base)
         if pipewire:
             pkgs.append(Pkg("media-video/pipewire", "PipeWire"))
             pkgs.append(Pkg("media-video/wireplumber", "WirePlumber"))

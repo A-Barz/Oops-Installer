@@ -112,6 +112,7 @@ def navigation_help() -> None:
         ("←  →   or  PgUp / PgDn", "Previous / next page (long lists)"),
         ("/", "Search packages, overlays, and window managers"),
         ("a  /  c", "Select all / clear all on the current page"),
+        ("Select all", "Top row of a package list — tick every package in that section"),
         ("y  /  n", "Yes / no shortcuts"),
         ("Ctrl+C", "Abort the wizard (nothing is written until the disk confirm)"),
     ]
@@ -155,20 +156,82 @@ def step(msg: str) -> None:
     print(paint("  »  ", C.PURPLE, C.BOLD) + msg)
 
 
-def horse_progress(percent: int, remaining: str) -> None:
-    """One galloping-horse frame. percent is how far the estimate has run."""
+# Side-view gallop, head to the right. "~" is the mane and is drawn in Gentoo green.
+_HORSE_FRAMES: tuple[tuple[str, ...], ...] = (
+    (
+        r"       ,~~,    ",
+        r"      /    \   ",
+        r"  ___/  ~   )  ",
+        r" /         _/  ",
+        r"/    .----'    ",
+        r" \__/   \__/   ",
+    ),
+    (
+        r"       ,~~,    ",
+        r"      /    \   ",
+        r"  ___/  ~   )  ",
+        r" /         _/  ",
+        r"|    .----'|   ",
+        r" \__/    | \   ",
+    ),
+    (
+        r"       ,~~,    ",
+        r"      /    \   ",
+        r"  ___/  ~   )\ ",
+        r" /         _/ |",
+        r"/    .----'   |",
+        r" \__/        \_",
+    ),
+    (
+        r"       ,~~,    ",
+        r"      /    \   ",
+        r"  ___/  ~   )  ",
+        r" /         _/  ",
+        r" |   .----'    ",
+        r"/ \_/   \__/   ",
+    ),
+)
+
+
+def _paint_gentoo_ascii(line: str) -> str:
+    """Purple body, green where the line uses ~ (mane)."""
+    parts: list[str] = []
+    chunk: list[str] = []
+    accent: bool | None = None
+
+    def flush() -> None:
+        nonlocal accent
+        if not chunk:
+            return
+        color = C.GREEN if accent else C.PURPLE
+        parts.append(paint("".join(chunk), C.BOLD, color))
+        chunk.clear()
+
+    for ch in line:
+        is_accent = ch == "~"
+        if accent is not None and is_accent != accent:
+            flush()
+        accent = is_accent
+        chunk.append(ch)
+    flush()
+    return "".join(parts)
+
+
+def horse_progress(percent: int, remaining: str, frame: int = 0) -> None:
+    """ASCII horse in Gentoo purple and green. percent is how far the estimate has run."""
     percent = max(0, min(100, int(percent)))
-    poses = ("🐎ˎˊ", "🐎ˏˋ", "🐎-", "🐎~")
-    pose = poses[(percent // 4) % len(poses)]
-    width = 28
-    cells = ["·"] * width
-    pos = min(width - 1, percent * (width - 1) // 100)
-    for offset, ch in enumerate(pose):
-        at = pos + offset
-        if at < width:
-            cells[at] = ch
-    track = "".join(cells)
-    print(paint(f"  {track}  {percent:3d}%  {remaining}", C.BOLD, C.GREEN))
+    art = _HORSE_FRAMES[frame % len(_HORSE_FRAMES)]
+    art_w = max(len(row) for row in art)
+    track_w = 40
+    shift = percent * max(0, track_w - art_w) // 100
+    pad = " " * shift
+    print()
+    for row in art:
+        print("  " + pad + _paint_gentoo_ascii(row.ljust(art_w)))
+    filled = percent * track_w // 100
+    bar = paint("=" * filled, C.BOLD, C.GREEN) + paint("-" * (track_w - filled), C.DIM, C.PURPLE)
+    label = paint(f"{percent:3d}%", C.BOLD, C.GREEN) + "  " + paint(remaining, C.PURPLE)
+    print(f"  {bar}  {label}")
 
 
 class InstallGallop:
@@ -182,6 +245,7 @@ class InstallGallop:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._started = 0.0
+        self._frame = 0
 
     def start(self) -> None:
         import time
@@ -202,7 +266,8 @@ class InstallGallop:
         percent = min(99, int(elapsed / self.total_seconds * 100))
         left = max(0, math.ceil((self.total_seconds - elapsed) / 60))
         try:
-            horse_progress(percent, format_remaining(left))
+            horse_progress(percent, format_remaining(left), self._frame)
+            self._frame += 1
         except Exception:
             return
 
@@ -520,20 +585,40 @@ def checklist(title: str, choices: Sequence[tuple[str, str]], selected: Iterable
     return paged_checklist(title, choices, selected=selected, page_size=max(12, len(choices)))
 
 
+def _section_all_selected(choices: Sequence[tuple[str, str]], current: set[str]) -> bool:
+    ids = [value for value, _desc in choices]
+    return bool(ids) and all(value in current for value in ids)
+
+
+def _toggle_section(choices: Sequence[tuple[str, str]], current: set[str]) -> None:
+    """Tick every package in the section, or clear them when they are already all ticked."""
+    ids = [value for value, _desc in choices]
+    if _section_all_selected(choices, current):
+        for value in ids:
+            current.discard(value)
+        return
+    for value in ids:
+        current.add(value)
+
+
 def paged_checklist(
     title: str,
     choices: Sequence[tuple[str, str]],
     selected: Iterable[str] | None = None,
     page_size: int = 14,
+    select_all: bool = False,
 ) -> list[str]:
-    """Searchable multi-select: arrows move, Space toggles, Enter finishes."""
+    """Searchable multi-select: arrows move, Space toggles, Enter finishes.
+
+    select_all pins a row at the top that ticks every package in this section.
+    """
     if not _interactive():
-        return _paged_checklist_fallback(title, choices, selected, page_size)
+        return _paged_checklist_fallback(title, choices, selected, page_size, select_all)
 
     current = set(selected or [])
     query = ""
     page = 0
-    cursor = 0
+    cursor = -1 if select_all else 0
     page_size = max(8, min(page_size, shutil.get_terminal_size((100, 24)).lines - 12))
     drawn = 0
     _hide_cursor()
@@ -544,8 +629,11 @@ def paged_checklist(
             page = min(page, pages - 1)
             start = page * page_size
             view = filtered[start : start + page_size]
-            if view:
+            if view and cursor >= 0:
                 cursor = min(cursor, len(view) - 1)
+            hint = "  ↑↓ move   Space toggle   Enter done   ←→ page   / search   a page   c clear"
+            if select_all:
+                hint += "   top row: whole section"
             lines = [
                 paint(f"  {title}", C.BOLD, C.GREEN),
                 paint(
@@ -555,12 +643,15 @@ def paged_checklist(
                     C.DIM,
                     C.PURPLE,
                 ),
-                paint(
-                    "  ↑↓ move   Space toggle   Enter done   ←→ page   / search   a all   c clear",
-                    C.DIM,
-                    C.GREEN,
-                ),
+                paint(hint, C.DIM, C.GREEN),
             ]
+            if select_all:
+                all_on = _section_all_selected(choices, current)
+                box = paint("[x]", C.GREEN, C.BOLD) if all_on else paint("[ ]", C.DIM)
+                mark = paint("▸", C.BOLD, C.GREEN) if cursor == -1 else " "
+                prefix = paint("  > ", C.BOLD, C.GREEN) if cursor == -1 else "    "
+                label = paint("Select all", C.BOLD, C.GREEN if cursor == -1 else C.WHITE)
+                lines.append(f"{prefix}{mark} {box} {label}")
             if not view:
                 lines.append(paint("    No matches. Press / then Enter to clear the filter.", C.YELLOW))
             for i, (value, desc) in enumerate(view):
@@ -577,25 +668,36 @@ def paged_checklist(
             print("\n".join(lines))
             drawn = len(lines)
             key = _read_key()
-            if key == "up" and view:
+            if key == "up" and (view or cursor == -1):
                 if cursor > 0:
                     cursor -= 1
+                elif select_all and cursor == 0:
+                    cursor = -1
+                elif cursor == -1:
+                    pass
                 elif page > 0:
                     page -= 1
                     cursor = page_size - 1
-            elif key == "down" and view:
-                if cursor < len(view) - 1:
+            elif key == "down" and (view or cursor == -1):
+                if cursor == -1:
+                    if view:
+                        cursor = 0
+                elif cursor < len(view) - 1:
                     cursor += 1
                 elif page < pages - 1:
                     page += 1
                     cursor = 0
             elif key in {"left", "pgup"}:
                 page = max(0, page - 1)
-                cursor = 0
+                if cursor != -1:
+                    cursor = 0
             elif key in {"right", "pgdn"}:
                 page = min(pages - 1, page + 1)
-                cursor = 0
-            elif key == "space" and view:
+                if cursor != -1:
+                    cursor = 0
+            elif key == "space" and select_all and cursor == -1:
+                _toggle_section(choices, current)
+            elif key == "space" and view and cursor >= 0:
                 val = view[cursor][0]
                 if val in current:
                     current.remove(val)
@@ -611,7 +713,7 @@ def paged_checklist(
                 drawn = 0
                 query = prompt("Search (empty clears)", "").strip()
                 page = 0
-                cursor = 0
+                cursor = -1 if select_all else 0
                 _hide_cursor()
             elif key in {"a", "A"}:
                 for value, _ in view:
@@ -629,6 +731,7 @@ def _paged_checklist_fallback(
     choices: Sequence[tuple[str, str]],
     selected: Iterable[str] | None,
     page_size: int,
+    select_all: bool = False,
 ) -> list[str]:
     current = set(selected or [])
     query = ""
@@ -642,6 +745,10 @@ def _paged_checklist_fallback(
         view = filtered[start : start + page_size]
         print()
         print(paint(f"  {title}", C.BOLD, C.GREEN))
+        if select_all:
+            all_on = _section_all_selected(choices, current)
+            mark = paint("[x]", C.GREEN, C.BOLD) if all_on else paint("[ ]", C.DIM)
+            print(f"    {mark} {paint('*', C.GREEN)}. {paint('Select all', C.WHITE)}")
         for i, (value, desc) in enumerate(view, start=1):
             mark = paint("[x]", C.GREEN, C.BOLD) if value in current else paint("[ ]", C.DIM)
             shown = desc or value
@@ -661,6 +768,8 @@ def _paged_checklist_fallback(
         elif raw.startswith("/"):
             query = raw[1:].strip()
             page = 0
+        elif select_all and raw.lower() in {"*", "all"}:
+            _toggle_section(choices, current)
         elif raw.lower() == "a":
             for value, _ in view:
                 current.add(value)
@@ -674,7 +783,8 @@ def _paged_checklist_fallback(
             else:
                 current.add(val)
         else:
-            warn("Use a listed number, /search, n, p, a, c, or 0.")
+            extra = ", * for Select all" if select_all else ""
+            warn(f"Use a listed number{extra}, /search, n, p, a, c, or 0.")
 
 
 def summary_table(rows: Sequence[tuple[str, str]]) -> None:
