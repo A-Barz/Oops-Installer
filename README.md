@@ -80,15 +80,15 @@ A full desktop emerge can take **many hours**. Prefer **binary packages** and **
 
 This installer has been actively tested on bare metal. The default path **destroys all data on the selected disk**.
 
-## Research, 25 October 2026
+## Research
 
-Notes from comparing the live installer with the Arch wiki and with what the Ubuntu boot image can see on the machine in front of you.
+The installer comes from three comparisons: public Gentoo install scripts ([RESEARCH.md](RESEARCH.md)), the Arch wiki read beside the Gentoo Handbook, and hardware the Ubuntu boot image can see on the machine being installed.
 
 ### Arch install guide and the Gentoo Handbook
 
-Read the [Arch Linux Installation guide](https://wiki.archlinux.org/title/Installation_guide) and [General recommendations](https://wiki.archlinux.org/title/General_recommendations) next to the [Gentoo AMD64 Handbook](https://wiki.gentoo.org/wiki/Handbook:AMD64) and the Gentoo wiki pages those chapters link to.
+The [Arch Linux Installation guide](https://wiki.archlinux.org/title/Installation_guide) and [General recommendations](https://wiki.archlinux.org/title/General_recommendations) were read next to the [Gentoo AMD64 Handbook](https://wiki.gentoo.org/wiki/Handbook:AMD64) and the Gentoo wiki pages those chapters link to.
 
-The wizard stays in handbook order. A few Arch steps are stricter, and those are now part of the install:
+The wizard follows handbook order. Arch is stricter in a few places, and the installer follows Arch there:
 
 - `/etc/fstab` names a plain partition by PARTUUID on GPT, or by filesystem UUID otherwise. LVM, LUKS, and ZFS stay on `/dev/mapper` names, because a filesystem UUID is shared with LVM snapshots. The EFI System Partition is mounted at `/efi` with `umask=0077`.
 - GRUB keeps the kernel on `/boot`. systemd-boot and EFI stub install the kernel onto `/efi`, which is the handbook rule for those loaders. Arch gets the same result by mounting the ESP at `/boot`.
