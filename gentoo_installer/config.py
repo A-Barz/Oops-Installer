@@ -57,6 +57,7 @@ class InstallConfig:
     extra_raid_disk: str = ""  # Second member when layout == mdraid1
     partition_table: str = "gpt"  # gpt (UEFI) or mbr (legacy BIOS)
     firmware: str = "uefi"  # uefi | bios — drives ESP vs BIOS-boot partition
+    uefi_bits: int = 64  # 64, 32 (IA32/mixed mode), or 0 when firmware is BIOS
     wipe_disk: bool = True
     # handbook = ESP/boot + swap + root (wiki default scheme)
     layout: str = "handbook"  # handbook, btrfs-subvols, lvm, lvm-luks, zfs, existing, mdraid1
@@ -97,7 +98,7 @@ class InstallConfig:
     lto: bool = False
     hardened_flags: bool = False
     makeopts_jobs: int = 0  # 0 means os.cpu_count()
-    gentoo_mirrors: str = ""  # Empty → distfiles.gentoo.org
+    gentoo_mirrors: str = ""  # Empty → mirrorselect speed test, then distfiles.gentoo.org
 
     # --- Handbook ch. 7: kernel ---
     kernel: str = "gentoo-kernel-bin"  # dist-kernel binary is fastest on a live USB; alternatives: gentoo-kernel, gentoo-sources
@@ -128,6 +129,8 @@ class InstallConfig:
     cron: str = "cronie"  # Ignored on systemd (timers)
     chrony: bool = True
     zram: bool = True
+    nftables: bool = True  # Basic inbound filter; SSH is opened only when sshd is enabled.
+    fstrim: bool = False  # Weekly trim when the target disk is non-rotational.
 
     # --- Handbook ch. 10: bootloader + splash ---
     # bootloader = primary (installkernel USE). bootloaders = every loader to install.
@@ -187,7 +190,7 @@ class InstallConfig:
         else:
             data = json.loads(text)
         known = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
-        int_fields = {"esp_size_mib", "boot_size_mib", "swap_size_gib", "makeopts_jobs"}
+        int_fields = {"esp_size_mib", "boot_size_mib", "swap_size_gib", "makeopts_jobs", "uefi_bits"}
         cleaned: dict[str, Any] = {}
         for k, v in data.items():
             if k not in known:

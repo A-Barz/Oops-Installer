@@ -227,6 +227,16 @@ def _media(cfg: InstallConfig) -> None:
         ],
         cfg.firmware,
     )
+    if cfg.firmware == "uefi":
+        bits = detect.uefi_platform_size()
+        cfg.uefi_bits = bits if bits in {32, 64} else 64
+        if cfg.uefi_bits == 32:
+            ui.warn(
+                "Firmware is 32-bit UEFI (IA32), including mixed mode. "
+                "GRUB with the i386-efi target is the loader that can boot this machine."
+            )
+    else:
+        cfg.uefi_bits = 0
     cfg.skip_host_packages = not ui.ask_yes_no(
         "Install host tools on Ubuntu (gdisk, cryptsetup, btrfs-progs, wget, gnupg, …)?",
         True,
@@ -286,6 +296,8 @@ def _disks(cfg: InstallConfig) -> None:
         cfg.target_disk = ui.prompt("Target block device", cfg.target_disk or "/dev/sda")
     else:
         cfg.target_disk = ui.menu("Target disk (will be partitioned if wipe is enabled)", choices, choices[0][0])
+    _warn_small_disk(cfg)
+    _note_ssd_trim(cfg)
 
     cfg.wipe_disk = ui.ask_yes_no("Wipe this disk and create a new partition table?", True)
     if cfg.firmware == "uefi":
@@ -356,6 +368,13 @@ def _disks(cfg: InstallConfig) -> None:
         cfg.swap_size_gib = int(ui.prompt("Swap size in GiB", str(suggested)))
     cfg.zram = cfg.swap_mode in {"zram", "both"} or ui.ask_yes_no("Also configure ZRAM?", cfg.swap_mode != "none")
 
+    ui.info("Set the console keymap before any passphrase. A LUKS passphrase is typed in this layout.")
+    cfg.keymap = ui.prompt("Console keymap (e.g. us, uk, de, fr)", cfg.keymap or "us")
+    if detect.apply_live_keymap(cfg.keymap):
+        ui.ok(f"Live text console keymap set to {cfg.keymap}.")
+    elif cfg.keymap and cfg.keymap != "us":
+        ui.info("A graphical terminal keeps the desktop layout. loadkeys only changes a text console.")
+
     cfg.luks = cfg.layout == "lvm-luks" or ui.ask_yes_no("LUKS2 encrypt the root (and optionally swap)?", cfg.layout == "lvm-luks")
     if cfg.luks:
         cfg.luks_passphrase = ui.ask_password("LUKS passphrase")
@@ -376,7 +395,10 @@ def _disks(cfg: InstallConfig) -> None:
         )
     if cfg.firmware == "uefi":
         cfg.esp_size_mib = int(ui.prompt("EFI System Partition size in MiB", str(cfg.esp_size_mib)))
-        ui.info("The ESP is mounted at /efi. /boot stays on the root filesystem (handbook).")
+        ui.info(
+            "The ESP is mounted at /efi (handbook). GRUB keeps kernels on /boot. "
+            "systemd-boot and EFI stub install the kernel onto /efi."
+        )
 
 
 def _stage(cfg: InstallConfig) -> None:
@@ -484,7 +506,10 @@ def _base(cfg: InstallConfig) -> None:
     cfg.extra_use = extra
     cfg.lto = ui.ask_yes_no("Enable LTO in CFLAGS (experimental, slower compiles)?", False)
     cfg.hardened_flags = cfg.stage_variant == "hardened" or ui.ask_yes_no("Add hardened CFLAGS / USE (pie ssp)?", False)
-    cfg.gentoo_mirrors = ui.prompt("GENTOO_MIRRORS URL (empty = distfiles.gentoo.org)", "")
+    cfg.gentoo_mirrors = ui.prompt(
+        "GENTOO_MIRRORS URL (empty = speed-test mirrors with mirrorselect)",
+        cfg.gentoo_mirrors,
+    )
     cfg.makeopts_jobs = int(ui.prompt("MAKEOPTS jobs (0 = CPU count)", "0"))
 
 
@@ -536,6 +561,16 @@ def _kernel(cfg: InstallConfig) -> None:
         "gentoo-kernel-bin",
     )
     cfg.linux_firmware = ui.ask_yes_no("Install linux-firmware?", True)
+    if not cfg.linux_firmware:
+        if detect.is_virtual_machine():
+            ui.info("linux-firmware also carries AMD CPU microcode. Skipping it is reasonable in a virtual machine.")
+        elif detect.detect_amd_cpu():
+            ui.warn(
+                "This is physical AMD hardware. linux-firmware carries AMD microcode. "
+                "Skipping it leaves the CPU unpatched."
+            )
+        else:
+            ui.warn("linux-firmware carries AMD CPU microcode. Skip it in a VM. Keep it on real AMD hardware.")
     cfg.sof_firmware = ui.ask_yes_no("Install SOF firmware (Intel sound)?", False)
     cfg.intel_microcode = detect.detect_intel_cpu() or ui.ask_yes_no("Install intel-microcode?", detect.detect_intel_cpu())
     cfg.initramfs = ui.menu(
@@ -569,6 +604,10 @@ def _system(cfg: InstallConfig) -> None:
         cfg.extra_locales = ui.checklist("Additional locales", extras, selected=cfg.extra_locales)
     else:
         cfg.extra_locales = []
+    ui.info(
+        f"Console keymap is {cfg.keymap}. It was set before any passphrase, "
+        "and this is the layout the installed system will use."
+    )
     cfg.keymap = ui.prompt("Console keymap (e.g. us, uk, de, fr)", cfg.keymap)
     cfg.root_password = ui.ask_password("Root password")
     if ui.ask_yes_no("Create a non-root user?", True):
@@ -602,6 +641,11 @@ def _tools(cfg: InstallConfig) -> None:
         )
     cfg.wireless = ui.ask_yes_no("Install wireless tools (iw, wpa_supplicant)?", True)
     cfg.sshd = ui.ask_yes_no("Install and enable sshd?", True)
+    cfg.nftables = ui.ask_yes_no("Install nftables and drop unsolicited inbound connections?", True)
+    if cfg.nftables and cfg.sshd:
+        ui.info("The firewall allows SSH on port 22. Other new inbound connections are dropped.")
+    elif cfg.nftables:
+        ui.info("The firewall drops new inbound connections. SSH is not opened.")
     cfg.cups = ui.ask_yes_no("Install CUPS printing?", False)
     cfg.chrony = ui.ask_yes_no("Install chrony for NTP?", True)
     cfg.syslog = ui.menu(
@@ -612,8 +656,11 @@ def _tools(cfg: InstallConfig) -> None:
     cfg.cron = ui.menu(
         "Cron (OpenRC; systemd has timers)",
         [("cronie", "cronie"), ("fcron", "fcron"), ("none", "None")],
-        "cronie",
+        cfg.cron if cfg.cron in {"cronie", "fcron", "none"} else "cronie",
     )
+    if cfg.fstrim and cfg.init_system == "openrc" and cfg.cron == "none":
+        ui.info("Weekly fstrim runs from cron. cronie will be enabled for that job.")
+        cfg.cron = "cronie"
 
 
 def _bootloader(cfg: InstallConfig) -> None:
@@ -622,6 +669,9 @@ def _bootloader(cfg: InstallConfig) -> None:
     loaders = list(catalog.BOOTLOADERS)
     if cfg.firmware != "uefi":
         loaders = [item for item in loaders if item[0] not in {"systemd-boot", "refind", "efistub"}]
+    elif cfg.uefi_bits == 32:
+        ui.warn("32-bit UEFI: only GRUB is offered. systemd-boot, rEFInd, and EFI stub need 64-bit firmware.")
+        loaders = [item for item in loaders if item[0] == "grub"]
     else:
         loaders = [item for item in loaders if item[0] not in {"syslinux", "lilo"}]
     ui.info("You can install more than one bootloader. Pick a primary afterwards for installkernel.")
@@ -644,6 +694,10 @@ def _bootloader(cfg: InstallConfig) -> None:
         [(name, desc) for name, desc in loaders if name in cfg.bootloaders],
         cfg.bootloaders[0],
     )
+    if cfg.firmware == "uefi" and cfg.bootloader in {"systemd-boot", "efistub"}:
+        ui.info("The kernel is installed on /efi. systemd-boot and EFI stub load it from the EFI System Partition.")
+    elif cfg.firmware == "uefi" and cfg.bootloader == "grub":
+        ui.info("GRUB keeps the kernel on /boot, on the root filesystem. The ESP stays mounted at /efi.")
     cfg.plymouth = ui.ask_yes_no("Install Plymouth boot splash?", cfg.install_type == "desktop")
     if cfg.plymouth:
         _ask_plymouth_theme(cfg)
@@ -994,10 +1048,27 @@ def _warn_before_wipe(cfg: InstallConfig) -> None:
         raise SystemExit("Aborted before wiping disks or partitions.")
 
 
+def _warn_small_disk(cfg: InstallConfig) -> None:
+    """Handbook suggests 40 GB. Arch's floor is lower because that install does not compile."""
+    size = detect.disk_size_bytes(cfg.target_disk)
+    if size is None or size >= 40 * 1024**3:
+        return
+    gib = size / (1024**3)
+    ui.warn(f"{cfg.target_disk} is {gib:.1f} GiB. The handbook suggests at least 40 GB for a root filesystem.")
+
+
+def _note_ssd_trim(cfg: InstallConfig) -> None:
+    """Weekly fstrim when the target is non-rotational. Unknown disks are left alone."""
+    rotational = detect.disk_rotational(cfg.target_disk)
+    cfg.fstrim = rotational is False
+    if cfg.fstrim:
+        ui.info("This disk is an SSD. Weekly fstrim will be enabled.")
+
+
 def _announce_estimate(cfg: InstallConfig) -> None:
     """Tell the user to step away, then say how long this selection should take."""
     minutes = estimate_minutes(cfg)
-    ui.info("Go outside for some fresh air and walk around a bit. This may take a while.")
+    ui.install_wait_notice()
     ui.ok(f"Estimated install time: {format_duration(minutes)}.")
 
 
@@ -1019,6 +1090,9 @@ def _review(cfg: InstallConfig) -> None:
         ("Profile", cfg.profile),
         ("Kernel", cfg.kernel),
         ("Bootloaders", ", ".join(cfg.bootloaders) + f" (primary {cfg.bootloader})"),
+        ("Firewall", "nftables" if cfg.nftables else "none"),
+        ("TRIM", "weekly" if cfg.fstrim else "no"),
+        ("Mirrors", cfg.gentoo_mirrors or "mirrorselect"),
         ("Plymouth", _plymouth_review(cfg)),
         ("Hostname", cfg.hostname),
         ("Timezone", cfg.timezone),

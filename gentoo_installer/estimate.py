@@ -85,6 +85,8 @@ def estimate_minutes(cfg: InstallConfig) -> int:
         minutes += 80
     if cfg.linux_firmware:
         minutes += 8
+    if not (cfg.gentoo_mirrors or "").strip():
+        minutes += 3
     if cfg.sof_firmware:
         minutes += 5
     if cfg.plymouth:

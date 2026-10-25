@@ -124,7 +124,7 @@ def execute(cfg: InstallConfig) -> None:
         )
     ui.info(f"Oops Installer rev {INSTALLER_REV}")
     minutes = estimate_minutes(cfg)
-    ui.info("Go outside for some fresh air and walk around a bit. This may take a while.")
+    ui.install_wait_notice()
     ui.ok(f"Estimated install time: {format_duration(minutes)}.")
     progress = None if cfg.dry_run else ui.InstallProgress(minutes)
     if progress is not None:
@@ -141,6 +141,7 @@ def execute(cfg: InstallConfig) -> None:
             else:
                 progress.stop()
     if error is None:
+        ui.congratulate()
         return
     decision = ask_resume_or_unmount(cfg)
     if decision == "resume":
@@ -1074,6 +1075,7 @@ def _chroot_env_argv(*command: str) -> list[str]:
 
 def phase_chroot(cfg: InstallConfig, runner: Runner, root: str) -> None:
     """Write config files + chroot-install.sh, generate locales, then chroot."""
+    _apply_live_firmware(cfg)
     devices = getattr(cfg, "_devices", _map_devices(cfg))
     script = render_chroot_script(cfg, devices)
     path = Path(root) / "root" / "chroot-install.sh"
@@ -1192,10 +1194,15 @@ def _make_conf_text(cfg: InstallConfig) -> str:
         use.append("selinux")
     loaders = selected_bootloaders(cfg)
     if "grub" in loaders:
-        grub_plat = 'GRUB_PLATFORMS="efi-64"' if cfg.firmware == "uefi" else 'GRUB_PLATFORMS="pc"'
+        if cfg.firmware != "uefi":
+            grub_plat = 'GRUB_PLATFORMS="pc"'
+        elif cfg.architecture != "arm64" and cfg.uefi_bits == 32:
+            grub_plat = 'GRUB_PLATFORMS="efi-32"'
+        else:
+            grub_plat = 'GRUB_PLATFORMS="efi-64"'
     else:
         grub_plat = ""
-    mirrors = cfg.gentoo_mirrors or "https://distfiles.gentoo.org"
+    mirrors = cfg.gentoo_mirrors.strip()
     cflags = "-march=native -O2 -pipe"
     if cfg.hardened_flags:
         cflags += " -fstack-protector-strong -fstack-clash-protection"
@@ -1221,8 +1228,9 @@ def _make_conf_text(cfg: InstallConfig) -> str:
         f'USE="{" ".join(sorted(set(use)))}"',
         f'ACCEPT_LICENSE="{cfg.accept_license}"',
         f'VIDEO_CARDS="{video}"',
-        f'GENTOO_MIRRORS="{mirrors}"',
     ]
+    if mirrors:
+        lines.append(f'GENTOO_MIRRORS="{mirrors}"')
     if l10n:
         lines.append(f'L10N="{l10n}"')
     if linguas:
@@ -1416,10 +1424,8 @@ def _generate_locales(cfg: InstallConfig, runner: Runner, root: str) -> None:
     )
 
 
-def phase_done(cfg: InstallConfig, runner: Runner, root: str) -> None:
-    ui.ok("Installation phases finished.")
-    ui.info(f"When you are ready: umount -R {root} && reboot")
-    ui.info("Remove the Ubuntu live USB so the machine boots from the Gentoo disk.")
+def phase_done(_cfg: InstallConfig, _runner: Runner, _root: str) -> None:
+    """Mark the install finished. Power-down instructions are printed after 100%."""
 
 
 def _systemd_unit_test(unit: str) -> str:
@@ -1500,6 +1506,9 @@ def _required_tools(cfg: InstallConfig, loaders: list[str]) -> list[tuple[str, t
     if cfg.firmware == "uefi":
         add("sys-fs/dosfstools", "command", "-v", "mkfs.vfat")
     add("app-admin/sudo", "command", "-v", "sudo")
+    add("app-editors/nano", "command", "-v", "nano")
+    if cfg.nftables:
+        add("net-firewall/nftables", "command", "-v", "nft")
     if "grub" in loaders:
         add("sys-boot/grub", "bash", "-c", "command -v grub-install >/dev/null 2>&1 && command -v grub-mkconfig >/dev/null 2>&1")
         if cfg.firmware == "uefi":
@@ -1605,6 +1614,7 @@ def _final_tool_checks(cfg: InstallConfig, loaders: list[str]) -> str:
     checks: list[tuple[str, str]] = []
     if cfg.username:
         checks.append(("[ -e /etc/sudoers.d/wheel ]", "/etc/sudoers.d/wheel"))
+    checks.append(("command -v nano >/dev/null 2>&1", "nano"))
     if cfg.plymouth:
         checks.append(("command -v plymouth-set-default-theme >/dev/null 2>&1", "plymouth-set-default-theme"))
     openrc = cfg.init_system == "openrc"
@@ -1636,7 +1646,7 @@ def _final_tool_checks(cfg: InstallConfig, loaders: list[str]) -> str:
         "missing=0",
         "kernel_ok=0",
         "boot_ok=0",
-        "if ls /boot/vmlinuz* >/dev/null 2>&1 || ls /efi/EFI/Linux/*.efi /boot/EFI/Linux/*.efi >/dev/null 2>&1; then kernel_ok=1; fi",
+        _kernel_found_shell("kernel_ok").strip(),
     ]
     for test, label in checks:
         lines.append(f"if ! {{ {test}; }}; then echo \">> still missing: {label}\" >&2; fi")
@@ -2361,6 +2371,9 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
     if cfg.sshd:
         openrc_services.append("sshd")
         systemd_services.append("sshd")
+    if cfg.nftables:
+        openrc_services.append("nftables")
+        systemd_services.append("nftables")
     if cfg.chrony:
         openrc_services.append("chronyd")
         systemd_services.append("chronyd")
@@ -2428,24 +2441,11 @@ for netinit in /etc/runlevels/default/net.*; do
 done
 """
 
-    installkernel_conf = ""
-    if cfg.bootloader == "grub":
-        installkernel_conf = (
-            "append_once /etc/portage/package.use/installkernel 'sys-kernel/installkernel grub dracut'"
-        )
-    elif cfg.bootloader == "systemd-boot":
-        installkernel_conf = (
-            "append_once /etc/portage/package.use/installkernel "
-            "'sys-kernel/installkernel systemd systemd-boot dracut'"
-        )
-    elif cfg.uki or cfg.bootloader == "efistub":
-        installkernel_conf = (
-            "append_once /etc/portage/package.use/installkernel 'sys-kernel/installkernel dracut uki'"
-        )
-    else:
-        installkernel_conf = (
-            "append_once /etc/portage/package.use/installkernel 'sys-kernel/installkernel dracut'"
-        )
+    installkernel_conf = _installkernel_setup(cfg)
+    mirrorselect_block = _mirrorselect_block(cfg)
+    nftables_block = _nftables_block(cfg)
+    fstrim_block = _fstrim_block(cfg)
+    kernel_seek = _kernel_found_shell("kernel_found")
 
     grub_install = _install_bootloaders(cfg, devices, loaders)
 
@@ -2650,9 +2650,7 @@ emerge --ask=n --oneshot --verbose $NR sys-apps/portage || true
 unset FEATURES
 echo ">> eselect profile"
 eselect profile set {shlex.quote(cfg.profile)} || eselect profile set --force {shlex.quote(cfg.profile)} || true
-if command -v mirrorselect >/dev/null 2>&1; then
-  mirrorselect -s3 -b10 || true
-fi
+{mirrorselect_block}
 echo ">> emerge @world"
 emerge --verbose --update --deep --newuse --keep-going $NR @world
 world_status=$?
@@ -2691,8 +2689,9 @@ emerge --ask=n --fetchonly --usepkg=n --getbinpkg=n --keep-going {fetch_line} ||
 {firmware_block}
 echo ">> emerge kernel"
 emerge_with_source {kernel_atom} || echo ">> kernel emerge failed" >&2
-if ! ls /boot/vmlinuz* >/dev/null 2>&1; then
-  echo ">> no kernel image in /boot; building sys-kernel/gentoo-kernel from source"
+{kernel_seek}
+if [ "$kernel_found" -eq 0 ]; then
+  echo ">> no kernel image in /boot or on /efi; building sys-kernel/gentoo-kernel from source"
   emerge --ask=n --usepkg=n --getbinpkg=n sys-kernel/gentoo-kernel || echo ">> gentoo-kernel source build failed" >&2
 fi
 {late_block}
@@ -2704,6 +2703,8 @@ fi
 {session_extra}
 {tpm_script}
 {selinux_block}
+{nftables_block}
+{fstrim_block}
 
 {grub_install}
 {plymouth_block}
@@ -2887,7 +2888,12 @@ def _install_bootloaders(cfg: InstallConfig, devices: dict[str, str], loaders: l
     for bl in loaders:
         if bl == "grub":
             if cfg.firmware == "uefi":
-                grub_target = "arm64-efi" if cfg.architecture == "arm64" else "x86_64-efi"
+                if cfg.architecture == "arm64":
+                    grub_target = "arm64-efi"
+                elif cfg.uefi_bits == 32:
+                    grub_target = "i386-efi"
+                else:
+                    grub_target = "x86_64-efi"
                 cmds.append(_grub_uefi_install(grub_target))
             else:
                 disk = shlex.quote(cfg.target_disk)
@@ -3255,10 +3261,185 @@ fi
 """
 
 
+def _apply_live_firmware(cfg: InstallConfig) -> None:
+    """Read IA32 UEFI from the live system and keep GRUB as the only loader."""
+    if cfg.firmware != "uefi":
+        return
+    bits = detect.uefi_platform_size()
+    if bits in {32, 64}:
+        cfg.uefi_bits = bits
+    if cfg.uefi_bits != 32:
+        return
+    dropped = [name for name in cfg.bootloaders if name != "grub"]
+    if cfg.bootloader == "grub" and not dropped:
+        return
+    ui.warn(
+        "32-bit UEFI: GRUB will be installed with the i386-efi target. "
+        "systemd-boot, rEFInd, and EFI stub need 64-bit firmware."
+    )
+    cfg.bootloaders = ["grub"]
+    cfg.bootloader = "grub"
+
+
+def _kernel_found_shell(var: str) -> str:
+    """Set var=1 when a kernel image is in /boot or on the ESP."""
+    return (
+        f"{var}=0\n"
+        f"if ls /boot/vmlinuz* >/dev/null 2>&1; then {var}=1; fi\n"
+        f"if ls /efi/EFI/Linux/*.efi >/dev/null 2>&1; then {var}=1; fi\n"
+        f"if ls /boot/EFI/Linux/*.efi >/dev/null 2>&1; then {var}=1; fi\n"
+        f"if ls /efi/EFI/Gentoo/*.efi >/dev/null 2>&1; then {var}=1; fi\n"
+        f"if ls /efi/vmlinuz* >/dev/null 2>&1; then {var}=1; fi\n"
+    )
+
+
+def _installkernel_setup(cfg: InstallConfig) -> str:
+    """package.use plus install.conf. systemd-boot and EFI stub keep the kernel on /efi."""
+    if cfg.bootloader == "systemd-boot":
+        flags = ["systemd", "systemd-boot", "dracut"]
+        layout = "systemd-boot"
+        if cfg.uki:
+            flags.append("uki")
+            layout = "uki"
+        esp = True
+    elif cfg.bootloader == "efistub":
+        flags = ["efistub", "dracut"]
+        layout = "efistub"
+        if cfg.uki:
+            flags.append("uki")
+            layout = "uki"
+        esp = True
+    elif cfg.bootloader == "grub":
+        flags = ["grub", "dracut"]
+        layout = ""
+        esp = False
+    else:
+        flags = ["dracut"]
+        layout = ""
+        esp = False
+    use = "sys-kernel/installkernel " + " ".join(dict.fromkeys(flags))
+    lines = [f"append_once /etc/portage/package.use/installkernel '{use}'"]
+    if not layout:
+        return "\n".join(lines)
+    conf = f"layout={layout}\ninitrd_generator=dracut\n"
+    if layout == "uki":
+        conf += "uki_generator=dracut\n"
+    lines.append("mkdir -p /etc/kernel /efi/EFI/Gentoo /efi/EFI/Linux" if esp else "mkdir -p /etc/kernel")
+    lines.append("cat > /etc/kernel/install.conf << 'EOF'")
+    lines.append(conf.rstrip())
+    lines.append("EOF")
+    return "\n".join(lines)
+
+
+def _mirrorselect_block(cfg: InstallConfig) -> str:
+    """Emerge mirrorselect and write GENTOO_MIRRORS when the wizard left it empty."""
+    if cfg.gentoo_mirrors.strip():
+        return ""
+    return """
+echo ">> select fast mirrors"
+emerge --ask=n --oneshot --verbose $NR app-portage/mirrorselect || true
+if command -v mirrorselect >/dev/null 2>&1; then
+  mirrorselect -s3 -b10 -o >> /etc/portage/make.conf || true
+fi
+if ! grep -q '^GENTOO_MIRRORS=' /etc/portage/make.conf; then
+  echo 'GENTOO_MIRRORS="https://distfiles.gentoo.org"' >> /etc/portage/make.conf
+fi
+"""
+
+
+def _nftables_block(cfg: InstallConfig) -> str:
+    """Write the same ruleset for OpenRC (rules-save) and systemd (nftables.conf)."""
+    if not cfg.nftables:
+        return ""
+    ssh = "        tcp dport 22 accept\n" if cfg.sshd else ""
+    rules = f"""flush ruleset
+table inet filter {{
+        chain input {{
+                type filter hook input priority filter; policy drop;
+                ct state invalid drop
+                ct state established,related accept
+                iifname "lo" accept
+                meta l4proto icmp accept
+                meta l4proto icmpv6 accept
+{ssh}        }}
+        chain forward {{
+                type filter hook forward priority filter; policy drop;
+        }}
+        chain output {{
+                type filter hook output priority filter; policy accept;
+        }}
+}}
+"""
+    return f"""
+echo ">> nftables"
+mkdir -p /var/lib/nftables /etc
+cat > /etc/nftables.conf << 'EOF'
+{rules.strip()}
+EOF
+cp -f /etc/nftables.conf /var/lib/nftables/rules-save
+"""
+
+
+def _fstrim_block(cfg: InstallConfig) -> str:
+    """Weekly trim. systemd uses fstrim.timer. OpenRC uses cron."""
+    if not cfg.fstrim:
+        return ""
+    if cfg.init_system == "systemd":
+        return """
+echo ">> weekly fstrim"
+systemctl enable fstrim.timer || echo ">> fstrim.timer was not enabled" >&2
+"""
+    fcron = ""
+    if cfg.cron == "fcron":
+        fcron = """
+mkdir -p /etc/fcron
+if ! grep -q '/etc/cron.weekly/fstrim' /etc/fcron/systab 2>/dev/null; then
+  echo '%weekly * * /etc/cron.weekly/fstrim' >> /etc/fcron/systab
+fi
+"""
+    return f"""
+echo ">> weekly fstrim"
+mkdir -p /etc/cron.weekly
+cat > /etc/cron.weekly/fstrim << 'EOF'
+#!/bin/sh
+exec fstrim -A
+EOF
+chmod 755 /etc/cron.weekly/fstrim
+{fcron}
+"""
+
+
+def _fstab_keep_node(node: str) -> bool:
+    """LVM, LUKS mapper paths, and ZFS dataset names stay as device nodes.
+
+    The handbook says filesystem UUIDs on LVM collide with snapshots.
+    """
+    if not node.startswith("/dev/"):
+        return True
+    if node.startswith("/dev/mapper/"):
+        return True
+    parts = [part for part in node.split("/") if part]
+    if len(parts) >= 3:
+        return True
+    return False
+
+
+def _stable_fstab_source(cfg: InstallConfig, node: str) -> str:
+    """PARTUUID on GPT, otherwise the filesystem UUID. Dry-run keeps the node."""
+    if not node or cfg.dry_run or _fstab_keep_node(node):
+        return node
+    uuid, partuuid = detect.blkid_ids(node)
+    if cfg.partition_table == "gpt" and partuuid:
+        return f"PARTUUID={partuuid}"
+    if uuid:
+        return f"UUID={uuid}"
+    return node
+
+
 def _fstab(cfg: InstallConfig, devices: dict[str, str]) -> str:
-    """Generate /etc/fstab text (UUIDs are not resolved here; device nodes from this install)."""
+    """Generate /etc/fstab. Plain partitions use PARTUUID or UUID."""
     lines = ["# /etc/fstab: generated by gentoo-live-installer"]
-    root = devices.get("root", "")
+    root = _stable_fstab_source(cfg, devices.get("root", ""))
     fs = "ext4" if cfg.filesystem == "ext4" else cfg.filesystem
     if cfg.layout == "btrfs-subvols":
         lines.append(f"{root} / btrfs noatime,compress=zstd:3,subvol=@ 0 1")
@@ -3270,10 +3451,13 @@ def _fstab(cfg: InstallConfig, devices: dict[str, str]) -> str:
     elif cfg.filesystem != "zfs":
         lines.append(f"{root} / {fs} noatime 0 1")
     if cfg.firmware == "uefi" and devices.get("esp"):
-        lines.append(f"{devices['esp']} /efi vfat noatime 0 2")
+        esp = _stable_fstab_source(cfg, devices["esp"])
+        lines.append(f"{esp} /efi vfat noatime,umask=0077 0 2")
     elif devices.get("boot") and devices["boot"] != devices.get("esp"):
-        lines.append(f"{devices['boot']} /boot ext4 noatime 0 2")
+        boot = _stable_fstab_source(cfg, devices["boot"])
+        lines.append(f"{boot} /boot ext4 noatime 0 2")
     if devices.get("swap") and cfg.swap_mode in {"partition", "both"}:
-        lines.append(f"{devices['swap']} none swap sw 0 0")
+        swap = _stable_fstab_source(cfg, devices["swap"])
+        lines.append(f"{swap} none swap sw 0 0")
     lines.append("proc /proc proc defaults 0 0")
     return "\n".join(lines) + "\n"

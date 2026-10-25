@@ -41,6 +41,110 @@ def is_uefi() -> bool:
     return Path("/sys/firmware/efi").is_dir()
 
 
+def uefi_platform_size() -> int | None:
+    """UEFI bitness from the kernel: 64, 32, or None when not booted in UEFI.
+
+    Arch checks this file. 32 means IA32 firmware, including mixed mode, which
+    cannot use a 64-bit EFI stub or systemd-boot.
+    """
+    path = Path("/sys/firmware/efi/fw_platform_size")
+    if not path.is_file():
+        return None
+    text = path.read_text(errors="ignore").strip()
+    if text in {"32", "64"}:
+        return int(text)
+    return None
+
+
+def apply_live_keymap(keymap: str) -> bool:
+    """Set the live text-console layout. A graphical terminal is unchanged."""
+    if not keymap or not is_linux() or not shutil.which("loadkeys"):
+        return False
+    proc = subprocess.run(
+        ["loadkeys", keymap],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return proc.returncode == 0
+
+
+def disk_size_bytes(path: str) -> int | None:
+    """Size of a whole disk in bytes, from lsblk."""
+    if not path or not is_linux() or not shutil.which("lsblk"):
+        return None
+    proc = subprocess.run(
+        ["lsblk", "-bdn", "-o", "SIZE", path],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    text = (proc.stdout or "").strip()
+    if text.isdigit():
+        return int(text)
+    return None
+
+
+def disk_rotational(path: str) -> bool | None:
+    """True for a spinning disk, False for an SSD, None when sysfs is absent."""
+    if not path or not is_linux():
+        return None
+    name = Path(parent_block_device(path)).name
+    queue = Path("/sys/block") / name / "queue" / "rotational"
+    if not queue.is_file():
+        return None
+    flag = queue.read_text(errors="ignore").strip()
+    if flag == "1":
+        return True
+    if flag == "0":
+        return False
+    return None
+
+
+def blkid_ids(node: str) -> tuple[str, str]:
+    """Filesystem UUID and partition PARTUUID. Empty strings when blkid cannot see the node."""
+    if not node or not is_linux() or not shutil.which("blkid"):
+        return "", ""
+    proc = subprocess.run(
+        ["blkid", "-o", "export", node],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    uuid = ""
+    partuuid = ""
+    for line in (proc.stdout or "").splitlines():
+        if line.startswith("UUID="):
+            uuid = line.split("=", 1)[1].strip()
+        elif line.startswith("PARTUUID="):
+            partuuid = line.split("=", 1)[1].strip()
+    return uuid, partuuid
+
+
+def detect_amd_cpu() -> bool:
+    cpu = Path("/proc/cpuinfo")
+    if not cpu.exists():
+        return False
+    return "AuthenticAMD" in cpu.read_text(errors="ignore")
+
+
+def is_virtual_machine() -> bool:
+    """True when the live system is a guest. Used for the microcode warning."""
+    if shutil.which("systemd-detect-virt"):
+        proc = subprocess.run(
+            ["systemd-detect-virt", "-q"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if proc.returncode == 0:
+            return True
+    cpu = Path("/proc/cpuinfo")
+    if cpu.exists() and "hypervisor" in cpu.read_text(errors="ignore"):
+        return True
+    return False
+
+
 def nproc() -> int:
     return os.cpu_count() or 2
 

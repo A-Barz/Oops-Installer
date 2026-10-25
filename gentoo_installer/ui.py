@@ -156,18 +156,32 @@ def step(msg: str) -> None:
     print(paint("  »  ", C.PURPLE, C.BOLD) + msg)
 
 
-def progress_bar(percent: int, remaining: str) -> None:
-    """One line. Command output above it stays on screen."""
+INSTALL_WAIT_NOTICE = (
+    "Take some time to get some fresh air or take a nap, this may take awhile."
+)
+
+
+def install_wait_notice() -> None:
+    """Shown once choices are finished, and again when the install starts."""
+    info(INSTALL_WAIT_NOTICE)
+
+
+def progress_percent(percent: int) -> None:
+    """One line with the install percent. Command output above it stays on screen."""
     percent = max(0, min(100, int(percent)))
-    cells = 32
-    filled = percent * cells // 100
-    bar = paint("#" * filled, C.BOLD, C.GREEN) + paint("-" * (cells - filled), C.DIM, C.PURPLE)
-    label = paint(f"{percent:3d}%", C.BOLD, C.GREEN) + "  " + paint(remaining, C.PURPLE)
-    print(f"  [{bar}]  {label}", flush=True)
+    print("  " + paint(f"{percent}%", C.BOLD, C.GREEN), flush=True)
+
+
+def congratulate() -> None:
+    """Closing lines after a finished install."""
+    ok("Congratulations! Your Gentoo install is complete.")
+    info("Power down the device.")
+    info("After it has shut down, remove the USB.")
+    ok("Let's hope it boots 😊 ❤️")
 
 
 class InstallProgress:
-    """Print a bar and the remaining estimate while host commands run.
+    """Print the install percent while host commands run.
 
     Each update is its own line, so emerge and apt output is not overwritten.
     """
@@ -190,23 +204,19 @@ class InstallProgress:
         self._thread.start()
 
     def tick(self) -> None:
-        import math
         import time
-
-        from .estimate import format_remaining
 
         elapsed = time.monotonic() - self._started if self._started else 0.0
         percent = min(99, int(elapsed / self.total_seconds * 100))
-        left = max(0, math.ceil((self.total_seconds - elapsed) / 60))
         try:
-            progress_bar(percent, format_remaining(left))
+            progress_percent(percent)
         except Exception:
             return
 
     def finish(self) -> None:
         self.stop()
         try:
-            progress_bar(100, "done")
+            progress_percent(100)
         except Exception:
             return
 
