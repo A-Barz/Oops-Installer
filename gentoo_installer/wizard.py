@@ -481,19 +481,50 @@ def _base(cfg: InstallConfig) -> None:
     )
     cfg.binhost = ui.ask_yes_no("Enable Gentoo binary packages (getbinpkg / binhost)?", cfg.stage_variant == "standard")
     if cfg.binhost:
+        detected_abi = "x86-64-v3" if cfg.architecture == "amd64" and detect.supports_x86_64_v3() else "x86-64"
+        if detected_abi == "x86-64-v3":
+            ui.info("This CPU can use x86-64-v3 binary packages (Haswell / Excavator and newer).")
+        else:
+            ui.info("This CPU stays on generic x86-64 binary packages.")
+        highlight = cfg.binhost_abi if cfg.binhost_abi == "x86-64-v3" else detected_abi
         cfg.binhost_abi = ui.menu(
             "Binhost ABI",
             [("x86-64", "Generic x86-64"), ("x86-64-v3", "x86-64-v3 (Haswell and newer)")],
-            "x86-64",
+            highlight if highlight in {"x86-64", "x86-64-v3"} else detected_abi,
         )
         cfg.binpkg_respect_use = ui.ask_yes_no(
             "Require binpkgs to match USE exactly? (No = use binaries even if USE differs; "
             "avoids compiling glibc's ~500 locales from source)",
             False,
         )
-    gpu = detect.detect_gpu()
+    nvidia_driver = "nouveau"
+    if detect.has_nvidia():
+        ui.warn("The proprietary NVIDIA driver needs a matched kernel module and often fails on a first install.")
+        nvidia_driver = ui.menu(
+            "NVIDIA driver",
+            [
+                ("nouveau", "Nouveau — open source, in the kernel"),
+                ("nvidia", "Proprietary NVIDIA driver"),
+            ],
+            "nouveau",
+        )
+    gpu = detect.detect_gpu(nvidia=nvidia_driver)
     ui.info(f"Detected VIDEO_CARDS suggestion: {gpu}")
-    cfg.video_cards = ui.prompt("VIDEO_CARDS (or 'auto')", "auto")
+    ui.info("Empty Enter keeps this suggestion.")
+    cfg.video_cards = ui.prompt("VIDEO_CARDS", gpu)
+    cfg.input_devices = detect.suggest_input_devices()
+    ui.info(f"INPUT_DEVICES set to {cfg.input_devices}.")
+    hardware_use = [
+        name
+        for name, present in (
+            ("bluetooth", detect.has_bluetooth()),
+            ("wifi", detect.has_wifi()),
+            ("alsa", detect.has_sound()),
+        )
+        if present
+    ]
+    if hardware_use:
+        ui.info("This machine has " + ", ".join(hardware_use) + ". Those USE flags start selected.")
     ui.info("USE flags control optional features inside packages (audio, GUI toolkits, networking).")
     extra = ui.checklist(
         "Global USE flags (handbook ch. 6) — Space toggles, Enter continues",
@@ -545,6 +576,12 @@ def _default_use(cfg: InstallConfig) -> list[str]:
         flags.append("systemd")
     if cfg.network_stack == "networkmanager" or cfg.install_type == "desktop":
         flags.append("networkmanager")
+    if detect.has_bluetooth():
+        flags.append("bluetooth")
+    if detect.has_wifi():
+        flags.append("wifi")
+    if detect.has_sound():
+        flags.append("alsa")
     return flags
 
 
@@ -1107,7 +1144,9 @@ def _review(cfg: InstallConfig) -> None:
         ),
         ("Overlays", ", ".join(cfg.overlays) or "none"),
         ("Extra packages", str(len(cfg.extra_packages))),
-        ("Binhost", str(cfg.binhost)),
+        ("Video", cfg.video_cards),
+        ("Input", cfg.input_devices or "libinput"),
+        ("Binhost", f"yes ({cfg.binhost_abi})" if cfg.binhost else "no"),
         ("Dry-run", str(cfg.dry_run)),
         ("Estimate", format_duration(estimate_minutes(cfg))),
     ]

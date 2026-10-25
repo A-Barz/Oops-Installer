@@ -78,7 +78,42 @@ A full desktop emerge can take **many hours**. Prefer **binary packages** and **
 
 ## Safety
 
-The default path **destroys all data on the selected disk**. Test in a VM first.
+This installer has been actively tested on bare metal. The default path **destroys all data on the selected disk**.
+
+## Research, 25 October 2026
+
+Notes from comparing the live installer with the Arch wiki and with what the Ubuntu boot image can see on the machine in front of you.
+
+### Arch install guide and the Gentoo Handbook
+
+Read the [Arch Linux Installation guide](https://wiki.archlinux.org/title/Installation_guide) and [General recommendations](https://wiki.archlinux.org/title/General_recommendations) next to the [Gentoo AMD64 Handbook](https://wiki.gentoo.org/wiki/Handbook:AMD64) and the Gentoo wiki pages those chapters link to.
+
+The wizard stays in handbook order. A few Arch steps are stricter, and those are now part of the install:
+
+- `/etc/fstab` names a plain partition by PARTUUID on GPT, or by filesystem UUID otherwise. LVM, LUKS, and ZFS stay on `/dev/mapper` names, because a filesystem UUID is shared with LVM snapshots. The EFI System Partition is mounted at `/efi` with `umask=0077`.
+- GRUB keeps the kernel on `/boot`. systemd-boot and EFI stub install the kernel onto `/efi`, which is the handbook rule for those loaders. Arch gets the same result by mounting the ESP at `/boot`.
+- An empty mirror answer emerges `mirrorselect`, speed-tests mirrors, and writes `GENTOO_MIRRORS`.
+- The console keymap is asked before any LUKS passphrase, then kept for the installed system.
+- An SSD gets a weekly `fstrim`. The tools chapter offers nftables and defaults to yes. Port 22 is opened only when sshd is selected.
+- A disk under the handbook’s 40 GB suggestion gets a warning. 32-bit UEFI is limited to GRUB with the `i386-efi` target. Declining `linux-firmware` says that AMD CPU microcode lives in that package.
+- `nano` is installed on the new system.
+- At 100% the installer asks you to power down, and to remove the USB only after the machine is off.
+
+Arch will reuse an existing EFI partition for another operating system. This installer still wipes the disk you choose and does not set up dual boot.
+
+### USE flags from the Ubuntu boot image
+
+The Ubuntu image is the same computer Gentoo will boot, so `lspci`, `lsusb`, `/proc/cpuinfo`, and `ld.so --help` are fair probes. Ubuntu’s own package list is not a source of Gentoo USE flags.
+
+The installer uses that probe only as a default you can change:
+
+- The binhost menu highlights `x86-64-v3` when glibc reports that level, or when the CPU has `avx`, `avx2`, `bmi1`, `bmi2`, `f16c`, `fma`, `abm`, and `movbe`. Otherwise it stays on generic `x86-64`. A v3 package on an older CPU stops with an illegal instruction.
+- `INPUT_DEVICES` is `libinput`, plus `wacom` when a tablet is on the bus.
+- `bluetooth`, `wifi`, and `alsa` start selected when that hardware is present.
+- An NVIDIA card asks for nouveau or the proprietary driver. Nouveau is the default. The proprietary driver needs a matched kernel module and often fails on a first install.
+- A virtual machine with no physical GPU is offered `virtio vmware qxl` instead of `fbdev vesa`.
+
+`CPU_FLAGS_X86` still comes from `cpuid2cpuflags` after the chroot exists. Flag names in `/proc/cpuinfo` do not match Portage (`sse3` appears as `pni`). Global flags such as `opengl`, `vulkan`, `gtk`, and the Qt flags stay with the profile and the compositor questions. Binary packages still install when USE does not match exactly, so glibc is not rebuilt for every locale.
 
 ## Limits (also shown in the wizard)
 

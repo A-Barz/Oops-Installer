@@ -338,15 +338,137 @@ def live_boot_disk() -> str | None:
     return None
 
 
-def detect_gpu() -> str:
-    """Guess VIDEO_CARDS tokens for make.conf from lspci (Intel / amdgpu / nvidia)."""
+# Linux flag names for the x86-64-v3 psABI. avx in cpuinfo already means the OS
+# enabled AVX state, so OSXSAVE is not listed separately.
+_X86_64_V3_FLAGS = frozenset({"avx", "avx2", "bmi1", "bmi2", "f16c", "fma", "abm", "movbe"})
+
+
+def _lspci_text() -> str:
     if not shutil.which("lspci"):
-        return "fbdev vesa"
+        return ""
     proc = subprocess.run(["lspci"], capture_output=True, text=True, check=False)
-    text = (proc.stdout or "").lower()
-    cards = []
+    return (proc.stdout or "").lower()
+
+
+def _usb_text() -> str:
+    if not shutil.which("lsusb"):
+        return ""
+    proc = subprocess.run(["lsusb"], capture_output=True, text=True, check=False)
+    return (proc.stdout or "").lower()
+
+
+def ldso_supported_levels(help_text: str) -> set[str]:
+    """glibc hwcaps levels whose ld.so --help line says supported."""
+    found: set[str] = set()
+    for line in help_text.splitlines():
+        if "supported" not in line.lower():
+            continue
+        for level in ("x86-64-v2", "x86-64-v3", "x86-64-v4"):
+            if level in line:
+                found.add(level)
+    return found
+
+
+def cpu_flags() -> set[str]:
+    """Flags from the first processor block in /proc/cpuinfo."""
+    cpu = Path("/proc/cpuinfo")
+    if not cpu.exists():
+        return set()
+    for line in cpu.read_text(errors="ignore").splitlines():
+        if line.lower().startswith("flags"):
+            _name, _, values = line.partition(":")
+            return set(values.split())
+    return set()
+
+
+def flags_support_x86_64_v3(flags: set[str]) -> bool:
+    return _X86_64_V3_FLAGS <= flags
+
+
+def _glibc_linker() -> str | None:
+    """Ubuntu keeps the loader under /lib/x86_64-linux-gnu; Gentoo uses /lib64."""
+    names = (
+        "/lib64/ld-linux-x86-64.so.2",
+        "/usr/lib64/ld-linux-x86-64.so.2",
+        "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+        "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+    )
+    for name in names:
+        if Path(name).is_file():
+            return name
+    found = shutil.which("ld.so")
+    return found or None
+
+
+def supports_x86_64_v3() -> bool:
+    """True when this CPU can run Gentoo's x86-64-v3 binhost.
+
+    ld.so --help is the check Gentoo documents. /proc/cpuinfo is the fallback
+    when that loader is not on the live image.
+    """
+    linker = _glibc_linker()
+    if linker:
+        proc = subprocess.run([linker, "--help"], capture_output=True, text=True, check=False)
+        levels = ldso_supported_levels((proc.stdout or "") + "\n" + (proc.stderr or ""))
+        if levels:
+            return "x86-64-v3" in levels
+    return flags_support_x86_64_v3(cpu_flags())
+
+
+def has_nvidia() -> bool:
+    return "nvidia" in _lspci_text()
+
+
+def has_wacom() -> bool:
+    blob = _lspci_text() + "\n" + _usb_text()
+    return "wacom" in blob
+
+
+def has_bluetooth() -> bool:
+    bt = Path("/sys/class/bluetooth")
+    if not bt.is_dir():
+        return False
+    try:
+        return any(bt.iterdir())
+    except OSError:
+        return False
+
+
+def has_wifi() -> bool:
+    return any(nic["wireless"] for nic in list_nics())
+
+
+def has_sound() -> bool:
+    cards = Path("/proc/asound/cards")
+    if not cards.is_file():
+        return False
+    for line in cards.read_text(errors="ignore").splitlines():
+        head = line.split("[", 1)[0].strip()
+        if head.isdigit():
+            return True
+    return False
+
+
+def suggest_input_devices() -> str:
+    """libinput always. wacom only when a tablet is on the bus."""
+    devices = ["libinput"]
+    if has_wacom():
+        devices.append("wacom")
+    return " ".join(devices)
+
+
+def detect_gpu(nvidia: str = "nouveau") -> str:
+    """VIDEO_CARDS tokens from lspci.
+
+    NVIDIA defaults to nouveau. Pass nvidia='nvidia' only after the user asks
+    for the proprietary driver. A guest with no physical GPU gets virtio,
+    vmware, and qxl instead of fbdev vesa.
+    """
+    text = _lspci_text()
+    token = nvidia if nvidia in {"nouveau", "nvidia"} else "nouveau"
+    cards: list[str] = []
     if "nvidia" in text:
-        cards.append("nvidia")
+        cards.append(token)
     if "amd" in text or "ati" in text or "radeon" in text or "advanced micro devices" in text:
         if "navi" in text or "rdna" in text or "vega" in text or "amdgpu" in text:
             cards.append("amdgpu")
@@ -354,7 +476,14 @@ def detect_gpu() -> str:
             cards.append("amdgpu radeon")
     if "intel" in text and ("vga" in text or "display" in text or "graphics" in text):
         cards.append("intel")
-    return " ".join(cards) if cards else "fbdev vesa"
+    if cards:
+        return " ".join(cards)
+    guest = is_virtual_machine() or any(
+        name in text for name in ("virtio", "qxl", "vmware", "virtualbox", "qemu")
+    )
+    if guest:
+        return "virtio vmware qxl"
+    return "fbdev vesa"
 
 
 def detect_intel_cpu() -> bool:

@@ -95,6 +95,7 @@ class InstallConfig:
     extra_use: list[str] = field(default_factory=list)
     accept_license: str = "*"
     video_cards: str = "auto"  # auto = lspci heuristic in detect.detect_gpu()
+    input_devices: str = "libinput"  # libinput, plus wacom when a tablet is present
     lto: bool = False
     hardened_flags: bool = False
     makeopts_jobs: int = 0  # 0 means os.cpu_count()

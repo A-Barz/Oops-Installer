@@ -1228,6 +1228,7 @@ def _make_conf_text(cfg: InstallConfig) -> str:
         f'USE="{" ".join(sorted(set(use)))}"',
         f'ACCEPT_LICENSE="{cfg.accept_license}"',
         f'VIDEO_CARDS="{video}"',
+        f'INPUT_DEVICES="{(cfg.input_devices or detect.suggest_input_devices()).strip() or "libinput"}"',
     ]
     if mirrors:
         lines.append(f'GENTOO_MIRRORS="{mirrors}"')
