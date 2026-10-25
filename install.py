@@ -34,6 +34,7 @@ from gentoo_installer.wizard import (
 
 _SOFTWARE_FIELDS = (
     "window_managers",
+    "wm_dotfiles",
     "selected_packages",
     "extra_packages",
     "shell",

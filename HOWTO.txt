@@ -24,7 +24,11 @@ Who should use it
 Use this if you want a guided Gentoo install with optional LUKS, LVM, RAID1,
 Btrfs, ZFS, several bootloaders, Plymouth, Wayland compositors (Hyprland,
 Sway, Wayfire, labwc, dwl, Qtile), suckless tools, and popular apps. Noctalia
-and DMS are optional shells.
+and DMS are optional shells. Hyprland and Niri can use the installer's own
+config or one of four popular GitHub configs. That choice is skipped when
+Noctalia or DMS is the shell. A GitHub config is downloaded during the
+install from the latest commit on its branch, and the Gentoo packages that
+config starts are installed too. The project's install script is not run.
 
 Do not use this as your first Linux install on a machine that holds unique
 data unless you have backups and have already practised in a virtual machine.
@@ -188,6 +192,10 @@ It will tell you to unmount and reboot. Typical last steps on the live USB:
   reboot
 
 Remove the Ubuntu live USB so firmware boots the Gentoo disk.
+
+When a login manager was selected, that boot opens it as soon as the system
+is ready. Sign in with the username from the install. The window managers
+you chose are the sessions. tty2 stays a text console.
 
 If you enabled LUKS, you will type the passphrase at boot (unless you later
 enroll TPM2 yourself; this installer only drops a helper script).

@@ -6,6 +6,21 @@ Python installer that runs **in a terminal on Ubuntu Boot Image live media** and
 
 This is a personal project. The name **Oops-Installer** is a poke at Gentoo: an installer misses the value of installing Gentoo by hand. That is a statement about open source. You can do whatever you want with it. Fork a project, contribute, or make your own. Code for the sake of it.
 
+The project is open for testing and bug reports. Try it in a virtual machine, or on a disk you can wipe, and file what you find at [GitHub Issues](https://github.com/A-Barz/Oops-Installer/issues). Include the installer revision from the banner, the choices you made, and the command that failed.
+
+## What the installer sets up
+
+Oops-Installer runs in a terminal on an Ubuntu live USB and installs Gentoo onto a disk. The questions follow the AMD64 Handbook. A summary is shown before the disk is touched, and you re-type the disk path before partitioning.
+
+- **Disks.** GPT or BIOS, a full wipe or existing partitions, LUKS, LVM, RAID1, Btrfs, ZFS, and swap. A weekly `fstrim` is offered for an SSD. Dual boot is not set up.
+- **Base system.** OpenRC or systemd, a stage3, Portage profile and USE flags, and a kernel (including `gentoo-kernel-bin`). Binary packages are offered so a desktop install does not have to compile everything.
+- **Hardware.** The live system is probed for CPU level, input devices, Wi-Fi, Bluetooth, and the GPU. NVIDIA can use nouveau or the proprietary driver. `CPU_FLAGS_X86` is written in the chroot with `cpuid2cpuflags`.
+- **Boot.** GRUB, systemd-boot, EFI stub, and Limine, plus Plymouth themes. The EFI System Partition stays at `/efi`.
+- **Session.** Wayland compositors (Hyprland, Niri, Sway, Wayfire, labwc, and others), plus dwm and i3. Noctalia Shell and DMS are optional. With Noctalia and a login manager, the greeter is noctalia-greeter. The installed system boots to that login screen, with the username ready and the chosen window managers as sessions. A text-console choice stays a shell.
+- **Dotfiles.** Hyprland and Niri each offer the installer config or one of four GitHub configs. The chosen config is downloaded from the latest commit on its branch during the install, and the Gentoo packages that config starts are emerged. Noctalia and DMS skip this, because those shells bring their own session. Upstream install scripts are not run.
+- **Apps.** PipeWire, suckless tools, and a handbook-sized list of common programs. `nano` is always installed. You can type any extra Portage atom.
+- **Again.** Answers save to YAML or JSON. `--resume` continues an interrupted install. Passwords are asked again unless you saved them on purpose.
+
 The wizard is ordered like the [Gentoo AMD64 Handbook](https://wiki.gentoo.org/wiki/Handbook:AMD64) (linked from the [Gentoo wiki main page](https://wiki.gentoo.org/wiki/Main_Page)):
 
 1. About the installation  
@@ -18,7 +33,7 @@ The wizard is ordered like the [Gentoo AMD64 Handbook](https://wiki.gentoo.org/w
 8. System configuration  
 9. System tools  
 10. Bootloader (multiple loaders + Plymouth themes)  
-11. Wayland compositors, Noctalia or DMS, and greetd
+11. Wayland compositors, Noctalia or DMS, greetd, and Hyprland or Niri dotfiles
 12. Shared Wayland utilities, suckless tools, and popular apps  
 
 GitHub installer research and the merged feature set: [RESEARCH.md](RESEARCH.md).

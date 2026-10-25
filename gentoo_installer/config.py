@@ -159,6 +159,8 @@ class InstallConfig:
     extra_packages: list[str] = field(default_factory=list)  # Final emerge set (atoms)
     selected_packages: list[str] = field(default_factory=list)  # Catalogue picks only
     window_managers: list[str] = field(default_factory=list)  # gui-wm/* and x11-wm/*
+    # "gui-wm/hyprland=end-4". Missing or "installer" keeps the local config.
+    wm_dotfiles: list[str] = field(default_factory=list)
     overlays: list[str] = field(default_factory=list)  # eselect repository names
     kde_games: bool = False
     flatpak: bool = False

@@ -65,6 +65,7 @@ def queue_saved_software(cfg: InstallConfig) -> None:
         kept.append(atom)
     cfg.selected_packages = kept
     needed = [pkg.atom for pkg in catalog.packages_for_selection(managers, cfg.shell, cfg.pipewire)]
+    needed += catalog.dotfile_package_atoms(cfg.shell, managers, cfg.wm_dotfiles)
     cfg.extra_packages = list(dict.fromkeys(managers + needed + kept))
     cfg.overlays = [name for name in cfg.overlays if name != "guru"]
     cfg.overlays = catalog.overlays_required_by(cfg.extra_packages, cfg.overlays)
@@ -801,6 +802,73 @@ def _ask_plymouth_theme(cfg: InstallConfig) -> None:
     )
 
 
+def _dotfile_review(cfg: InstallConfig) -> str:
+    """Short review label for the compositor configs that will be copied."""
+    if catalog.dotfiles_skipped(cfg.shell):
+        return "skipped — shell provides the session"
+    if not cfg.wm_dotfiles:
+        return "installer default"
+    parts: list[str] = []
+    for item in cfg.wm_dotfiles:
+        atom, _, ident = str(item).partition("=")
+        name = atom.split("/")[-1] or atom
+        label = ident or "installer"
+        for choice in catalog.dotfile_choices(atom):
+            if choice.id == ident:
+                label = choice.id
+                break
+        parts.append(f"{name}: {label}")
+    return ", ".join(parts) or "installer default"
+
+
+def _wm_dotfiles(cfg: InstallConfig) -> None:
+    """Ask for a GitHub config when Hyprland or Niri was selected."""
+    if catalog.dotfiles_skipped(cfg.shell):
+        cfg.wm_dotfiles = []
+        ui.info(
+            "Noctalia and DMS bring their own bar, launcher, and config, "
+            "so GitHub window-manager configs are skipped."
+        )
+        return
+    atoms = [atom for atom in cfg.window_managers if catalog.dotfile_choices(atom)]
+    if not atoms:
+        cfg.wm_dotfiles = []
+        return
+    ui.info(
+        "Window manager dotfiles. Each compositor has at most five choices. "
+        "A GitHub choice is downloaded during the install from the latest commit on that project's branch. "
+        "The compositor config is copied, and the Gentoo packages that config starts are installed. "
+        "The project's install script is not run."
+    )
+    current: dict[str, str] = {}
+    for item in cfg.wm_dotfiles or []:
+        key, _, value = str(item).partition("=")
+        if key and value:
+            current[key] = value
+    kept: list[str] = []
+    for atom in atoms:
+        choices = catalog.dotfile_choices(atom)
+        title = next((pkg.desc for pkg in catalog.WINDOW_MANAGERS if pkg.atom == atom), atom)
+        default = current.get(atom, "installer")
+        if default not in {choice.id for choice in choices}:
+            default = "installer"
+        picked = ui.menu(f"{title} dotfiles", [(choice.id, choice.label) for choice in choices], default)
+        kept.append(f"{atom}={picked}")
+        if picked == "hyde":
+            ui.warn(
+                "HyDE's hyprland.lua stops unless ~/.local/share/hypr/hyde.lua exists. "
+                "This installer copies the Hyprland config only, not HyDE's install script, so that file will be missing."
+            )
+    cfg.wm_dotfiles = kept
+    packages = catalog.dotfile_package_atoms(cfg.shell, cfg.window_managers, kept)
+    if packages:
+        ui.info("Gentoo packages from the chosen configs will be installed: " + ", ".join(packages))
+        ui.info(
+            "Quickshell, fuzzel, cliphist, swaync, wlogout, brightnessctl, "
+            "and the Caelestia shell are not in the Gentoo tree this installer uses, so they are not emerged."
+        )
+
+
 def _finalize(cfg: InstallConfig) -> None:
     """Wayland compositors, a shell, and greetd. No desktop environment."""
     ui.chapter("11", "Wayland session", f"{HANDBOOK}/Installation/Finalizing")
@@ -828,13 +896,19 @@ def _finalize(cfg: InstallConfig) -> None:
     )
     if cfg.shell != "none":
         ui.info("Noctalia and DMS are installed from the GURU overlay, which is enabled only for that shell.")
+    _wm_dotfiles(cfg)
     graphical = bool(cfg.window_managers) or cfg.shell != "none"
     cfg.pipewire = ui.ask_yes_no("Install PipeWire audio?", graphical)
     if catalog.wayland_selected(cfg.window_managers) or cfg.shell != "none":
+        greet = (
+            "greetd + noctalia-greeter — Wayland login screen"
+            if cfg.shell == "noctalia"
+            else "greetd + gtkgreet — Wayland login screen"
+        )
         cfg.display_manager = ui.menu(
             "Login",
             [
-                ("greetd", "greetd + gtkgreet — Wayland login screen"),
+                ("greetd", greet),
                 ("none", "Text console — start the compositor yourself"),
             ],
             "greetd",
@@ -846,6 +920,13 @@ def _finalize(cfg: InstallConfig) -> None:
     if cfg.shell != "none" and not catalog.wayland_selected(cfg.window_managers):
         ui.info("Noctalia and DMS run on a Wayland compositor. labwc will be installed with the shell.")
         cfg.window_managers.append("gui-wm/labwc")
+    if cfg.display_manager == "greetd":
+        who = cfg.username or "your user"
+        screen = "Noctalia's login screen" if cfg.shell == "noctalia" else "that login screen"
+        ui.info(
+            f"The installed system boots to {screen}. "
+            f"Sign in as {who}. The compositors you chose are the sessions."
+        )
     ui.info("The next chapter is suckless tools and popular apps. There is no desktop list.")
 
 
@@ -944,6 +1025,7 @@ def _packages(cfg: InstallConfig) -> None:
             cfg.window_managers.append(bare)
     cfg.selected_packages = picked
     needed = [pkg.atom for pkg in catalog.packages_for_selection(cfg.window_managers, cfg.shell, cfg.pipewire)]
+    needed += catalog.dotfile_package_atoms(cfg.shell, cfg.window_managers, cfg.wm_dotfiles)
     # extra_packages is the emerge set: catalogue picks + WMs + compositor requirements.
     cfg.extra_packages = list(dict.fromkeys(cfg.window_managers + needed + picked))
     cfg.overlays = [name for name in cfg.overlays if name != "guru"]
@@ -975,7 +1057,18 @@ def _login_manager_label(cfg: InstallConfig) -> str:
     )
     if name == "none":
         return "text console"
-    return f"{name} — starts at boot"
+    if name == "greetd" and cfg.shell == "noctalia":
+        name = "noctalia-greeter"
+    sessions = catalog.login_sessions(
+        cfg.desktop,
+        cfg.extra_packages + cfg.window_managers + cfg.selected_packages,
+        cfg.shell,
+    )
+    who = cfg.username or "root"
+    if sessions:
+        label = "session" if len(sessions) == 1 else "sessions"
+        return f"{name} — {who}, {len(sessions)} {label}"
+    return f"{name} — {who}"
 
 
 def _swap_uses_partition(cfg: InstallConfig) -> bool:
@@ -1136,6 +1229,7 @@ def _review(cfg: InstallConfig) -> None:
         ("Locale", cfg.locale),
         ("User", cfg.username or "(root only)"),
         ("Compositors", ", ".join(cfg.window_managers) or "none"),
+        ("Dotfiles", _dotfile_review(cfg)),
         ("Shell", cfg.shell or "none"),
         ("ZRAM", "yes" if cfg.zram else "no"),
         (

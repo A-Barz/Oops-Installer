@@ -85,6 +85,9 @@ SHELL_PACKAGES: dict[str, list[Pkg]] = {
     "dms": [Pkg("gui-apps/dankmaterialshell", "DMS (DankMaterialShell)", "guru")],
 }
 
+# greetd frontend used only when Noctalia is the shell and a login manager is enabled.
+NOCTALIA_GREETER = Pkg("gui-apps/noctalia-greeter", "Noctalia greeter for greetd", "guru")
+
 SHELL_EXEC: dict[str, str] = {
     "noctalia": "noctalia-shell",
     "dms": "dms",
@@ -128,6 +131,12 @@ TESTING_ATOMS = frozenset(
         "x11-themes/tela-icon-theme",
         "x11-themes/numix-icon-theme-circle",
         "media-fonts/iosevka",
+        "media-sound/easyeffects",
+        "media-sound/cava",
+        "media-sound/playerctl",
+        "gnome-extra/polkit-gnome",
+        "kde-apps/dolphin",
+        "gnome-base/nautilus",
     }
 )
 
@@ -277,9 +286,11 @@ def shell_exec(shell: str) -> str:
 
 
 def offered_guru_atoms(shell: str) -> set[str]:
-    """GURU atoms the wizard may emerge: the chosen shell, and Niri."""
+    """GURU atoms the wizard may emerge: the chosen shell, its greeter, and Niri."""
     allowed = set(shell_atoms(shell))
     allowed.add("gui-wm/niri")
+    if shell == "noctalia":
+        allowed.add(NOCTALIA_GREETER.atom)
     return allowed
 
 
@@ -881,11 +892,239 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
 ]
 
 
+@dataclass(frozen=True)
+class DotfileChoice:
+    """One compositor config the installer can place in the user's home.
+
+    `repo` empty means the installer's own config. A GitHub choice copies
+    `source` only. The project's install script is never run.
+    `kind` is "dir" (archive subdir) or "file" (one raw file).
+    """
+
+    id: str
+    label: str
+    repo: str = ""
+    branch: str = "main"
+    source: str = ""
+    dest: str = ""
+    kind: str = "dir"
+    # Gentoo atoms the config launches. Empty for the installer default.
+    # Programs that are not in the Gentoo tree are omitted on purpose.
+    packages: tuple[str, ...] = ()
+
+
+# At most five choices per compositor, installer default included.
+# Star counts checked on GitHub, 2026-10-25. Paths are the compositor
+# config only (not waybar, the shell, or the upstream install script).
+WM_DOTFILES: dict[str, tuple[DotfileChoice, ...]] = {
+    "gui-wm/hyprland": (
+        DotfileChoice("installer", "Installer default — keymap and a short Hyprland config"),
+        DotfileChoice(
+            "end-4",
+            "end-4/dots-hyprland — most-starred Hyprland dots",
+            "end-4/dots-hyprland",
+            "main",
+            "dots/.config/hypr",
+            ".config/hypr",
+            packages=(
+                "gnome-base/gnome-keyring",
+                "media-sound/easyeffects",
+                "media-sound/playerctl",
+                "media-sound/cava",
+                "gui-apps/foot",
+                "x11-terms/kitty",
+                "x11-terms/alacritty",
+                "kde-apps/dolphin",
+                "xfce-base/thunar",
+                "www-client/firefox-bin",
+                "app-shells/fish",
+                "media-fonts/jetbrains-mono",
+                "sys-process/btop",
+                "app-misc/jq",
+            ),
+        ),
+        DotfileChoice(
+            "hyde",
+            "HyDE-Project/HyDE",
+            "HyDE-Project/HyDE",
+            "master",
+            "Configs/.config/hypr",
+            ".config/hypr",
+            packages=(
+                "gui-apps/waybar",
+                "x11-misc/rofi",
+                "x11-misc/dunst",
+                "x11-terms/kitty",
+                "app-shells/fish",
+                "app-shells/starship",
+                "gui-apps/swaylock",
+                "kde-apps/dolphin",
+            ),
+        ),
+        DotfileChoice(
+            "ml4w",
+            "mylinuxforwork/dotfiles — ML4W",
+            "mylinuxforwork/dotfiles",
+            "main",
+            "dotfiles/.config/hypr",
+            ".config/hypr",
+            packages=(
+                "gui-apps/waybar",
+                "x11-misc/rofi",
+                "x11-terms/kitty",
+                "app-shells/fish",
+                "sys-process/btop",
+            ),
+        ),
+        DotfileChoice(
+            "caelestia",
+            "caelestia-dots/caelestia",
+            "caelestia-dots/caelestia",
+            "main",
+            "hypr",
+            ".config/hypr",
+            packages=(
+                "gui-apps/foot",
+                "app-shells/fish",
+                "sys-apps/eza",
+                "sys-process/btop",
+                "xfce-base/thunar",
+                "app-shells/starship",
+                "www-client/firefox-bin",
+                "x11-themes/papirus-icon-theme",
+                "media-fonts/jetbrains-mono",
+                "sys-apps/bat",
+                "sys-apps/ripgrep",
+                "app-misc/jq",
+                "gnome-base/gnome-keyring",
+            ),
+        ),
+    ),
+    "gui-wm/niri": (
+        DotfileChoice("installer", "Installer default — keymap, binds, and the packages you selected"),
+        DotfileChoice(
+            "upstream",
+            "niri-wm/niri — upstream default config",
+            "niri-wm/niri",
+            "main",
+            "resources/default-config.kdl",
+            ".config/niri/config.kdl",
+            "file",
+            (
+                "gui-apps/waybar",
+                "x11-terms/alacritty",
+                "gui-apps/swaylock",
+            ),
+        ),
+        DotfileChoice(
+            "saatvik",
+            "saatvik333/niri-dotfiles",
+            "saatvik333/niri-dotfiles",
+            "main",
+            "niri",
+            ".config/niri",
+            "dir",
+            (
+                "gui-apps/waybar",
+                "x11-terms/alacritty",
+                "x11-terms/kitty",
+                "xfce-base/thunar",
+                "gnome-extra/polkit-gnome",
+            ),
+        ),
+        DotfileChoice(
+            "niri-land",
+            "kianblakley/niri-land",
+            "kianblakley/niri-land",
+            "main",
+            ".config/niri",
+            ".config/niri",
+            "dir",
+            (
+                "gui-apps/waybar",
+                "gui-apps/mako",
+                "x11-misc/rofi",
+                "x11-terms/kitty",
+                "gui-apps/swaylock",
+            ),
+        ),
+        DotfileChoice(
+            "niri-setup",
+            "acaibowlz/niri-setup",
+            "acaibowlz/niri-setup",
+            "main",
+            "niri",
+            ".config/niri",
+            "dir",
+            (
+                "gui-apps/waybar",
+                "x11-misc/dunst",
+                "gui-apps/swayidle",
+                "gui-apps/swaylock",
+                "x11-terms/alacritty",
+                "www-client/firefox-bin",
+                "gnome-base/nautilus",
+                "media-sound/playerctl",
+                "sys-fs/udiskie",
+                "gnome-extra/polkit-gnome",
+            ),
+        ),
+    ),
+}
+
+
+def dotfile_choices(atom: str) -> list[DotfileChoice]:
+    """Up to five config choices for this compositor, or none."""
+    return list(WM_DOTFILES.get(atom, ()))[:5]
+
+
+# Noctalia and DMS already provide the bar, launcher, and their own config.
+DOTFILE_SHELLS_SKIP = frozenset({"noctalia", "dms"})
+
+
+def dotfiles_skipped(shell: str) -> bool:
+    """True when a shell makes the GitHub compositor configs the wrong session."""
+    return shell in DOTFILE_SHELLS_SKIP
+
+
+def selected_dotfile(atom: str, wm_dotfiles: list[str]) -> DotfileChoice | None:
+    """The saved choice for this compositor, or the installer default."""
+    choices = dotfile_choices(atom)
+    if not choices:
+        return None
+    wanted = "installer"
+    for item in wm_dotfiles or []:
+        key, _, value = str(item).partition("=")
+        if key == atom and value:
+            wanted = value
+            break
+    for choice in choices:
+        if choice.id == wanted:
+            return choice
+    return choices[0]
+
+
+def dotfile_package_atoms(shell: str, window_managers: list[str], wm_dotfiles: list[str]) -> list[str]:
+    """Gentoo packages the chosen GitHub configs launch. Empty when a shell skips them."""
+    if dotfiles_skipped(shell):
+        return []
+    out: list[str] = []
+    for atom in window_managers:
+        choice = selected_dotfile(atom, wm_dotfiles)
+        if choice is None or not choice.repo:
+            continue
+        for pkg in choice.packages:
+            if pkg not in out:
+                out.append(pkg)
+    return out
+
+
 def _known_packages() -> list[Pkg]:
     pkgs = list(WINDOW_MANAGERS) + list(WAYLAND_BASE) + list(WAYLAND_COMMON_UTILS)
     pkgs.extend(PLYMOUTH_THEME_PACKAGES.values())
     for group in list(WM_REQUIREMENTS.values()) + list(SHELL_PACKAGES.values()):
         pkgs.extend(group)
+    pkgs.append(NOCTALIA_GREETER)
     return pkgs
 
 

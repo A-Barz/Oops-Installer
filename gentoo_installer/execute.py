@@ -141,6 +141,10 @@ def execute(cfg: InstallConfig) -> None:
             else:
                 progress.stop()
     if error is None:
+        dm = _resolved_dm(cfg)
+        if dm != "none":
+            who = f" Sign in as {cfg.username}." if cfg.username else ""
+            ui.info(f"The next boot opens the {dm} login screen.{who} Choose a window manager there.")
         ui.congratulate()
         return
     decision = ask_resume_or_unmount(cfg)
@@ -1935,20 +1939,44 @@ def _grub_uefi_install(target: str) -> str:
 
 
 def _graphical_atoms(cfg: InstallConfig) -> list[str]:
-    return list(dict.fromkeys(cfg.extra_packages + _window_managers(cfg) + cfg.selected_packages))
+    return list(
+        dict.fromkeys(
+            cfg.extra_packages
+            + _window_managers(cfg)
+            + cfg.selected_packages
+            + catalog.dotfile_package_atoms(cfg.shell, cfg.window_managers, cfg.wm_dotfiles)
+        )
+    )
 
 
 def _resolved_dm(cfg: InstallConfig) -> str:
     return catalog.resolved_display_manager(cfg.display_manager, cfg.desktop, _graphical_atoms(cfg))
 
 
+def _greetd_uses_noctalia(cfg: InstallConfig) -> bool:
+    """Noctalia Shell brings its own greetd greeter."""
+    if getattr(cfg, "shell", "") == "noctalia":
+        return True
+    return "gui-apps/noctalia-shell" in set(_graphical_atoms(cfg))
+
+
 def _greetd_uses_tuigreet(cfg: InstallConfig) -> bool:
     """tuigreet is a GURU package. Use it only when a saved profile already names it."""
+    if _greetd_uses_noctalia(cfg):
+        return False
     atoms = set(_graphical_atoms(cfg))
     return (
         "gui-apps/tuigreet" in atoms
         and "gui-apps/gtkgreet" not in atoms
         and _atom_allowed(cfg, "gui-apps/tuigreet")
+    )
+
+
+def _accounts_daemon_probe() -> tuple[str, ...]:
+    return (
+        "bash",
+        "-c",
+        "test -x /usr/libexec/accounts-daemon || test -e /usr/libexec/accounts-daemon || command -v accounts-daemon",
     )
 
 
@@ -1963,12 +1991,16 @@ def _display_manager_tools(cfg: InstallConfig) -> list[tuple[str, tuple[str, ...
         tools.append(("x11-misc/sddm", _service_probe(openrc, "sddm")))
     elif dm == "gdm":
         tools.append(("gnome-base/gdm", _service_probe(openrc, "gdm")))
+        tools.append(("sys-apps/accountsservice", _accounts_daemon_probe()))
     elif dm == "lightdm":
         tools.append(("x11-misc/lightdm", _service_probe(openrc, "lightdm")))
         tools.append(("x11-misc/lightdm-gtk-greeter", ("command", "-v", "lightdm-gtk-greeter")))
+        tools.append(("sys-apps/accountsservice", _accounts_daemon_probe()))
     elif dm == "greetd":
         tools.append(("gui-libs/greetd", _service_probe(openrc, "greetd")))
-        if _greetd_uses_tuigreet(cfg):
+        if _greetd_uses_noctalia(cfg):
+            tools.append(("gui-apps/noctalia-greeter", ("command", "-v", "noctalia-greeter-session")))
+        elif _greetd_uses_tuigreet(cfg):
             tools.append(("gui-apps/tuigreet", ("command", "-v", "tuigreet")))
         else:
             tools.append(("gui-apps/gtkgreet", ("command", "-v", "gtkgreet")))
@@ -1983,7 +2015,26 @@ def _display_manager_tools(cfg: InstallConfig) -> list[tuple[str, tuple[str, ...
     return tools
 
 
+def _session_slug(title: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "-", title).strip("-").lower() or "session"
+
+
+def _login_username(cfg: InstallConfig) -> str:
+    """Account the greeter should offer. Empty when the name is not safe to write."""
+    user = (cfg.username or "").strip()
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.@+-]{0,31}", user):
+        return user
+    return ""
+
+
+def _login_sessions_for(cfg: InstallConfig) -> list[tuple[str, str, str]]:
+    return catalog.login_sessions(
+        cfg.desktop, _graphical_atoms(cfg), getattr(cfg, "shell", "") or ""
+    )
+
+
 def _session_desktop(title: str, command: str, kind: str) -> str:
+    binary = (command or "").split()[0]
     lines = [
         "[Desktop Entry]",
         f"Name={title}",
@@ -1991,6 +2042,8 @@ def _session_desktop(title: str, command: str, kind: str) -> str:
         f"Exec={command}",
         "Type=Application",
     ]
+    if binary:
+        lines.append(f"TryExec={binary}")
     if kind == "wayland":
         lines.append("X-LightDM-Session-Type=wayland")
     lines.append("")
@@ -1998,48 +2051,206 @@ def _session_desktop(title: str, command: str, kind: str) -> str:
 
 
 def _display_manager_script(cfg: InstallConfig) -> str:
-    """Install the greeter, register every selected session, and leave it enabled.
+    """Install the greeter, list the chosen sessions, and boot to it.
 
-    The greeter is the screen after GRUB. It does not skip the password.
+    The password is still required. The greeter is given the username and the
+    window managers so the first boot is that screen, not a text shell.
     """
     dm = _resolved_dm(cfg)
     if dm == "none":
         return ""
+    sessions = _login_sessions_for(cfg)
+    user = _login_username(cfg)
     lines = [f'echo ">> login manager: {dm}"']
     for atom, test in _display_manager_tools(cfg):
         lines.append(_emerge_checked_call(atom, test))
     lines.append("mkdir -p /usr/share/wayland-sessions /usr/share/xsessions")
-    for title, command, kind in catalog.login_sessions(
-        cfg.desktop, _graphical_atoms(cfg), getattr(cfg, "shell", "") or ""
-    ):
+    for title, command, kind in sessions:
         folder = "/usr/share/wayland-sessions" if kind == "wayland" else "/usr/share/xsessions"
-        slug = re.sub(r"[^A-Za-z0-9]+", "-", title).strip("-").lower() or "session"
-        path = f"{folder}/installer-{slug}.desktop"
+        path = f"{folder}/installer-{_session_slug(title)}.desktop"
         body = _session_desktop(title, command, kind)
         lines.append(f"if ! grep -RFqs {shlex.quote(command)} /usr/share/wayland-sessions /usr/share/xsessions 2>/dev/null; then")
         lines.append(f"cat > {shlex.quote(path)} << 'EOF'")
         lines.append(body.rstrip("\n"))
         lines.append("EOF")
         lines.append("fi")
+    lines.append(f"login_user={shlex.quote(user)}")
+    if sessions:
+        lines.append(f"first_exec={shlex.quote(sessions[0][1])}")
+    else:
+        lines.append("first_exec=")
+    lines.extend(
+        [
+            "session_file=",
+            "session_id=",
+            'if [ -n "$first_exec" ]; then',
+            '  session_file=$(grep -RFls --include=\'*.desktop\' -F -e "Exec=$first_exec" /usr/share/wayland-sessions /usr/share/xsessions 2>/dev/null | head -n1 || true)',
+            '  if [ -n "$session_file" ]; then session_id=$(basename "$session_file" .desktop); fi',
+            "fi",
+        ]
+    )
+    if user:
+        lines.append(
+            'for grp in video input render seat; do '
+            'getent group "$grp" >/dev/null || continue; '
+            f'usermod -aG "$grp" {shlex.quote(user)} || true; '
+            "done"
+        )
     if dm == "lightdm":
         lines.extend(
             [
-                "mkdir -p /etc/lightdm",
-                "touch /etc/lightdm/lightdm.conf",
-                "grep -q '^greeter-session=' /etc/lightdm/lightdm.conf || printf '\\n[Seat:*]\\ngreeter-session=lightdm-gtk-greeter\\n' >> /etc/lightdm/lightdm.conf",
+                "mkdir -p /etc/lightdm/lightdm.conf.d",
+                "{",
+                "  echo '[Seat:*]'",
+                "  echo 'greeter-session=lightdm-gtk-greeter'",
+                "  echo 'greeter-hide-users=false'",
+                '  if [ -n "$session_id" ]; then echo "user-session=$session_id"; fi',
+                "} > /etc/lightdm/lightdm.conf.d/installer.conf",
             ]
         )
     elif dm == "greetd":
-        if _greetd_uses_tuigreet(cfg):
-            command = "/usr/bin/tuigreet --time --remember --remember-user-session --sessions /usr/share/wayland-sessions:/usr/share/xsessions"
-        else:
-            command = "labwc -s gtkgreet"
+        lines.extend(_greetd_config_lines(cfg, sessions))
+    elif dm == "sddm":
         lines.extend(
             [
-                "mkdir -p /etc/greetd",
-                'if [ "$KEEP_EXISTING" = 1 ] && [ -f /etc/greetd/config.toml ]; then',
-                '  echo ">> skip existing greetd config"',
-                "else",
+                "mkdir -p /etc/sddm.conf.d /var/lib/sddm",
+                "cat > /etc/sddm.conf.d/installer.conf << 'EOF'",
+                "[General]",
+                "RememberLastUser=true",
+                "RememberLastSession=true",
+                "",
+                "[Users]",
+                "RememberLastUser=true",
+                "RememberLastSession=true",
+                "MinimumUid=1000",
+                "MaximumUid=60000",
+                "",
+                "[Wayland]",
+                "SessionDir=/usr/share/wayland-sessions",
+                "",
+                "[X11]",
+                "SessionDir=/usr/share/xsessions",
+                "EOF",
+                'if [ -n "$login_user" ]; then',
+                "  {",
+                "    echo '[Last]'",
+                '    echo "User=$login_user"',
+                '    if [ -n "$session_file" ]; then echo "Session=$session_file"; fi',
+                "  } > /var/lib/sddm/state.conf",
+                "fi",
+            ]
+        )
+    elif dm == "gdm":
+        lines.extend(
+            [
+                "mkdir -p /etc/gdm",
+                "cat > /etc/gdm/custom.conf << 'EOF'",
+                "[daemon]",
+                "InitialSetupEnable=false",
+                "WaylandEnable=true",
+                "EOF",
+            ]
+        )
+    elif dm == "slim" and user:
+        lines.extend(
+            [
+                'if [ -f /etc/slim.conf ]; then',
+                "  if grep -q '^default_user ' /etc/slim.conf; then",
+                f"    sed -i 's/^default_user .*/default_user {user}/' /etc/slim.conf",
+                "  else",
+                f"    echo 'default_user {user}' >> /etc/slim.conf",
+                "  fi",
+                "  if grep -q '^focus_password ' /etc/slim.conf; then",
+                "    sed -i 's/^focus_password .*/focus_password yes/' /etc/slim.conf",
+                "  else",
+                "    echo 'focus_password yes' >> /etc/slim.conf",
+                "  fi",
+                "fi",
+            ]
+        )
+    if user and dm in {"lightdm", "gdm", "sddm"}:
+        lines.extend(
+            [
+                'if [ -n "$login_user" ] && [ -n "$session_id" ]; then',
+                "  mkdir -p /var/lib/AccountsService/users",
+                '  cat > "/var/lib/AccountsService/users/${login_user}" << EOF',
+                "[User]",
+                "Session=${session_id}",
+                "XSession=${session_id}",
+                "SystemAccount=false",
+                "EOF",
+                "fi",
+            ]
+        )
+    lines.extend(_login_manager_boot_lines(cfg, dm))
+    return "\n".join(lines) + "\n"
+
+
+def _toml_basic(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _noctalia_greeter_lines(cfg: InstallConfig, sessions: list[tuple[str, str, str]]) -> list[str]:
+    """Point greetd at noctalia-greeter and preselect the install's user and session."""
+    user = _login_username(cfg)
+    keymap = _safe_token(getattr(cfg, "keymap", "") or "", "us")
+    lines = [
+        "greeter_cmd=$(command -v noctalia-greeter-session || true)",
+        'if [ -z "$greeter_cmd" ]; then greeter_cmd=/usr/bin/noctalia-greeter-session; fi',
+        "mkdir -p /etc/greetd",
+        "cat > /etc/greetd/config.toml << EOF",
+        "[terminal]",
+        "vt = 1",
+        "",
+        "[default_session]",
+        'command = "${greeter_cmd}"',
+        'user = "greetd"',
+        "EOF",
+        "install -d -o greetd -g greetd -m 750 /var/lib/noctalia-greeter",
+        "if command -v noctalia-greeter-apply-appearance >/dev/null 2>&1; then",
+        "  GREETER_USER=greetd noctalia-greeter-apply-appearance --setup-system || true",
+        "fi",
+        "cat > /var/lib/noctalia-greeter/greeter.toml << EOF",
+    ]
+    if user:
+        lines.extend(["[user]", f"default = {_toml_basic(user)}", ""])
+    if sessions:
+        lines.extend(["[session]", f"default = {_toml_basic(sessions[0][0])}", ""])
+    if keymap:
+        lines.extend(["[keyboard]", f"layout = {_toml_basic(keymap)}", ""])
+    lines.extend(
+        [
+            "EOF",
+            "chown greetd:greetd /var/lib/noctalia-greeter/greeter.toml || true",
+            "chmod 640 /var/lib/noctalia-greeter/greeter.toml || true",
+            'for grp in video input render seat; do '
+            'getent group "$grp" >/dev/null || continue; '
+            'usermod -aG "$grp" greetd || true; '
+            "done",
+        ]
+    )
+    return lines
+
+
+def _greetd_config_lines(cfg: InstallConfig, sessions: list[tuple[str, str, str]]) -> list[str]:
+    """gtkgreet lists compositor commands. tuigreet lists the user and the desktop files."""
+    if _greetd_uses_noctalia(cfg):
+        return _noctalia_greeter_lines(cfg, sessions)
+    lines = [
+        "mkdir -p /etc/greetd",
+        "cat > /etc/greetd/environments << 'EOF'",
+    ]
+    for _title, command, _kind in sessions:
+        lines.append(command)
+    lines.append("EOF")
+    if _greetd_uses_tuigreet(cfg):
+        command = (
+            "/usr/bin/tuigreet --time --user-menu --remember --remember-user-session "
+            "--sessions /usr/share/wayland-sessions:/usr/share/xsessions"
+        )
+        lines.extend(
+            [
                 "cat > /etc/greetd/config.toml << 'EOF'",
                 "[terminal]",
                 "vt = 1",
@@ -2048,23 +2259,89 @@ def _display_manager_script(cfg: InstallConfig) -> str:
                 f'command = "{command}"',
                 'user = "greetd"',
                 "EOF",
+                'if [ -n "$login_user" ]; then',
+                "  install -d -o greetd -g greetd -m 755 /var/cache/tuigreet",
+                '  printf "%s\\n" "$login_user" > /var/cache/tuigreet/lastuser',
+                "  chown greetd:greetd /var/cache/tuigreet/lastuser || true",
+                '  if [ -n "$session_file" ]; then',
+                '    printf "%s\\n" "$session_file" > /var/cache/tuigreet/lastsession-path',
+                "    chown greetd:greetd /var/cache/tuigreet/lastsession-path || true",
+                "  fi",
                 "fi",
-                "usermod -aG video,seat,input greetd || true",
             ]
         )
-    elif dm == "sddm":
+    else:
         lines.extend(
             [
-                "mkdir -p /etc/sddm.conf.d",
-                "cat > /etc/sddm.conf.d/installer.conf << 'EOF'",
-                "[General]",
-                "DisplayServer=x11",
+                "mkdir -p /etc/greetd/labwc",
+                "cat > /etc/greetd/labwc/autostart << 'EOF'",
+                "#!/bin/sh",
+                "if gtkgreet -h 2>&1 | grep -q -- '--layer-shell'; then",
+                "  gtkgreet -l",
+                "else",
+                "  gtkgreet",
+                "fi",
+                "labwc --exit || true",
+                "EOF",
+                "chmod 755 /etc/greetd/labwc/autostart",
+                "greeter_cmd='labwc --config-dir /etc/greetd/labwc'",
+                "if ! labwc --help 2>&1 | grep -q -- '--config-dir'; then",
+                "  greeter_cmd='labwc -s /etc/greetd/labwc/autostart'",
+                "fi",
+                "cat > /etc/greetd/config.toml << EOF",
+                "[terminal]",
+                "vt = 1",
+                "",
+                "[default_session]",
+                'command = "${greeter_cmd}"',
+                'user = "greetd"',
                 "EOF",
             ]
         )
-    if cfg.username:
-        lines.append(f"usermod -aG video,seat {shlex.quote(cfg.username)} || true")
-    return "\n".join(lines) + "\n"
+    lines.append(
+        'for grp in video input render seat; do '
+        'getent group "$grp" >/dev/null || continue; '
+        "usermod -aG \"$grp\" greetd || true; "
+        "done"
+    )
+    return lines
+
+
+def _login_manager_boot_lines(cfg: InstallConfig, dm: str) -> list[str]:
+    """Start the greeter when the machine is up, and keep a text console on tty2."""
+    if cfg.init_system == "openrc":
+        lines = [
+            "if [ -f /etc/inittab ]; then",
+            "  awk '",
+            "    /^[[:space:]]*#/ { print; next }",
+            "    /tty1/ && /(agetty|getty)/ { print \"# \" $0; next }",
+            "    { print }",
+            "  ' /etc/inittab > /etc/inittab.installer",
+            "  mv /etc/inittab.installer /etc/inittab",
+            '  echo ">> tty1 is the login manager; tty2 stays a text console"',
+            "fi",
+        ]
+        return lines
+    lines = [
+        "graphical=",
+        "for dir in /usr/lib/systemd/system /lib/systemd/system; do",
+        '  if [ -e "$dir/graphical.target" ]; then graphical="$dir/graphical.target"; break; fi',
+        "done",
+        'if [ -n "$graphical" ]; then',
+        "  mkdir -p /etc/systemd/system",
+        '  ln -sfn "$graphical" /etc/systemd/system/default.target',
+        '  echo ">> boot target is the login manager"',
+        "fi",
+    ]
+    if dm == "greetd":
+        lines.extend(
+            [
+                "mkdir -p /etc/systemd/system",
+                "ln -sfn /dev/null /etc/systemd/system/getty@tty1.service",
+                'echo ">> tty1 is the login manager; tty2 stays a text console"',
+            ]
+        )
+    return lines
 
 
 def _package_use_text(cfg: InstallConfig) -> str:
@@ -2105,10 +2382,16 @@ def _package_use_text(cfg: InstallConfig) -> str:
         lines.append("x11-misc/sddm systemd -elogind")
     elif dm == "gdm":
         lines.append("gnome-base/gdm systemd -elogind")
+    if dm == "greetd" and not _greetd_uses_tuigreet(cfg) and not _greetd_uses_noctalia(cfg):
+        lines.append("gui-apps/gtkgreet layer-shell")
     queued = set(_graphical_atoms(cfg))
     if "gui-wm/niri" in queued and "gui-apps/waybar" in queued:
         # Waybar's niri module is a local USE flag. Without it the bar has no workspaces.
         lines.append("gui-apps/waybar niri")
+    if "x11-misc/rofi" in queued:
+        lines.append("x11-misc/rofi wayland")
+    if "x11-misc/dunst" in queued:
+        lines.append("x11-misc/dunst wayland")
     return "\n".join(lines) + "\n"
 
 
@@ -2129,9 +2412,12 @@ def _keyword_text(cfg: InstallConfig) -> str:
     )
     if dm == "greetd":
         lines.append(f"gui-libs/greetd {keyword}")
-        lines.append(f"gui-apps/gtkgreet {keyword}")
-        if _greetd_uses_tuigreet(cfg):
-            lines.append(f"gui-apps/tuigreet {keyword}")
+        if _greetd_uses_noctalia(cfg):
+            lines.append(f"gui-apps/noctalia-greeter {keyword}")
+        else:
+            lines.append(f"gui-apps/gtkgreet {keyword}")
+            if _greetd_uses_tuigreet(cfg):
+                lines.append(f"gui-apps/tuigreet {keyword}")
     shell_atoms = catalog.shell_atoms(getattr(cfg, "shell", ""))
     for atom in shell_atoms:
         lines.append(f"{atom} {keyword}")
@@ -2334,7 +2620,13 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
     late_atoms = [
         atom
         for atom in dict.fromkeys(
-            de_pkgs + support_atoms + cfg.extra_packages + cfg.selected_packages + _window_managers(cfg) + dm_atoms
+            de_pkgs
+            + support_atoms
+            + cfg.extra_packages
+            + cfg.selected_packages
+            + _window_managers(cfg)
+            + dm_atoms
+            + catalog.dotfile_package_atoms(cfg.shell, cfg.window_managers, cfg.wm_dotfiles)
         )
         if atom
         and _atom_allowed(cfg, atom)
@@ -2388,6 +2680,9 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
     if dm not in {"none", "auto", ""}:
         if cfg.init_system == "openrc" and "dbus" not in openrc_services:
             openrc_services.append("dbus")
+        if dm in {"lightdm", "gdm"}:
+            openrc_services.append("accounts-daemon")
+            systemd_services.append("accounts-daemon")
         openrc_services.append(dm)
         systemd_services.append(dm)
 
@@ -2982,6 +3277,108 @@ def _atom_allowed(cfg: InstallConfig, atom: str) -> bool:
     return bare in catalog.offered_guru_atoms(getattr(cfg, "shell", "") or "")
 
 
+def _dotfile_for(cfg: InstallConfig, atom: str) -> catalog.DotfileChoice | None:
+    """The saved config choice for this compositor, or the installer default."""
+    choices = catalog.dotfile_choices(atom)
+    if not choices:
+        return None
+    if catalog.dotfiles_skipped(getattr(cfg, "shell", "") or ""):
+        return choices[0]
+    wanted = "installer"
+    for item in cfg.wm_dotfiles or []:
+        key, _, value = str(item).partition("=")
+        if key == atom and value:
+            wanted = value
+            break
+    for choice in choices:
+        if choice.id == wanted:
+            return choice
+    return choices[0]
+
+
+def _wm_dotfile_fetch_lines() -> list[str]:
+    """Shell helper: copy the latest GitHub compositor config into the user's home.
+
+    The commit at the tip of the recorded branch is resolved first, then that
+    commit is downloaded. A cached branch archive is only the fallback.
+    """
+    return [
+        "  fetch_wm_dotfiles() {",
+        '    repo="$1"; branch="$2"; source="$3"; dest="$4"; kind="$5"',
+        "    tmp=$(mktemp -d)",
+        "    _wm_download() {",
+        '      url="$1"; out="$2"',
+        '      if command -v curl >/dev/null 2>&1 && curl -fsSL -H "Cache-Control: no-cache" -H "Pragma: no-cache" "$url" -o "$out"; then return 0; fi',
+        '      if command -v wget >/dev/null 2>&1 && wget -q --no-cache -O "$out" "$url"; then return 0; fi',
+        '      if emerge --ask=n net-misc/curl && curl -fsSL -H "Cache-Control: no-cache" -H "Pragma: no-cache" "$url" -o "$out"; then return 0; fi',
+        "      return 1",
+        "    }",
+        '    sha=""',
+        '    if _wm_download "https://api.github.com/repos/${repo}/commits/${branch}" "$tmp/commit.json"; then',
+        '      sha=$(sed -n \'s/.*"sha": *"\\([0-9a-f]\\{40\\}\\)".*/\\1/p\' "$tmp/commit.json" | head -n 1)',
+        "    fi",
+        '    ref="$branch"',
+        '    folder="$branch"',
+        '    if [ -n "$sha" ]; then',
+        '      ref="$sha"',
+        '      folder="$sha"',
+        '      echo ">> syncing latest ${repo} ${branch} at ${sha}"',
+        "    else",
+        '      echo ">> could not read the latest ${repo} commit; downloading branch ${branch}" >&2',
+        "    fi",
+        '    if [ "$kind" = "file" ]; then',
+        '      mkdir -p "$(dirname "$dest")"',
+        '      if _wm_download "https://raw.githubusercontent.com/${repo}/${ref}/${source}" "$dest"; then',
+        '        rm -rf "$tmp"; return 0',
+        "      fi",
+        '      rm -f "$dest"; rm -rf "$tmp"; return 1',
+        "    fi",
+        '    if [ -n "$sha" ]; then',
+        '      archive="https://github.com/${repo}/archive/${sha}.tar.gz"',
+        "    else",
+        '      archive="https://github.com/${repo}/archive/refs/heads/${branch}.tar.gz"',
+        "    fi",
+        '    if ! _wm_download "$archive" "$tmp/src.tar.gz"; then',
+        '      rm -rf "$tmp"; return 1',
+        "    fi",
+        '    tar -xzf "$tmp/src.tar.gz" -C "$tmp" || { rm -rf "$tmp"; return 1; }',
+        '    base="${repo##*/}"',
+        '    root="$tmp/${base}-${folder}/${source}"',
+        '    if [ ! -e "$root" ]; then',
+        '      root=$(find "$tmp" -path "*/${source}" | head -n 1)',
+        "    fi",
+        '    if [ -z "$root" ] || [ ! -e "$root" ]; then rm -rf "$tmp"; return 1; fi',
+        '    rm -rf "$dest"',
+        '    mkdir -p "$(dirname "$dest")"',
+        '    if ! cp -a "$root" "$dest"; then rm -rf "$tmp"; return 1; fi',
+        '    rm -rf "$tmp"',
+        "    return 0",
+        "  }",
+    ]
+
+
+def _dotfile_attempt(choice: catalog.DotfileChoice, dest_shell: str, flag: str, title: str) -> list[str]:
+    """Try the GitHub copy. The flag stays 0 so the installer config can be written."""
+    args = " ".join(
+        [
+            shlex.quote(choice.repo),
+            shlex.quote(choice.branch),
+            shlex.quote(choice.source),
+            dest_shell,
+            shlex.quote(choice.kind),
+        ]
+    )
+    return [
+        f"  {flag}=0",
+        f"  if fetch_wm_dotfiles {args}; then",
+        f"    {flag}=1",
+        f'    echo ">> {title} dotfiles: {choice.id}"',
+        "  else",
+        f'    echo ">> {title} dotfiles were not copied; writing the installer config" >&2',
+        "  fi",
+    ]
+
+
 def _user_session_script(cfg: InstallConfig) -> str:
     """Write a first compositor config and dwm/dwl starters. Existing files stay."""
     wms = set(_window_managers(cfg))
@@ -3025,10 +3422,17 @@ def _user_session_script(cfg: InstallConfig) -> str:
         f"userhome=$(getent passwd {user} | cut -d: -f6 || true)",
         'if [ -n "$userhome" ]; then',
     ]
+    hypr_choice = _dotfile_for(cfg, "gui-wm/hyprland") if "gui-wm/hyprland" in wms else None
+    niri_choice = _dotfile_for(cfg, "gui-wm/niri") if "gui-wm/niri" in wms else None
+    if (hypr_choice and hypr_choice.repo) or (niri_choice and niri_choice.repo):
+        lines += _wm_dotfile_fetch_lines()
     if "gui-wm/hyprland" in wms:
+        lines.append('  hypr="$userhome/.config/hypr/hyprland.conf"')
+        if hypr_choice and hypr_choice.repo:
+            lines += _dotfile_attempt(hypr_choice, '"$userhome/.config/hypr"', "hypr_dots", "Hyprland")
+            lines.append('  if [ "$hypr_dots" != 1 ]; then')
         lines += [
             '  install -d -m 755 "$userhome/.config/hypr"',
-            '  hypr="$userhome/.config/hypr/hyprland.conf"',
             '  if [ ! -f "$hypr" ]; then',
             '    cat > "$hypr" << EOF',
             "monitor=,preferred,auto,1",
@@ -3043,10 +3447,15 @@ def _user_session_script(cfg: InstallConfig) -> str:
             f'    chown -R {user}:{user} "$userhome/.config/hypr" || true',
             "  fi",
         ]
+        if hypr_choice and hypr_choice.repo:
+            lines.append("  fi")
+            lines.append(f'  chown -R {user}:{user} "$userhome/.config/hypr" || true')
         if shell:
             lines += [
                 f'  if [ -f "$hypr" ] && ! grep -q {shlex.quote(shell)} "$hypr"; then',
                 f'    echo {shlex.quote("exec-once = " + shell)} >> "$hypr"',
+                '  elif [ ! -f "$hypr" ] && [ -f "$userhome/.config/hypr/hyprland.lua" ]; then',
+                '    echo ">> Hyprland is using hyprland.lua; the chosen shell was not added to that file" >&2',
                 "  fi",
             ]
     if "gui-wm/sway" in wms:
@@ -3102,9 +3511,18 @@ def _user_session_script(cfg: InstallConfig) -> str:
             binds.insert(1, '    Mod+D { spawn "wofi" "--show" "drun"; }')
         if "gui-apps/swaylock" in queued:
             binds.append('    Mod+Shift+L { spawn "swaylock"; }')
+        lines.append('  niricfg="$userhome/.config/niri/config.kdl"')
+        niri_remote = bool(niri_choice and niri_choice.repo)
+        if niri_remote and niri_choice is not None:
+            lines += _dotfile_attempt(
+                niri_choice,
+                f'"$userhome/{niri_choice.dest}"',
+                "niri_dots",
+                "Niri",
+            )
+            lines.append('  if [ "$niri_dots" != 1 ]; then')
         lines += [
             '  install -d -m 755 "$userhome/.config/niri"',
-            '  niricfg="$userhome/.config/niri/config.kdl"',
             '  if [ ! -f "$niricfg" ]; then',
             "    copied=0",
             "    for sample in /usr/share/niri/default-config.kdl /usr/share/niri/config.kdl /etc/niri/config.kdl; do",
@@ -3129,12 +3547,26 @@ def _user_session_script(cfg: InstallConfig) -> str:
             "    fi",
             "  fi",
         ]
-        for spawn in spawns:
-            lines.append(
-                f'  if [ -f "$niricfg" ] && ! grep -q {shlex.quote(spawn)} "$niricfg"; then'
-            )
-            lines.append(f'    echo {shlex.quote(spawn)} >> "$niricfg"')
+        if niri_remote:
             lines.append("  fi")
+        shell_spawns = [spawn for spawn in spawns if shell and f'"{shell}"' in spawn]
+        extra_spawns = [spawn for spawn in spawns if spawn not in shell_spawns]
+
+        def _append_niri_spawns(items: list[str]) -> None:
+            for spawn in items:
+                lines.append(
+                    f'  if [ -f "$niricfg" ] && ! grep -q {shlex.quote(spawn)} "$niricfg"; then'
+                )
+                lines.append(f'    echo {shlex.quote(spawn)} >> "$niricfg"')
+                lines.append("  fi")
+
+        _append_niri_spawns(shell_spawns)
+        if niri_remote and extra_spawns:
+            lines.append('  if [ "$niri_dots" != 1 ]; then')
+            _append_niri_spawns(extra_spawns)
+            lines.append("  fi")
+        elif not niri_remote:
+            _append_niri_spawns(extra_spawns)
         lines.append(f'  chown -R {user}:{user} "$userhome/.config/niri" || true')
     if "gui-wm/wayfire" in wms:
         lines += [
