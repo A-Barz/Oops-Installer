@@ -134,3 +134,5 @@ Python modules have comments that map each step to the Gentoo AMD64 Handbook.
 | `gentoo_installer/execute.py` | Host, disk, stage3, chroot phases |
 | `gentoo_installer/ui.py` | Colours, menus, passwords |
 | `gentoo_installer/catalog.py` | Package categories, WMs, overlays, Plymouth themes |
+
+$\scriptsize\textcolor{purple}{\textsf{Y}}\textcolor{green}{\textsf{o}}\textcolor{purple}{\textsf{u}}\textcolor{green}{\textsf{'}}\textcolor{purple}{\textsf{r}}\textcolor{green}{\textsf{e}}\ \textcolor{purple}{\textsf{W}}\textcolor{green}{\textsf{e}}\textcolor{purple}{\textsf{l}}\textcolor{green}{\textsf{c}}\textcolor{purple}{\textsf{o}}\textcolor{green}{\textsf{m}}\textcolor{purple}{\textsf{e}}$ 😈
