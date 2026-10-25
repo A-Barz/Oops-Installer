@@ -1,6 +1,6 @@
 # gentoo-live-installer
 
-Python installer that runs **in a terminal on Ubuntu XFCE live media** and installs **Gentoo Linux onto a hard disk**.
+Python installer that runs **in a terminal on Ubuntu Boot Image live media** and installs **Gentoo Linux onto a hard disk**.
 
 ## Notice
 
@@ -27,7 +27,7 @@ In chapter 12 you can search (`/text`), page (`n`/`p`), and toggle packages. Ove
 
 ## Requirements
 
-- Ubuntu XFCE live USB/ISO (or another Debian-like live system with `apt` and Python 3.10+)
+- Ubuntu Boot Image live USB/ISO (or another Debian-like live system with `apt` and Python 3.10+)
 - Wired or wireless internet
 - Root privileges
 - A target disk you can **wipe** (unless you choose existing partitions)
