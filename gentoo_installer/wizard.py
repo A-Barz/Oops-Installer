@@ -510,32 +510,31 @@ def _base(cfg: InstallConfig) -> None:
             "nouveau",
         )
     gpu = detect.detect_gpu(nvidia=nvidia_driver)
-    ui.info(f"Detected VIDEO_CARDS suggestion: {gpu}")
-    ui.info("Empty Enter keeps this suggestion.")
+    gpu_names = detect.gpu_devices()
+    if gpu_names:
+        ui.info("Graphics hardware: " + "; ".join(gpu_names))
+    else:
+        ui.info("No display controller was listed by lspci.")
+    ui.info(f"VIDEO_CARDS for that hardware: {gpu}")
+    ui.info("Empty Enter keeps this value.")
     cfg.video_cards = ui.prompt("VIDEO_CARDS", gpu)
     cfg.input_devices = detect.suggest_input_devices()
-    ui.info(f"INPUT_DEVICES set to {cfg.input_devices}.")
-    hardware_use = [
-        name
-        for name, present in (
-            ("bluetooth", detect.has_bluetooth()),
-            ("wifi", detect.has_wifi()),
-            ("alsa", detect.has_sound()),
-        )
-        if present
-    ]
-    if hardware_use:
-        ui.info("This machine has " + ", ".join(hardware_use) + ". Those USE flags start selected.")
+    ui.info(f"INPUT_DEVICES for this machine: {cfg.input_devices}")
+    cfg.input_devices = ui.prompt("INPUT_DEVICES", cfg.input_devices)
+    for flag in ("alsa", "wifi", "bluetooth"):
+        ui.info(f"{flag}: {detect.hardware_note(flag)}")
     ui.info("USE flags control optional features inside packages (audio, GUI toolkits, networking).")
+    ui.info("The flag name is the value written to make.conf. A detected device is shown beside alsa, wifi, and bluetooth.")
     extra = ui.checklist(
         "Global USE flags (handbook ch. 6) — Space toggles, Enter continues",
-        catalog.USE_FLAGS,
+        _use_rows(),
         selected=_default_use(cfg),
     )
     typed = ui.prompt("Extra USE tokens to add (space-separated, empty for none)", "")
     if typed.strip():
         extra = list(dict.fromkeys(extra + typed.split()))
     cfg.extra_use = extra
+    cfg.use_flags = " ".join(extra)
     cfg.lto = ui.ask_yes_no("Enable LTO in CFLAGS (experimental, slower compiles)?", False)
     cfg.hardened_flags = cfg.stage_variant == "hardened" or ui.ask_yes_no("Add hardened CFLAGS / USE (pie ssp)?", False)
     cfg.gentoo_mirrors = ui.prompt(
@@ -563,6 +562,26 @@ def _profiles(cfg: InstallConfig) -> list[tuple[str, str]]:
             (f"default/linux/{arch}/23.0/desktop/systemd", "Desktop systemd — libraries for Wayland and X"),
             (f"default/linux/{arch}/23.0/systemd", "Base systemd"),
         ]
+    return rows
+
+
+def _video_review(cfg: InstallConfig) -> str:
+    """VIDEO_CARDS value plus the display controller lspci reported."""
+    value = cfg.video_cards or "auto"
+    names = detect.gpu_devices()
+    if names:
+        return value + " — " + "; ".join(names)
+    return value
+
+
+def _use_rows() -> list[tuple[str, str]]:
+    """USE checklist rows. Hardware flags include the device found on this machine."""
+    rows: list[tuple[str, str]] = []
+    for flag, desc in catalog.USE_FLAGS:
+        note = detect.hardware_note(flag)
+        if note:
+            desc = f"{note} — {desc}"
+        rows.append((flag, desc))
     return rows
 
 
@@ -1216,7 +1235,16 @@ def _review(cfg: InstallConfig) -> None:
         ("Swap", f"{cfg.swap_mode} {cfg.swap_size_gib}G"),
         ("Init", cfg.init_system),
         ("Stage", f"{cfg.stage_level}/{cfg.install_type}/{cfg.stage_variant}"),
-        ("USE", " ".join((cfg.use_flags or "").split()[:12]) + ("…" if len((cfg.use_flags or "").split()) > 12 else "")),
+        ("USE", " ".join(cfg.extra_use) or cfg.use_flags or "dist-kernel"),
+        (
+            "Hardware",
+            "alsa "
+            + detect.hardware_note("alsa")
+            + "; wifi "
+            + detect.hardware_note("wifi")
+            + "; bluetooth "
+            + detect.hardware_note("bluetooth"),
+        ),
         ("Profile", cfg.profile),
         ("Kernel", cfg.kernel),
         ("Bootloaders", ", ".join(cfg.bootloaders) + f" (primary {cfg.bootloader})"),
@@ -1238,7 +1266,7 @@ def _review(cfg: InstallConfig) -> None:
         ),
         ("Overlays", ", ".join(cfg.overlays) or "none"),
         ("Extra packages", str(len(cfg.extra_packages))),
-        ("Video", cfg.video_cards),
+        ("Video", _video_review(cfg)),
         ("Input", cfg.input_devices or "libinput"),
         ("Binhost", f"yes ({cfg.binhost_abi})" if cfg.binhost else "no"),
         ("Dry-run", str(cfg.dry_run)),

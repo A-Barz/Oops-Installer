@@ -593,16 +593,19 @@ def paged_checklist(
                 lines.append(f"{prefix}{mark} {box} {label}")
             if not view:
                 lines.append(paint("    No matches. Press / then Enter to clear the filter.", C.YELLOW))
+            flag_w = max((len(value) for value, _desc in view), default=0)
             for i, (value, desc) in enumerate(view):
                 on = value in current
                 box = paint("[x]", C.GREEN, C.BOLD) if on else paint("[ ]", C.DIM)
                 mark = paint("▸", C.BOLD, C.GREEN) if i == cursor else " "
-                # Description first so packages/USE flags explain what they are.
-                shown = _clip(desc or value, reserve=28)
-                label = paint(shown, C.BOLD, C.GREEN) if i == cursor else paint(shown, C.WHITE)
-                atom = paint(f"({value})", C.DIM, C.PURPLE) if desc else ""
                 prefix = paint("  > ", C.BOLD, C.GREEN) if i == cursor else "    "
-                lines.append(f"{prefix}{mark} {box} {label}  {atom}".rstrip())
+                # The flag or package atom is the value. It stays at the left,
+                # in a light colour, so a dark theme does not hide it.
+                flag = paint(value.ljust(flag_w), C.BOLD, C.GREEN if on or i == cursor else C.WHITE)
+                room = max(16, width() - flag_w - 16)
+                shown = desc if len(desc) <= room else desc[: room - 1] + "…"
+                detail = paint(shown, C.WHITE) if shown else ""
+                lines.append(f"{prefix}{mark} {box} {flag}  {detail}".rstrip())
             _erase_lines(drawn)
             print("\n".join(lines))
             drawn = len(lines)
@@ -690,10 +693,9 @@ def _paged_checklist_fallback(
             print(f"    {mark} {paint('*', C.GREEN)}. {paint('Select all', C.WHITE)}")
         for i, (value, desc) in enumerate(view, start=1):
             mark = paint("[x]", C.GREEN, C.BOLD) if value in current else paint("[ ]", C.DIM)
-            shown = desc or value
             print(
-                f"    {mark} {paint(str(i), C.GREEN)}. {paint(shown, C.WHITE)}  "
-                f"{paint('(' + value + ')' if desc else '', C.DIM)}"
+                f"    {mark} {paint(str(i), C.GREEN)}. "
+                f"{paint(value, C.BOLD, C.WHITE)}  {paint(desc, C.WHITE)}"
             )
         raw = prompt("Package command", "0")
         if raw in {"", "0", "d", "done"}:
@@ -733,9 +735,34 @@ def summary_table(rows: Sequence[tuple[str, str]]) -> None:
     print(paint("  ┌" + "─" * (w - 6) + "┐", C.PURPLE))
     print(paint("  │" + " Installation summary".ljust(w - 6) + "│", C.BOLD, C.GREEN))
     print(paint("  ├" + "─" * (w - 6) + "┤", C.PURPLE))
-    label_w = max(len(k) for k, _ in rows) + 2
+    label_w = min(22, max(len(k) for k, _ in rows) + 2)
+    inner = w - 6
+    value_w = max(12, inner - label_w - 2)
     for key, value in rows:
-        line = f" {key.ljust(label_w)} {value}"
-        print(paint("  │", C.PURPLE) + paint(line[: w - 6].ljust(w - 6), C.GREEN) + paint("│", C.PURPLE))
+        text = value if value else "(none)"
+        parts: list[str] = []
+        current = ""
+        for word in text.split():
+            while len(word) > value_w:
+                if current:
+                    parts.append(current)
+                    current = ""
+                parts.append(word[:value_w])
+                word = word[value_w:]
+            if not word:
+                continue
+            piece = word if not current else current + " " + word
+            if len(piece) <= value_w:
+                current = piece
+            else:
+                if current:
+                    parts.append(current)
+                current = word
+        if current or not parts:
+            parts.append(current)
+        for index, part in enumerate(parts):
+            label = key if index == 0 else ""
+            line = f" {label.ljust(label_w)} {part}"
+            print(paint("  │", C.PURPLE) + paint(line[:inner].ljust(inner), C.GREEN) + paint("│", C.PURPLE))
     print(paint("  └" + "─" * (w - 6) + "┘", C.PURPLE))
     print()

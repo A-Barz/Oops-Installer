@@ -439,14 +439,88 @@ def has_wifi() -> bool:
 
 
 def has_sound() -> bool:
+    return bool(sound_cards())
+
+
+def sound_cards() -> list[str]:
+    """Names from /proc/asound/cards, such as 'HDA Intel PCH'."""
     cards = Path("/proc/asound/cards")
     if not cards.is_file():
-        return False
+        return []
+    found: list[str] = []
     for line in cards.read_text(errors="ignore").splitlines():
         head = line.split("[", 1)[0].strip()
-        if head.isdigit():
-            return True
-    return False
+        if not head.isdigit():
+            continue
+        name = line.split(" - ", 1)[1].strip() if " - " in line else line.strip()
+        if name and name not in found:
+            found.append(name)
+    return found
+
+
+def bluetooth_adapters() -> list[str]:
+    """Bluetooth host adapters currently visible to the live system."""
+    root = Path("/sys/class/bluetooth")
+    if not root.is_dir():
+        return []
+    found: list[str] = []
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return []
+    for entry in entries:
+        pretty = ""
+        for candidate in (entry / "name", entry / "device" / "name"):
+            try:
+                if candidate.is_file():
+                    pretty = candidate.read_text(errors="ignore").strip()
+                    break
+            except OSError:
+                continue
+        label = pretty or entry.name
+        if label and label not in found:
+            found.append(label)
+    return found
+
+
+def wifi_interfaces() -> list[str]:
+    """Wireless NIC names from sysfs."""
+    return [nic["name"] for nic in list_nics() if nic["wireless"]]
+
+
+def gpu_devices() -> list[str]:
+    """lspci display-controller names, without the bus id."""
+    if not shutil.which("lspci"):
+        return []
+    proc = subprocess.run(["lspci"], capture_output=True, text=True, check=False)
+    found: list[str] = []
+    for line in (proc.stdout or "").splitlines():
+        low = line.lower()
+        if "vga" not in low and "3d" not in low and "display" not in low:
+            continue
+        name = line
+        if ": " in name:
+            name = name.split(": ", 1)[1]
+        if ": " in name:
+            name = name.split(": ", 1)[1]
+        name = name.strip()
+        if name and name not in found:
+            found.append(name)
+    return found
+
+
+def hardware_note(flag: str) -> str:
+    """Short device text for a hardware USE flag. Never empty."""
+    if flag == "bluetooth":
+        names = bluetooth_adapters()
+        return "detected: " + ", ".join(names) if names else "no adapter found on this machine"
+    if flag == "wifi":
+        names = wifi_interfaces()
+        return "detected: " + ", ".join(names) if names else "no wireless NIC found on this machine"
+    if flag == "alsa":
+        names = sound_cards()
+        return "detected: " + ", ".join(names) if names else "no sound card found on this machine"
+    return ""
 
 
 def suggest_input_devices() -> str:
