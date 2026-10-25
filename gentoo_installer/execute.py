@@ -947,6 +947,135 @@ def _mount_tree(
         _mount_if_needed(runner, devices["boot"], root + "/boot", fstype="ext4")
 
 
+# Public Gentoo mirrors. distfiles.gentoo.org is the handbook default.
+# A wget status of 8 is an HTTP error (404 and other 4xx/5xx). The stage
+# download and the chroot emerge wrapper both walk this list after a 404.
+GENTOO_MIRROR_BASES = [
+    "https://distfiles.gentoo.org",
+    "https://gentoo.osuosl.org",
+    "https://mirrors.kernel.org/gentoo",
+    "https://mirror.leaseweb.com/gentoo",
+    "https://ftp.fau.de/gentoo",
+    "https://mirror.csclub.uwaterloo.ca/gentoo-distfiles",
+    "https://mirrors.mit.edu/gentoo-distfiles",
+    "https://ftp.jaist.ac.jp/pub/Linux/Gentoo",
+    "https://mirrors.tuna.tsinghua.edu.cn/gentoo",
+    "https://ftp.halifax.rwth-aachen.de/gentoo",
+]
+
+
+def _mirror_bases(cfg: InstallConfig) -> list[str]:
+    """User mirror first, then the public list, with duplicates removed."""
+    ordered: list[str] = []
+    for raw in (cfg.gentoo_mirrors or "").split():
+        base = raw.strip().rstrip("/")
+        if base and base not in ordered:
+            ordered.append(base)
+    for base in GENTOO_MIRROR_BASES:
+        if base not in ordered:
+            ordered.append(base)
+    return ordered
+
+
+def _stage_relpath(text: str) -> str:
+    """Relative tarball path from a latest-<flavor>.txt pointer, or ''."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("-"):
+            continue
+        if ".tar." in stripped and "stage" in stripped:
+            return stripped.split()[0]
+    return ""
+
+
+def _wget(runner: Runner, dest: str, url: str, *, timeout: int = 60, tries: int = 2) -> int:
+    """Download url to dest. Return wget's status. Non-zero removes a partial file."""
+    if runner.dry_run:
+        return 0
+    proc = runner.shell(
+        f"wget --timeout={timeout} --tries={tries} -O {shlex.quote(dest)} {shlex.quote(url)}",
+        check=False,
+    )
+    if proc.returncode != 0 or not Path(dest).is_file() or Path(dest).stat().st_size == 0:
+        runner.shell(f"rm -f {shlex.quote(dest)}", check=False)
+        return proc.returncode or 1
+    return 0
+
+
+def _download_trying_mirrors(
+    runner: Runner,
+    bases: list[str],
+    relpath: str,
+    dest: str,
+    *,
+    timeout: int = 120,
+) -> str:
+    """Save relpath to dest. Return the mirror base that served it.
+
+    wget status 8 is the HTTP error emerge and the stage fetch both see as 404.
+    Any other failure also moves on, so one dead mirror does not stop the install.
+    """
+    relpath = relpath.lstrip("/")
+    last = 1
+    saw_404 = False
+    for base in bases:
+        url = f"{base}/{relpath}"
+        ui.info(f"Fetching {url}")
+        last = _wget(runner, dest, url, timeout=timeout)
+        if last == 0:
+            ui.ok(f"Downloaded from {base}")
+            return base
+        if last == 8:
+            saw_404 = True
+            ui.warn(f"HTTP 404 from {base}; checking the next mirror")
+        else:
+            ui.warn(f"{base} did not serve that file (wget {last}); checking the next mirror")
+    name = relpath.split("/")[-1]
+    if saw_404:
+        raise SystemExit(f"HTTP 404 for {name} on every Gentoo mirror that was checked.")
+    raise SystemExit(f"Could not download {name} (last wget status {last}).")
+
+
+def _resolve_stage(cfg: InstallConfig, runner: Runner, root: str, flavor: str) -> tuple[str, str, str]:
+    """Return (tarball filename, pointer-relative path, mirror that listed it)."""
+    bases = _mirror_bases(cfg)
+    if cfg.dry_run:
+        rel = f"DATE/{flavor}-DATE.tar.xz"
+        return f"{flavor}-DATE.tar.xz", rel, bases[0]
+    pointer = f"{root}/latest-stage.txt"
+    arch = cfg.architecture
+    saw_404 = False
+    for base in bases:
+        ui.info(f"Resolving latest {flavor} from {base}")
+        code = _wget(
+            runner,
+            pointer,
+            f"{base}/releases/{arch}/autobuilds/latest-{flavor}.txt",
+            timeout=30,
+            tries=1,
+        )
+        if code == 8:
+            saw_404 = True
+            ui.warn(f"HTTP 404 from {base}; checking the next mirror")
+            continue
+        if code != 0:
+            ui.warn(f"{base} did not answer (wget {code}); checking the next mirror")
+            continue
+        rel = _stage_relpath(Path(pointer).read_text(encoding="utf-8", errors="ignore"))
+        if not rel:
+            ui.warn(f"{base} did not list a {flavor} tarball; checking the next mirror")
+            continue
+        return rel.split("/")[-1], rel, base
+    if saw_404:
+        raise SystemExit(
+            f"HTTP 404 for latest-{flavor}.txt on every Gentoo mirror that was checked. "
+            "The installer moved to the next mirror after each 404. "
+            "Public autobuilds provide stage3 files. Stage1 and stage2 tarballs are not on that "
+            "mirror network, so those names answer 404 on every mirror."
+        )
+    raise SystemExit(f"Could not resolve latest-{flavor}.txt from any Gentoo mirror.")
+
+
 def stage_flavor(cfg: InstallConfig) -> str:
     """Name used in latest-<flavor>.txt on distfiles.gentoo.org."""
     arch = cfg.architecture
@@ -976,39 +1105,33 @@ def stage3_flavor(cfg: InstallConfig) -> str:
 
 
 def phase_stage3(cfg: InstallConfig, runner: Runner, root: str) -> None:
-    """Download the current stage3, optionally verify SHA256/GPG, extract with xattrs."""
+    """Download the current stage tarball, optionally verify GPG, extract with xattrs.
+
+    A 404 on latest-<flavor>.txt or the tarball itself tries the next mirror
+    before the install stops. Stage2 names 404 on distfiles.gentoo.org because
+    Gentoo does not publish them; the same check still runs on the other mirrors.
+    """
     if cfg.resume and (Path(root) / "etc" / "portage").is_dir():
         ui.info("Resume: stage tarball already extracted; skipping download.")
         return
     flavor = stage_flavor(cfg)
-    latest = f"https://distfiles.gentoo.org/releases/{cfg.architecture}/autobuilds/latest-{flavor}.txt"
-    ui.info(f"Resolving latest {flavor}")
-    pointer = f"{root}/latest-stage.txt"
     _prepare_mountpoint(runner, root)
-    runner.shell(f"wget -O {shlex.quote(pointer)} {shlex.quote(latest)}")
-    if cfg.dry_run:
-        tarball = f"{flavor}-DATE.tar.xz"
-    else:
-        text = Path(pointer).read_text(encoding="utf-8", errors="ignore")
-        rel = ""
-        for line in text.splitlines():
-            if line.startswith("#") or line.startswith("-----"):
-                continue
-            if ".tar." in line and "stage" in line:
-                rel = line.split()[0]
-                break
-        if not rel:
-            raise SystemExit(
-                f"Could not parse stage pointer from {latest}. "
-                f"Official autobuilds may not publish {flavor}; try stage3."
-            )
-        tarball = rel.split("/")[-1]
-        url = f"https://distfiles.gentoo.org/releases/{cfg.architecture}/autobuilds/{rel}"
-        runner.shell(f"wget -O {shlex.quote(root + '/' + tarball)} {shlex.quote(url)}")
+    tarball, rel, used = _resolve_stage(cfg, runner, root, flavor)
+    if not cfg.dry_run:
+        bases = _mirror_bases(cfg)
+        ordered = [used] + [base for base in bases if base != used]
+        arch_rel = f"releases/{cfg.architecture}/autobuilds/{rel}"
+        _download_trying_mirrors(runner, ordered, arch_rel, root + "/" + tarball)
         if cfg.verify_stage:
             # .sha256 is often a PGP-clearsigned file, not raw sha256sum input.
             # The detached .asc on the tarball is the check that must succeed.
-            runner.shell(f"wget -O {shlex.quote(root + '/' + tarball + '.asc')} {shlex.quote(url + '.asc')}")
+            _download_trying_mirrors(
+                runner,
+                ordered,
+                arch_rel + ".asc",
+                root + "/" + tarball + ".asc",
+                timeout=60,
+            )
             runner.shell(
                 "gpg --keyserver hkps://keys.gentoo.org --recv-keys "
                 "13EBBDBEDE7A12775DFDB1BABB572E0E2D182910 D99EAC7379A850BCE47DA5F29E3146ED0DF79DC3 || true"
@@ -1022,7 +1145,7 @@ def phase_stage3(cfg: InstallConfig, runner: Runner, root: str) -> None:
         f"tar xpvf {shlex.quote(root + '/' + tarball)} {skip_old}"
         f"--xattrs-include='*.*' --numeric-owner -C {shlex.quote(root)}"
     )
-    ui.ok("Stage3 extracted")
+    ui.ok("Stage tarball extracted")
 
 
 def phase_chroot_mounts(cfg: InstallConfig, runner: Runner, root: str) -> None:
@@ -1707,7 +1830,247 @@ append_once() {{
 """
 
 
-def _source_setup_script() -> str:
+def _mirror_retry_bash(cfg: InstallConfig) -> str:
+    """Install a chroot emerge wrapper that switches mirrors after HTTP 404.
+
+    The wrapper sits in front of emerge for the rest of this install. A 404 in
+    the fetch log is probed on the next mirror; a mirror that has the file
+    becomes GENTOO_MIRRORS and the same emerge runs again. A missing binpkg
+    on every mirror drops --getbinpkg so the next try builds from source.
+    """
+    quoted = " ".join(shlex.quote(base) for base in _mirror_bases(cfg))
+    script = r"""
+# HTTP 404 during emerge: probe the next mirror for that file and retry.
+install_fetch_retry() {
+  mkdir -p /tmp/gentoo-installer-bin
+  cat > /tmp/gentoo-installer-bin/retry404 << 'GENTOO_INSTALLER_RETRY404'
+#!/bin/bash
+# Run a command. When its output shows HTTP 404, check another Gentoo mirror
+# for the missing file and run the command again.
+set +e
+MIRROR_CANDIDATES=(@@MIRRORS@@)
+
+current_mirror_line() {
+  grep -h '^GENTOO_MIRRORS=' /etc/portage/make.conf /etc/portage/make.conf/* /etc/make.conf 2>/dev/null | head -n 1
+}
+
+rel_from_url() {
+  local url="$1"
+  local base
+  for base in "${MIRROR_CANDIDATES[@]}"; do
+    case "$url" in
+      "$base"/*)
+        printf '%s\n' "${url#"$base"/}"
+        return 0
+        ;;
+    esac
+  done
+  printf '%s\n' "$url" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+/##'
+}
+
+failed_urls() {
+  grep -E '404 Not Found|ERROR 404:|Error 404:|404 Client Error|HTTP Error 404|HTTP/[0-9.]+ 404' -B 12 "$1" 2>/dev/null \
+    | grep -oE 'https?://[^[:space:]]+' \
+    | sed -E 's/[),.;]+$//' \
+    | awk '!seen[$0]++'
+}
+
+probe_url() {
+  local url="$1"
+  if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+    echo ">> this stage has no wget or curl; switching mirrors without a probe" >&2
+    return 0
+  fi
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsIL --max-time 25 -o /dev/null "$url" && return 0
+    curl -fsL --max-time 25 -r 0-0 -o /dev/null "$url" && return 0
+    return 1
+  fi
+  wget -q --spider --timeout=25 --tries=1 "$url" && return 0
+  wget -q --timeout=25 --tries=1 --header="Range: bytes=0-0" -O /dev/null "$url" && return 0
+  return 1
+}
+
+make_conf_file() {
+  if [ -d /etc/portage/make.conf ]; then
+    printf '%s\n' /etc/portage/make.conf/99gentoo-live-installer
+  else
+    printf '%s\n' /etc/portage/make.conf
+  fi
+}
+
+set_gentoo_mirrors() {
+  local value="$*"
+  local found=0
+  local conf
+  for conf in /etc/portage/make.conf /etc/portage/make.conf/* /etc/make.conf; do
+    [ -f "$conf" ] || continue
+    if grep -q '^GENTOO_MIRRORS=' "$conf"; then
+      sed -i "s#^GENTOO_MIRRORS=.*#GENTOO_MIRRORS=\"${value}\"#" "$conf"
+      found=1
+    fi
+  done
+  if [ "$found" -eq 0 ]; then
+    conf=$(make_conf_file)
+    mkdir -p "$(dirname "$conf")"
+    echo "GENTOO_MIRRORS=\"${value}\"" >> "$conf"
+  fi
+  echo ">> GENTOO_MIRRORS is now ${value}"
+}
+
+update_binhost() {
+  local newbase="$1"
+  local conf=/etc/portage/binrepos.conf/gentoobinhost.conf
+  local old suffix="" base
+  [ -f "$conf" ] || return 0
+  old=$(awk '/^sync-uri/{print $3; exit}' "$conf")
+  [ -n "$old" ] || return 0
+  for base in "${MIRROR_CANDIDATES[@]}"; do
+    case "$old" in
+      "$base"/*)
+        suffix="${old#"$base"}"
+        break
+        ;;
+    esac
+  done
+  if [ -z "$suffix" ]; then
+    suffix=$(printf '%s\n' "$old" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+##')
+  fi
+  sed -i "s#^sync-uri = .*#sync-uri = ${newbase}${suffix}#" "$conf"
+  echo ">> binhost mirror is now ${newbase}${suffix}"
+}
+
+drop_binpkg_opts() {
+  echo ">> no mirror has this binary package; further emerges use source" >&2
+  local conf
+  for conf in /etc/portage/make.conf /etc/portage/make.conf/*; do
+    [ -f "$conf" ] || continue
+    sed -i -e 's/ --getbinpkg / /g' -e 's/ --usepkg / /g' "$conf" || true
+  done
+  touch /tmp/gentoo-installer-binpkg-404-fallback
+}
+
+switch_mirror_for_404() {
+  local log="$1"
+  local urls url rel="" pick="" base missed="" skip=""
+  urls=$(failed_urls "$log")
+  [ -n "$urls" ] || return 1
+  for url in $urls; do
+    rel=$(rel_from_url "$url")
+    case "$rel" in
+      *binpackages*) continue ;;
+    esac
+    break
+  done
+  if [ -z "$rel" ]; then
+    url=$(printf '%s\n' "$urls" | head -n 1)
+    rel=$(rel_from_url "$url")
+  fi
+  [ -n "$rel" ] || return 1
+  for url in $urls; do
+    for base in "${MIRROR_CANDIDATES[@]}"; do
+      case "$url" in
+        "$base"/*) skip="$skip $base" ;;
+      esac
+    done
+  done
+  for base in "${MIRROR_CANDIDATES[@]}"; do
+    case " $skip " in
+      *" $base "*) continue ;;
+    esac
+    echo ">> checking ${base}/${rel}" >&2
+    if probe_url "${base}/${rel}"; then
+      pick=$base
+      break
+    fi
+    echo ">> ${base} returned 404 for that file" >&2
+    missed="$missed $base"
+  done
+  if [ -z "$pick" ]; then
+    case "$rel" in
+      *binpackages*)
+        if [ ! -f /tmp/gentoo-installer-binpkg-404-fallback ]; then
+          drop_binpkg_opts
+          return 0
+        fi
+        ;;
+    esac
+    return 1
+  fi
+  local rest=""
+  for base in "${MIRROR_CANDIDATES[@]}"; do
+    [ "$base" = "$pick" ] && continue
+    case " $skip $missed " in
+      *" $base "*) continue ;;
+    esac
+    rest="$rest $base"
+  done
+  set_gentoo_mirrors $pick $rest
+  case "$rel" in
+    *binpackages*) update_binhost "$pick" ;;
+  esac
+  return 0
+}
+
+cmd="$1"
+shift
+if [ "$cmd" = "emerge" ]; then
+  if [ -x /usr/bin/emerge ]; then
+    cmd=/usr/bin/emerge
+  elif [ -x /usr/sbin/emerge ]; then
+    cmd=/usr/sbin/emerge
+  fi
+fi
+log=/tmp/gentoo-installer-fetch.log
+attempt=0
+while [ "$attempt" -lt 8 ]; do
+  attempt=$((attempt + 1))
+  : > "$log"
+  if command -v tee >/dev/null 2>&1; then
+    "$cmd" "$@" 2>&1 | tee "$log"
+    status=${PIPESTATUS[0]}
+  else
+    "$cmd" "$@" >"$log" 2>&1
+    status=$?
+    cat "$log"
+  fi
+  if [ "$status" -eq 0 ]; then
+    exit 0
+  fi
+  if ! grep -E -q '404 Not Found|ERROR 404:|Error 404:|404 Client Error|HTTP Error 404|HTTP/[0-9.]+ 404' "$log"; then
+    exit "$status"
+  fi
+  echo ">> HTTP 404 while fetching; checking another mirror" >&2
+  before=$(current_mirror_line)
+  if ! switch_mirror_for_404 "$log"; then
+    echo ">> every mirror that was checked returned 404 for that file" >&2
+    exit "$status"
+  fi
+  after=$(current_mirror_line)
+  if [ "$before" = "$after" ] && [ -f /tmp/gentoo-installer-binpkg-404-fallback ]; then
+    echo ">> retrying emerge from source after the mirror 404" >&2
+  else
+    echo ">> retrying with the new mirror" >&2
+  fi
+done
+echo ">> still HTTP 404 after checking the mirror list" >&2
+exit 1
+GENTOO_INSTALLER_RETRY404
+  chmod 755 /tmp/gentoo-installer-bin/retry404
+  cat > /tmp/gentoo-installer-bin/emerge << 'GENTOO_INSTALLER_EMERGEWRAP'
+#!/bin/bash
+exec /tmp/gentoo-installer-bin/retry404 emerge "$@"
+GENTOO_INSTALLER_EMERGEWRAP
+  chmod 755 /tmp/gentoo-installer-bin/emerge
+  export PATH="/tmp/gentoo-installer-bin:${PATH}"
+  hash -r
+}
+install_fetch_retry
+"""
+    return script.replace("@@MIRRORS@@", quoted)
+
+
+def _source_setup_script(cfg: InstallConfig) -> str:
     """Bash helpers: refuse v3 binpkgs on older CPUs, and rebuild after SIGILL.
 
     Exit 132 is the shell's report for "Illegal instruction". Official
@@ -1870,7 +2233,7 @@ rebuild_initramfs() {
     dracut --force --kver "$kver" || echo ">> dracut failed for $kver" >&2
   done
 }
-"""
+""" + _mirror_retry_bash(cfg)
 
 
 def _chosen_plymouth_themes(cfg: InstallConfig) -> list[str]:
@@ -2490,7 +2853,7 @@ EOF
         else ""
     )
     sync = {
-        "webrsync": "emerge-webrsync || emerge --sync",
+        "webrsync": "retry404 emerge-webrsync || retry404 emerge --sync",
         "rsync": "emerge --sync",
         "git": """
 mkdir -p /etc/portage/repos.conf
@@ -2646,7 +3009,7 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
     fetch_line = " ".join(dict.fromkeys(fetch_atoms))
     if all_extra:
         fetch_line = f"{fetch_line} {all_extra}"
-    source_setup = _source_setup_script()
+    source_setup = _source_setup_script(cfg)
     resume_prelude = _resume_prelude(cfg)
 
     dm = _resolved_dm(cfg)
@@ -2889,12 +3252,14 @@ EOF
     if level == "stage1":
         bootstrap = """
 echo ">> stage1 bootstrap (seed toolchain, then @system)"
+echo ">> an HTTP 404 during this emerge checks the next mirror and retries"
 emerge --ask=n --oneshot sys-devel/binutils sys-devel/gcc sys-libs/glibc sys-devel/make || true
 emerge --ask=n --emptytree @system || true
 """
     elif level == "stage2":
         bootstrap = """
 echo ">> stage2 bootstrap (@system)"
+echo ">> an HTTP 404 during this emerge checks the next mirror and retries"
 emerge --ask=n --emptytree @system || true
 """
 

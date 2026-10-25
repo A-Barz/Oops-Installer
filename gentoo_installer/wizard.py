@@ -426,6 +426,9 @@ def _stage(cfg: InstallConfig) -> None:
     if cfg.stage_level != "stage3":
         ui.warn(f"{cfg.stage_level} is experimental on official autobuilds and can take many extra hours.")
         ui.warn("Desktop/LLVM tarballs usually exist only as stage3. Minimal flavour will be used.")
+        ui.info(
+            "If the stage file or emerge returns HTTP 404, the installer checks the next Gentoo mirror and retries."
+        )
         cfg.install_type = "server"
     cfg.init_system = ui.menu(
         "Init system",
@@ -537,6 +540,9 @@ def _base(cfg: InstallConfig) -> None:
     cfg.use_flags = " ".join(extra)
     cfg.lto = ui.ask_yes_no("Enable LTO in CFLAGS (experimental, slower compiles)?", False)
     cfg.hardened_flags = cfg.stage_variant == "hardened" or ui.ask_yes_no("Add hardened CFLAGS / USE (pie ssp)?", False)
+    ui.info(
+        "If emerge gets HTTP 404 from the chosen mirror, the installer checks another mirror and retries that emerge."
+    )
     cfg.gentoo_mirrors = ui.prompt(
         "GENTOO_MIRRORS URL (empty = speed-test mirrors with mirrorselect)",
         cfg.gentoo_mirrors,
