@@ -22,6 +22,10 @@ from typing import Sequence
 from . import ui
 
 
+class _PtyUnavailable(Exception):
+    """openpty failed before a child was started. run_live falls back to run()."""
+
+
 def _safe_cwd(preferred: str | None) -> str:
     """Directory for a child process.
 
@@ -126,8 +130,8 @@ class Runner:
             return subprocess.CompletedProcess(list(argv), 0, "", "")
         try:
             return self._run_pty(list(argv), on_line, check)
-        except ImportError:
-            ui.warn("No pseudo-terminal; the install percent will not follow emerge.")
+        except (ImportError, _PtyUnavailable) as exc:
+            ui.warn(f"No pseudo-terminal ({exc}); the install percent will not follow emerge.")
             return self.run(argv, check=check)
 
     def _portage_env(self, extra: dict | None = None) -> dict:
@@ -143,10 +147,14 @@ class Runner:
         import pty
         import select
 
-        master, slave = pty.openpty()
+        try:
+            master, slave = pty.openpty()
+        except OSError as exc:
+            # A later read error must not take this path: the child would
+            # already be running, and run() would start it a second time.
+            raise _PtyUnavailable(str(exc)) from exc
         self._copy_winsize(slave)
         env = self._portage_env()
-        env.pop("USE", None)
         try:
             proc = subprocess.Popen(
                 argv,
@@ -165,32 +173,16 @@ class Runner:
         buf = b""
         try:
             while True:
-                try:
-                    ready, _, _ = select.select([master], [], [], 0.4)
-                except InterruptedError:
-                    continue
-                if ready:
-                    try:
-                        chunk = os.read(master, 65536)
-                    except OSError:
-                        chunk = b""
-                    if not chunk:
-                        break
-                    self._write_live(chunk)
-                    buf = self._drain_live(buf + chunk, on_line)
-                    continue
-                if proc.poll() is not None:
+                buf, eof = self._read_ready(master, proc, buf, on_line, select, idle_means_exit=False)
+                if eof:
+                    break
+            # The script has exited. A grandchild holding the slave must not
+            # block the installer on a read that never returns.
+            while True:
+                buf, eof = self._read_ready(master, proc, buf, on_line, select, idle_means_exit=True)
+                if eof:
                     break
         finally:
-            while True:
-                try:
-                    chunk = os.read(master, 65536)
-                except OSError:
-                    break
-                if not chunk:
-                    break
-                self._write_live(chunk)
-                buf = self._drain_live(buf + chunk, on_line)
             os.close(master)
             rc = proc.wait()
         if buf.strip():
@@ -199,6 +191,24 @@ class Runner:
             ui.error(f"Command failed ({rc}): {' '.join(argv)}")
             sys.exit(rc)
         return subprocess.CompletedProcess(argv, rc, "", "")
+
+    def _read_ready(self, master: int, proc: subprocess.Popen, buf: bytes, on_line, select, idle_means_exit: bool) -> tuple[bytes, bool]:
+        try:
+            ready, _, _ = select.select([master], [], [], 0.5 if idle_means_exit else 0.4)
+        except InterruptedError:
+            return buf, False
+        if not ready:
+            if idle_means_exit or proc.poll() is not None:
+                return buf, True
+            return buf, False
+        try:
+            chunk = os.read(master, 65536)
+        except OSError:
+            return buf, True
+        if not chunk:
+            return buf, True
+        self._write_live(chunk)
+        return self._drain_live(buf + chunk, on_line), False
 
     def _copy_winsize(self, slave: int) -> None:
         try:
@@ -212,13 +222,14 @@ class Runner:
             return
 
     def _write_live(self, chunk: bytes) -> None:
-        try:
-            sys.stdout.buffer.write(chunk)
-            sys.stdout.buffer.flush()
-        except Exception:
-            text = chunk.decode("utf-8", "replace")
-            sys.stdout.write(text)
-            sys.stdout.flush()
+        with ui.OUTPUT_LOCK:
+            try:
+                sys.stdout.buffer.write(chunk)
+                sys.stdout.buffer.flush()
+            except Exception:
+                text = chunk.decode("utf-8", "replace")
+                sys.stdout.write(text)
+                sys.stdout.flush()
 
     def _drain_live(self, buf: bytes, on_line) -> bytes:
         while True:
@@ -236,7 +247,21 @@ class Runner:
         text = raw.decode("utf-8", "replace").strip("\x00")
         if not text.strip():
             return
+        self._log_live_line(text)
         on_line(text)
+
+    def _log_live_line(self, text: str) -> None:
+        """Keep the failure record. Compiler chatter would fill a live-USB tmpfs."""
+        sample = text.lower()
+        if (
+            ">>" in text
+            or "jobs:" in sample
+            or "installing (" in sample
+            or "error" in sample
+            or "failed" in sample
+            or "died" in sample
+        ):
+            self.log(text[:500])
 
 
 class State:

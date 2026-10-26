@@ -23,8 +23,14 @@ import os
 import re
 import shutil
 import sys
+import threading
 import time
 from typing import Iterable, Sequence
+
+from .estimate import ProgressPlan, atom_key
+
+# Percent lines and the live chroot transcript share stdout.
+OUTPUT_LOCK = threading.RLock()
 
 
 class C:
@@ -170,7 +176,9 @@ def install_wait_notice() -> None:
 def progress_percent(percent: int) -> None:
     """One line with the install percent. Command output above it stays on screen."""
     percent = max(0, min(100, int(percent)))
-    print("  " + paint(f"{percent}%", C.BOLD, C.GREEN), flush=True)
+    line = "  " + paint(f"{percent}%", C.BOLD, C.GREEN)
+    with OUTPUT_LOCK:
+        print(line, flush=True)
 
 
 def congratulate() -> None:
@@ -184,27 +192,29 @@ def congratulate() -> None:
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _JOBS_LINE = re.compile(r"Jobs:\s*(\d+)\s+of\s+(\d+)\s+complete")
 _INSTALLING_LINE = re.compile(r"Installing\s+\((\d+)\s+of\s+(\d+)\)")
+# emerge_one prints ">> emerge cat/pkg". Failure lines start the same way
+# and must not steal the following package name.
+_EMERGE_ATOM = re.compile(r"^>> emerge (\S+/\S+)\s*$")
+_INSTALL_ATOM = re.compile(r"^>> installing (\S+/\S+)\s*$")
 
 
 class InstallProgress:
     """Print the install percent while host commands run.
 
-    Before the chroot, the number stays in a small band. Once emerge is
-    running it follows Portage's "Jobs: N of M complete" (and Installing
-    lines), not the wall clock. A short time estimate used to reach the
-    high nineties while emerge was still on an early package.
+    The slices are the minute budget from estimate.progress_plan. @world
+    follows that emerge's finished/total counter. Each later package follows
+    the counter of its own emerge, weighted by the same minutes as the
+    spoken estimate. The chroot's closing line does not add a leftover slice.
     """
 
     _PRE_PHASES = ("host_packages", "network", "disks", "stage3", "chroot_mounts")
 
-    def __init__(self, weights: tuple[int, int, int]) -> None:
-        import threading
-
-        early, world, after = weights
-        self.early = max(1, int(early))
-        self.world = max(1, int(world))
-        self.after = max(1, int(after))
-        self._threading = threading
+    def __init__(self, plan: ProgressPlan) -> None:
+        self.early = max(1, int(plan.early))
+        self.world = max(1, int(plan.world))
+        self._atoms = dict(plan.atoms)
+        self._alongside = max(0, int(plan.alongside))
+        self.after = max(1, sum(self._atoms.values()) + self._alongside)
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -214,29 +224,23 @@ class InstallProgress:
         self._floor = 0
         self._phase = ""
         self._world_ratio = 0.0
-        self._after_done = 0
-        self._after_seen = 0
-        self._after_cur_done = 0
-        self._after_cur_total = 0
+        self._atom_ratio: dict[str, float] = {}
+        self._open_key: str | None = None
 
     def start(self) -> None:
-        import time
-
         self._started = time.monotonic()
         self.tick()
-        self._thread = self._threading.Thread(target=self._loop, name="install-progress", daemon=True)
+        self._thread = threading.Thread(target=self._loop, name="install-progress", daemon=True)
         self._thread.start()
 
     def enter_chroot(self) -> None:
-        import time
-
         with self._lock:
             self._chroot_at = time.monotonic()
             self._phase = "early"
         self._publish()
 
     def phase_done(self, name: str) -> None:
-        """Host phase finished. Those five steps share the first 5%."""
+        """Host phase finished. Those five steps share the opening band."""
         if name not in self._PRE_PHASES:
             return
         with self._lock:
@@ -250,36 +254,38 @@ class InstallProgress:
         if not clean:
             return
         with self._lock:
+            emerged = _EMERGE_ATOM.match(clean)
+            installing = _INSTALL_ATOM.match(clean)
             if clean.endswith(">> emerge @world"):
                 self._phase = "world"
-            elif ">> emerge selected packages" in clean or ">> install tools before dracut" in clean or clean.endswith(">> emerge kernel"):
-                self._close_after_emerge()
-                self._phase = "after"
-            elif ">> fetch kernel and package sources" in clean:
-                if self._phase == "after":
-                    self._close_after_emerge()
-                self._phase = "fetch"
-            elif "Chroot configuration complete." in clean:
-                self._close_after_emerge()
-                if self._after_seen > 0:
-                    self.after = self._after_seen
-                if self._world_ratio > 0:
-                    self._world_ratio = 1.0
-                self._phase = "tail"
-            elif "Calculating dependencies" in clean and self._phase == "after" and self._after_cur_total:
-                # A new emerge is starting. Spinner redraws happen before any
-                # package is counted, so ignore those.
-                self._close_after_emerge()
-            elif "Calculating dependencies" in clean and self._phase == "world" and self._world_ratio > 0:
-                # Source rebuild after a failed @world starts its own counter.
+                self._open_key = None
+            elif "@world" in clean and "rebuilding from source" in clean:
+                # The source rebuild starts its own counter. A package build
+                # log that mentions "Calculating dependencies" must not.
                 self._world_ratio = 0.0
+            elif ">> fetch kernel and package sources" in clean:
+                self._phase = "fetch"
+                self._open_key = None
+            elif "Chroot configuration complete." in clean:
+                self._phase = "tail"
+            elif (
+                emerged
+                or installing
+                or clean.endswith(">> emerge kernel")
+                or ">> emerge selected packages" in clean
+                or ">> install tools before dracut" in clean
+            ):
+                self._phase = "after"
+                if emerged:
+                    self._open_known(emerged.group(1))
+                elif installing:
+                    self._open_known(installing.group(1))
             else:
                 match = _JOBS_LINE.search(clean) or _INSTALLING_LINE.search(clean)
                 if match:
-                    done = int(match.group(1))
                     total = int(match.group(2))
                     if total > 0:
-                        self._note_jobs(done, total)
+                        self._note_jobs(int(match.group(1)), total)
         self._publish()
 
     def tick(self) -> None:
@@ -299,14 +305,16 @@ class InstallProgress:
             self._thread = None
 
     def snapshot(self) -> int:
-        """Current percent, 0–96 until finish() prints 100."""
-        import time
+        """Current percent, 0–96 until finish() prints 100.
 
+        The number on screen never goes backwards; snapshot() itself can,
+        and _publish keeps the higher value.
+        """
         now = time.monotonic()
-        if self._phase in {"world", "after", "tail"}:
+        if self._phase in {"world", "after", "fetch", "tail"}:
             return self._from_units()
         if self._phase:
-            # Sync and the fetch-only emerge are not the long package build.
+            # Sync is not the long package build.
             elapsed = now - self._chroot_at if self._chroot_at else 0.0
             return min(8, self._floor + int(elapsed / (20 * 60) * 3))
         elapsed = now - self._started if self._started else 0.0
@@ -318,27 +326,29 @@ class InstallProgress:
         return min(96, int(done / total * 96))
 
     def _after_ratio(self) -> float:
-        done = self._after_done + self._after_cur_done
-        denom = max(self.after, self._after_seen + max(self._after_cur_total, self._after_cur_done))
-        return min(1.0, done / denom)
+        atom_sum = sum(self._atoms.values())
+        if atom_sum <= 0:
+            return 0.0
+        done = sum(minutes * self._atom_ratio.get(key, 0.0) for key, minutes in self._atoms.items())
+        return min(1.0, done / atom_sum)
+
+    def _open_known(self, atom: str) -> None:
+        key = atom_key(atom)
+        # Unknown emerges (sudo, dbus, a retry of a package already counted)
+        # must not invent weight or the bar fills before the long packages.
+        self._open_key = key if key in self._atoms else None
 
     def _note_jobs(self, done: int, total: int) -> None:
         done = max(0, min(done, total))
+        ratio = done / total
         if self._phase == "world":
-            self._world_ratio = max(self._world_ratio, done / total)
+            self._world_ratio = max(self._world_ratio, ratio)
             return
-        if self._phase != "after":
+        if self._phase != "after" or not self._open_key:
             return
-        if self._after_cur_total not in (0, total):
-            self._close_after_emerge()
-        self._after_cur_total = total
-        self._after_cur_done = max(self._after_cur_done, done)
-
-    def _close_after_emerge(self) -> None:
-        self._after_done += self._after_cur_done
-        self._after_seen += self._after_cur_total
-        self._after_cur_done = 0
-        self._after_cur_total = 0
+        current = self._atom_ratio.get(self._open_key, 0.0)
+        if ratio > current:
+            self._atom_ratio[self._open_key] = ratio
 
     def _publish(self) -> None:
         with self._lock:
@@ -348,6 +358,8 @@ class InstallProgress:
             if percent == self._shown:
                 return
             self._shown = percent
+        if not self._started:
+            return
         try:
             progress_percent(percent)
         except Exception:

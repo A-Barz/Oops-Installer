@@ -26,7 +26,7 @@ from pathlib import Path
 
 from . import catalog, detect, ui
 from .config import InstallConfig, part_name
-from .estimate import estimate_minutes, format_duration, progress_weights
+from .estimate import estimate_minutes, format_duration, progress_plan
 from .rev import INSTALLER_REV
 from .runner import Runner, State
 
@@ -105,7 +105,7 @@ def execute(cfg: InstallConfig) -> None:
 
     minutes = estimate_minutes(cfg)
     ui.ok(f"Estimated install time: {format_duration(minutes)}.")
-    progress = None if cfg.dry_run else ui.InstallProgress(progress_weights(cfg))
+    progress = None if cfg.dry_run else ui.InstallProgress(progress_plan(cfg))
     phases = [
         ("host_packages", lambda: phase_host(cfg, runner)),
         ("network", lambda: phase_network(cfg, runner)),
@@ -1257,8 +1257,9 @@ def phase_chroot(
     # Handbook + wiki "Installation alternatives": LiveCDs leak a messy env.
     # Never bash --login / never source /etc/profile in the installer process.
     chroot_argv = _chroot_env_argv("chroot", root, "/bin/bash", "/root/chroot-install.sh")
-    # Dry-run returned above. A real install always has a progress tracker.
-    assert progress is not None
+    # Dry-run returned above. python -O strips assert, so check it outright.
+    if progress is None:
+        raise RuntimeError("phase_chroot on a real install requires a progress tracker.")
     progress.enter_chroot()
     runner.run_live(chroot_argv, progress.feed)
     if secrets.exists():

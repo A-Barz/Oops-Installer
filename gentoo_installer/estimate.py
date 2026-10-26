@@ -2,9 +2,12 @@
 
 The number is a planning figure for a typical home link and a desktop-stage
 binhost. Source builds and a few heavy packages stretch it. It is not a promise.
+The install percent uses the same minute split.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 from .config import InstallConfig
 
@@ -72,107 +75,162 @@ def format_remaining(minutes: int) -> str:
     return f"{mins}m left"
 
 
-def _atom_key(atom: str) -> str:
-    """Category/package, without a slot, overlay, or version."""
-    bare = atom.split("::", 1)[0]
-    return bare.split(":", 1)[0] if bare.count("/") == 1 and ":" in bare else bare
+def atom_key(atom: str) -> str:
+    """Category/package, keeping a slot only when the heavy table lists it.
+
+    sys-fs/fuse:0 stays distinct from sys-fs/fuse when the table has an
+    opinion. Otherwise a slot is the same package.
+    """
+    slotted = atom.split("::", 1)[0].strip()
+    if slotted in _HEAVY_MINUTES:
+        return slotted
+    return slotted.split(":", 1)[0]
 
 
-def progress_weights(cfg: InstallConfig) -> tuple[int, int, int]:
-    """Relative sizes of the early, @world, and later-package slices.
+def _minutes_for_atom(cfg: InstallConfig, key: str) -> int:
+    binary = bool(cfg.binhost)
+    pair = _HEAVY_MINUTES.get(key)
+    if pair:
+        return pair[0] if binary else pair[1]
+    if key.startswith("www-client/") and not key.endswith("-bin"):
+        return 30 if binary else 90
+    return _LIGHT_BIN if binary else _LIGHT_SOURCE
 
-    The install percent uses these only to split the bar. Inside @world and
-    each later emerge it follows Portage's finished/total counter, so a short
-    time estimate cannot run the number ahead of emerge.
+
+def _world_minutes(cfg: InstallConfig) -> int:
+    """Minutes for emerge @world.
+
+    A fresh stage3 is already close to its profile, so @world is smaller
+    than a source browser. Plasma and GNOME build the desktop inside @world.
     """
     binary = bool(cfg.binhost)
     profile = (cfg.profile or "").lower()
     if any(name in profile for name in ("plasma", "gnome")):
-        world = 320 if binary else 560
-    elif "desktop" in profile or cfg.install_type == "desktop":
-        world = 200 if binary else 380
-    else:
-        world = 100 if binary else 220
-    if cfg.lto:
-        world = int(world * 1.15)
-
-    after = 16
-    kernel = cfg.kernel or "gentoo-kernel-bin"
-    if kernel == "gentoo-kernel":
-        after += 14
-    elif kernel == "gentoo-sources":
-        after += 10
-    else:
-        after += 4
-    seen: set[str] = set()
-    atoms: list[str] = []
-    atoms.extend(cfg.extra_packages or [])
-    atoms.extend(cfg.window_managers or [])
-    atoms.extend(cfg.selected_packages or [])
-    for atom in atoms:
-        key = _atom_key(atom)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        heavy = key in _HEAVY_MINUTES or (key.startswith("www-client/") and not key.endswith("-bin"))
-        if heavy:
-            after += 8 if binary else 14
-        else:
-            after += 2 if binary else 4
-    return 8, world, after
+        return 80 if binary else 200
+    if "desktop" in profile or cfg.install_type == "desktop":
+        return 20 if binary else 45
+    return 12 if binary else 25
 
 
-def estimate_minutes(cfg: InstallConfig) -> int:
-    """Minutes from kernel, binhost, and the packages queued for emerge."""
+def _kernel_raw_minutes(cfg: InstallConfig) -> int:
     binary = bool(cfg.binhost)
-    minutes = 35  # partitioning, stage3 fetch, Portage sync, base tools
     kernel = cfg.kernel or "gentoo-kernel-bin"
     if kernel == "gentoo-kernel-bin":
-        minutes += 10 if binary else 25
-    elif kernel == "gentoo-kernel":
-        minutes += 55 if binary else 90
-    else:
-        minutes += 80
+        return 10 if binary else 25
+    if kernel == "gentoo-kernel":
+        return 55 if binary else 90
+    return 80
+
+
+def _early_raw_minutes(cfg: InstallConfig) -> int:
+    """Partitioning, stage3, sync, and the other work before emerge @world."""
+    minutes = 35
     if cfg.linux_firmware:
         minutes += 8
     if not (cfg.gentoo_mirrors or "").strip():
         minutes += 3
     if cfg.sof_firmware:
         minutes += 5
-    if cfg.plymouth:
-        minutes += 12
     if cfg.luks:
         minutes += 5
     if cfg.filesystem == "zfs" or cfg.layout == "zfs":
         minutes += 20
+    return minutes
+
+
+def _scale_base(cfg: InstallConfig, raw: int) -> int:
+    """LTO and a source install stretch the pre-package work as one block.
+
+    Scaling the sum, rather than each line, keeps the old minute total.
+    int() on each line would drift by a minute.
+    """
+    scaled = raw
     if cfg.lto:
-        minutes = int(minutes * 1.35)
-    if not binary:
-        minutes = int(minutes * 1.6)
+        scaled = int(scaled * 1.35)
+    if not cfg.binhost:
+        scaled = int(scaled * 1.6)
+    return scaled
 
-    atoms: list[str] = []
-    atoms.extend(cfg.extra_packages or [])
-    atoms.extend(cfg.window_managers or [])
-    atoms.extend(cfg.selected_packages or [])
-    if getattr(cfg, "shell", "none") not in {"", "none"}:
-        minutes += 15 if binary else 35
-    if cfg.window_managers or getattr(cfg, "shell", "none") not in {"", "none"}:
-        minutes += 15 if binary else 40
 
-    seen: set[str] = set()
-    for atom in atoms:
-        # sys-fs/fuse:0 should stay distinct from sys-fs/fuse. Only strip a
-        # slot when the heavy table has no opinion; keep the category/package.
-        slotted = atom.split("::", 1)[0]
-        key = slotted if slotted in _HEAVY_MINUTES else slotted.split(":")[0]
+@dataclass(frozen=True)
+class ProgressPlan:
+    """Minute slices shared by the spoken estimate and the install percent.
+
+    `atoms` includes the kernel. `alongside` is shell, compositor, and
+    Plymouth time that has no Portage counter of its own; the bar credits
+    it in proportion to the atoms, so the chroot's last line has no leftover
+    slice to jump.
+    """
+
+    early: int
+    world: int
+    atoms: dict[str, int]
+    alongside: int
+
+    @property
+    def after(self) -> int:
+        return sum(self.atoms.values()) + self.alongside
+
+    @property
+    def total(self) -> int:
+        return max(25, self.early + self.world + self.after)
+
+
+def progress_plan(cfg: InstallConfig) -> ProgressPlan:
+    """Split one install into early, @world, and later-package minutes.
+
+    Later packages use the same per-atom minutes as the spoken estimate.
+    The percent credits each of those packages from that emerge's own
+    finished/total counter.
+    """
+    early_raw = _early_raw_minutes(cfg)
+    kernel_raw = _kernel_raw_minutes(cfg)
+    plymouth_raw = 12 if cfg.plymouth else 0
+    raw = early_raw + kernel_raw + plymouth_raw
+    scaled = _scale_base(cfg, raw)
+    if raw:
+        kernel_minutes = int(scaled * kernel_raw / raw)
+        plymouth_minutes = int(scaled * plymouth_raw / raw)
+        early = scaled - kernel_minutes - plymouth_minutes
+    else:
+        kernel_minutes = plymouth_minutes = early = 0
+
+    binary = bool(cfg.binhost)
+    alongside = plymouth_minutes
+    shell = getattr(cfg, "shell", "none")
+    if shell not in {"", "none"}:
+        alongside += 15 if binary else 35
+    if cfg.window_managers or shell not in {"", "none"}:
+        alongside += 15 if binary else 40
+
+    atoms: dict[str, int] = {}
+    kernel_name = cfg.kernel or "gentoo-kernel-bin"
+    if kernel_minutes > 0:
+        atoms[f"sys-kernel/{kernel_name}"] = kernel_minutes
+    seen = set(atoms)
+    for atom in (
+        *(cfg.extra_packages or []),
+        *(cfg.window_managers or []),
+        *(cfg.selected_packages or []),
+    ):
+        key = atom_key(atom)
         if not key or key in seen:
             continue
         seen.add(key)
-        pair = _HEAVY_MINUTES.get(key)
-        if pair:
-            minutes += pair[0] if binary else pair[1]
-        elif key.startswith("www-client/") and not key.endswith("-bin"):
-            minutes += 30 if binary else 90
-        else:
-            minutes += _LIGHT_BIN if binary else _LIGHT_SOURCE
-    return max(25, minutes)
+        atoms[key] = _minutes_for_atom(cfg, key)
+
+    plan = ProgressPlan(
+        early=early,
+        world=_world_minutes(cfg),
+        atoms=atoms,
+        alongside=alongside,
+    )
+    short = 25 - (plan.early + plan.world + plan.after)
+    if short > 0:
+        return ProgressPlan(plan.early + short, plan.world, dict(plan.atoms), plan.alongside)
+    return plan
+
+
+def estimate_minutes(cfg: InstallConfig) -> int:
+    """Minutes from kernel, binhost, @world, and the packages queued for emerge."""
+    return progress_plan(cfg).total
