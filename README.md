@@ -4,7 +4,7 @@ Python installer that runs **in a terminal on Ubuntu Boot Image live media** and
 
 ## Notice
 
-This is a personal project. The name **Oops-Installer** is a poke at Gentoo: an installer misses the value of installing Gentoo by hand. That is a statement about open source. You can do whatever you want with it. Fork a project, contribute, or make your own. Code for the sake of it.
+This is a personal project. The name **Oops-Installer** is a poke at Gentoo: an installer misses the value of installing Gentoo by hand. That is a statement about open source. Any likeness to an original Oops-Installer for Gentoo is purely coincidental, a Freudian slip at most, and was not intended. You can do whatever you want with it. Fork a project, contribute, or make your own. Code for the sake of it.
 
 The project is open for testing and bug reports. Try it in a virtual machine, or on a disk you can wipe, and file what you find at [GitHub Issues](https://github.com/A-Barz/Oops-Installer/issues). Include the installer revision from the banner, the choices you made, and the command that failed.
 
