@@ -26,7 +26,7 @@ from pathlib import Path
 
 from . import catalog, detect, ui
 from .config import InstallConfig, part_name
-from .estimate import estimate_minutes, format_duration
+from .estimate import estimate_minutes, format_duration, progress_weights
 from .rev import INSTALLER_REV
 from .runner import Runner, State
 
@@ -103,13 +103,16 @@ def execute(cfg: InstallConfig) -> None:
         except OSError as exc:
             ui.warn(f"Could not write {profile}: {exc}")
 
+    minutes = estimate_minutes(cfg)
+    ui.ok(f"Estimated install time: {format_duration(minutes)}.")
+    progress = None if cfg.dry_run else ui.InstallProgress(progress_weights(cfg))
     phases = [
         ("host_packages", lambda: phase_host(cfg, runner)),
         ("network", lambda: phase_network(cfg, runner)),
         ("disks", lambda: phase_disks(cfg, runner)),
         ("stage3", lambda: phase_stage3(cfg, runner, root)),
         ("chroot_mounts", lambda: phase_chroot_mounts(cfg, runner, root)),
-        ("chroot_install", lambda: phase_chroot(cfg, runner, root)),
+        ("chroot_install", lambda: phase_chroot(cfg, runner, root, progress)),
         ("done", lambda: phase_done(cfg, runner, root)),
     ]
     # A recorded chroot_install used to be skipped, so resume died on the same
@@ -123,15 +126,15 @@ def execute(cfg: InstallConfig) -> None:
             "Existing files stay. Disks are not formatted or repartitioned."
         )
     ui.info(f"Oops Installer rev {INSTALLER_REV}")
-    minutes = estimate_minutes(cfg)
-    ui.install_wait_notice()
-    ui.ok(f"Estimated install time: {format_duration(minutes)}.")
-    progress = None if cfg.dry_run else ui.InstallProgress(minutes)
+    # Disk path was confirmed before execute(). This is the last line before
+    # the unattended phases, so it is not shown on the review screen.
+    if not cfg.dry_run:
+        ui.install_wait_notice()
     if progress is not None:
         progress.start()
     error: BaseException | None = None
     try:
-        _run_phases(cfg, runner, state, phases, root, rerun_on_resume)
+        _run_phases(cfg, runner, state, phases, root, rerun_on_resume, progress)
     except (SystemExit, KeyboardInterrupt) as exc:
         error = exc
     finally:
@@ -161,15 +164,22 @@ def execute(cfg: InstallConfig) -> None:
     raise error
 
 
-def _run_phases(cfg: InstallConfig, runner: Runner, state: State, phases, root: str, rerun_on_resume: set[str]) -> None:
+def _run_phases(
+    cfg: InstallConfig,
+    runner: Runner,
+    state: State,
+    phases,
+    root: str,
+    rerun_on_resume: set[str],
+    progress: ui.InstallProgress | None = None,
+) -> None:
     for name, fn in phases:
         ui.chapter("→", f"Phase: {name}", "https://wiki.gentoo.org/wiki/Handbook:AMD64")
         if cfg.resume and name in rerun_on_resume:
             ui.info(f"Resume: running {name} again.")
             fn()
             state.mark(name)
-            continue
-        if state.skip(name, cfg.resume):
+        elif state.skip(name, cfg.resume):
             # Skip means "already done", not "leave the target unmounted".
             # --config/--resume after a crash often still has /mnt/gentoo mounted;
             # if the machine rebooted, reopen LUKS and remount without mkfs.
@@ -177,9 +187,11 @@ def _run_phases(cfg: InstallConfig, runner: Runner, state: State, phases, root: 
                 _ensure_target_mounted(cfg, runner)
             elif name == "chroot_mounts":
                 phase_chroot_mounts(cfg, runner, root)
-            continue
-        fn()
-        state.mark(name)
+        else:
+            fn()
+            state.mark(name)
+        if progress is not None:
+            progress.phase_done(name)
 
 
 def phase_host(cfg: InstallConfig, runner: Runner) -> None:
@@ -1200,7 +1212,12 @@ def _chroot_env_argv(*command: str) -> list[str]:
     ]
 
 
-def phase_chroot(cfg: InstallConfig, runner: Runner, root: str) -> None:
+def phase_chroot(
+    cfg: InstallConfig,
+    runner: Runner,
+    root: str,
+    progress: ui.InstallProgress | None = None,
+) -> None:
     """Write config files + chroot-install.sh, generate locales, then chroot."""
     _apply_live_firmware(cfg)
     devices = getattr(cfg, "_devices", _map_devices(cfg))
@@ -1239,7 +1256,11 @@ def phase_chroot(cfg: InstallConfig, runner: Runner, root: str) -> None:
     cfg.save(str(Path(root) / "root" / "install-config.yaml"), include_secrets=False)
     # Handbook + wiki "Installation alternatives": LiveCDs leak a messy env.
     # Never bash --login / never source /etc/profile in the installer process.
-    runner.run(_chroot_env_argv("chroot", root, "/bin/bash", "/root/chroot-install.sh"))
+    chroot_argv = _chroot_env_argv("chroot", root, "/bin/bash", "/root/chroot-install.sh")
+    # Dry-run returned above. A real install always has a progress tracker.
+    assert progress is not None
+    progress.enter_chroot()
+    runner.run_live(chroot_argv, progress.feed)
     if secrets.exists():
         secrets.unlink()
 
@@ -3322,6 +3343,7 @@ if [ "$world_status" -eq 132 ]; then
 elif [ "$world_status" -ne 0 ]; then
   echo ">> emerge @world failed ($world_status); continuing with the selected packages" >&2
 fi
+echo ">> emerge selected packages"
 unset FEATURES
 if command -v cpuid2cpuflags >/dev/null 2>&1 || emerge --ask=n $NR app-portage/cpuid2cpuflags; then
   echo "*/* $(cpuid2cpuflags)" > /etc/portage/package.use/00cpu-flags || true

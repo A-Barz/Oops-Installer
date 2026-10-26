@@ -69,12 +69,7 @@ class Runner:
         self.log("$ " + pretty)
         if self.dry_run:
             return subprocess.CompletedProcess(argv, 0, "", "")
-        merged = os.environ.copy()
-        if env:
-            merged.update(env)
-        # Portage reads FEATURES from the process environment (even inside chroot).
-        merged.pop("FEATURES", None)
-        merged.pop("PORTAGE_FEATURES", None)
+        merged = self._portage_env(env)
         proc = subprocess.run(
             list(argv),
             check=False,
@@ -105,14 +100,143 @@ class Runner:
         self.log("$ " + script)
         if self.dry_run:
             return subprocess.CompletedProcess(["bash", "-c", script], 0, "", "")
-        env = os.environ.copy()
-        env.pop("FEATURES", None)
-        env.pop("PORTAGE_FEATURES", None)
-        proc = subprocess.run(["bash", "-c", script], check=False, text=True, env=env, cwd=_safe_cwd(None))
+        proc = subprocess.run(
+            ["bash", "-c", script],
+            check=False,
+            text=True,
+            env=self._portage_env(),
+            cwd=_safe_cwd(None),
+        )
         if check and proc.returncode != 0:
             ui.error(f"Shell command failed ({proc.returncode})")
             sys.exit(proc.returncode)
         return proc
+
+    def run_live(self, argv: Sequence[str], on_line, check: bool = True) -> subprocess.CompletedProcess:
+        """Run a command on a pseudo-terminal and pass each output line to on_line.
+
+        Emerge only line-buffers when stdout is a TTY. A pipe would hold the
+        "Jobs: N of M" lines until the buffer filled, so the percent would
+        sit still and then jump. If a pty is not available, fall back to run().
+        """
+        pretty = " ".join(argv)
+        ui.step(pretty)
+        self.log("$ " + pretty)
+        if self.dry_run:
+            return subprocess.CompletedProcess(list(argv), 0, "", "")
+        try:
+            return self._run_pty(list(argv), on_line, check)
+        except ImportError:
+            ui.warn("No pseudo-terminal; the install percent will not follow emerge.")
+            return self.run(argv, check=check)
+
+    def _portage_env(self, extra: dict | None = None) -> dict:
+        """Child environment without a stale Portage FEATURES from the live USB."""
+        env = os.environ.copy()
+        if extra:
+            env.update(extra)
+        env.pop("FEATURES", None)
+        env.pop("PORTAGE_FEATURES", None)
+        return env
+
+    def _run_pty(self, argv: list[str], on_line, check: bool) -> subprocess.CompletedProcess:
+        import pty
+        import select
+
+        master, slave = pty.openpty()
+        self._copy_winsize(slave)
+        env = self._portage_env()
+        env.pop("USE", None)
+        try:
+            proc = subprocess.Popen(
+                argv,
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                env=env,
+                cwd=_safe_cwd(None),
+                close_fds=True,
+            )
+        except Exception:
+            os.close(master)
+            os.close(slave)
+            raise
+        os.close(slave)
+        buf = b""
+        try:
+            while True:
+                try:
+                    ready, _, _ = select.select([master], [], [], 0.4)
+                except InterruptedError:
+                    continue
+                if ready:
+                    try:
+                        chunk = os.read(master, 65536)
+                    except OSError:
+                        chunk = b""
+                    if not chunk:
+                        break
+                    self._write_live(chunk)
+                    buf = self._drain_live(buf + chunk, on_line)
+                    continue
+                if proc.poll() is not None:
+                    break
+        finally:
+            while True:
+                try:
+                    chunk = os.read(master, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                self._write_live(chunk)
+                buf = self._drain_live(buf + chunk, on_line)
+            os.close(master)
+            rc = proc.wait()
+        if buf.strip():
+            self._emit_live(buf, on_line)
+        if check and rc != 0:
+            ui.error(f"Command failed ({rc}): {' '.join(argv)}")
+            sys.exit(rc)
+        return subprocess.CompletedProcess(argv, rc, "", "")
+
+    def _copy_winsize(self, slave: int) -> None:
+        try:
+            import fcntl
+            import struct
+            import termios
+
+            packed = fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, struct.pack("HHHH", 0, 0, 0, 0))
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, packed)
+        except OSError:
+            return
+
+    def _write_live(self, chunk: bytes) -> None:
+        try:
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+        except Exception:
+            text = chunk.decode("utf-8", "replace")
+            sys.stdout.write(text)
+            sys.stdout.flush()
+
+    def _drain_live(self, buf: bytes, on_line) -> bytes:
+        while True:
+            split_at = -1
+            for sep in (b"\n", b"\r"):
+                pos = buf.find(sep)
+                if pos != -1 and (split_at == -1 or pos < split_at):
+                    split_at = pos
+            if split_at == -1:
+                return buf
+            self._emit_live(buf[:split_at], on_line)
+            buf = buf[split_at + 1 :]
+
+    def _emit_live(self, raw: bytes, on_line) -> None:
+        text = raw.decode("utf-8", "replace").strip("\x00")
+        if not text.strip():
+            return
+        on_line(text)
 
 
 class State:

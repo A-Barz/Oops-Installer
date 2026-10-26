@@ -72,6 +72,56 @@ def format_remaining(minutes: int) -> str:
     return f"{mins}m left"
 
 
+def _atom_key(atom: str) -> str:
+    """Category/package, without a slot, overlay, or version."""
+    bare = atom.split("::", 1)[0]
+    return bare.split(":", 1)[0] if bare.count("/") == 1 and ":" in bare else bare
+
+
+def progress_weights(cfg: InstallConfig) -> tuple[int, int, int]:
+    """Relative sizes of the early, @world, and later-package slices.
+
+    The install percent uses these only to split the bar. Inside @world and
+    each later emerge it follows Portage's finished/total counter, so a short
+    time estimate cannot run the number ahead of emerge.
+    """
+    binary = bool(cfg.binhost)
+    profile = (cfg.profile or "").lower()
+    if any(name in profile for name in ("plasma", "gnome")):
+        world = 320 if binary else 560
+    elif "desktop" in profile or cfg.install_type == "desktop":
+        world = 200 if binary else 380
+    else:
+        world = 100 if binary else 220
+    if cfg.lto:
+        world = int(world * 1.15)
+
+    after = 16
+    kernel = cfg.kernel or "gentoo-kernel-bin"
+    if kernel == "gentoo-kernel":
+        after += 14
+    elif kernel == "gentoo-sources":
+        after += 10
+    else:
+        after += 4
+    seen: set[str] = set()
+    atoms: list[str] = []
+    atoms.extend(cfg.extra_packages or [])
+    atoms.extend(cfg.window_managers or [])
+    atoms.extend(cfg.selected_packages or [])
+    for atom in atoms:
+        key = _atom_key(atom)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        heavy = key in _HEAVY_MINUTES or (key.startswith("www-client/") and not key.endswith("-bin"))
+        if heavy:
+            after += 8 if binary else 14
+        else:
+            after += 2 if binary else 4
+    return 8, world, after
+
+
 def estimate_minutes(cfg: InstallConfig) -> int:
     """Minutes from kernel, binhost, and the packages queued for emerge."""
     binary = bool(cfg.binhost)
@@ -111,8 +161,6 @@ def estimate_minutes(cfg: InstallConfig) -> int:
 
     seen: set[str] = set()
     for atom in atoms:
-        bare = atom.split("::", 1)[0]
-        bare = bare.split(":", 1)[0] if bare.count("/") == 1 and ":" in bare else bare
         # sys-fs/fuse:0 should stay distinct from sys-fs/fuse. Only strip a
         # slot when the heavy table has no opinion; keep the category/package.
         slotted = atom.split("::", 1)[0]

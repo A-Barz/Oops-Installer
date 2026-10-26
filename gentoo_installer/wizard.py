@@ -1221,9 +1221,8 @@ def _note_ssd_trim(cfg: InstallConfig) -> None:
 
 
 def _announce_estimate(cfg: InstallConfig) -> None:
-    """Tell the user to step away, then say how long this selection should take."""
+    """How long this selection should take. The nap line waits until the disk is confirmed."""
     minutes = estimate_minutes(cfg)
-    ui.install_wait_notice()
     ui.ok(f"Estimated install time: {format_duration(minutes)}.")
 
 
