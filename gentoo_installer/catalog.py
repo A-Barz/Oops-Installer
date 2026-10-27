@@ -122,7 +122,9 @@ REMOVED_GURU_ATOMS = frozenset(
 )
 
 # Offered packages that are still ~arch on a stable system. Keywording them
-# keeps one masked atom from failing its emerge.
+# keeps one masked atom from failing its emerge. The installer also keywords
+# every atom it plans to emerge (see execute._keyword_text); this set remains
+# as an explicit allow-list for tests and documentation.
 TESTING_ATOMS = frozenset(
     {
         "gui-wm/niri",
@@ -137,8 +139,56 @@ TESTING_ATOMS = frozenset(
         "gnome-extra/polkit-gnome",
         "kde-apps/dolphin",
         "gnome-base/nautilus",
+        "sys-kernel/cachyos-kernel",
+        "sys-kernel/cachyos-kernel-bin",
+        "sys-kernel/cachyos-sources",
     }
 )
+
+# Kernel packages the wizard offers. Value stored in InstallConfig.kernel is the
+# package name only (no category). Overlay kernels need eselect repository enable.
+# There is no Ubuntu LTS kernel ebuild in ::gentoo or a known repos.gentoo.org
+# overlay that this installer can emerge (Ubuntu ships .deb kernels).
+KERNEL_OPTIONS: list[Pkg] = [
+    Pkg("sys-kernel/gentoo-kernel-bin", "Binary dist-kernel — fastest, matches binhost"),
+    Pkg("sys-kernel/gentoo-kernel", "Source dist-kernel — compiled on this machine"),
+    Pkg(
+        "sys-kernel/gentoo-sources",
+        "gentoo-sources — manual config; tracks upstream LTS (dist-kernel helpers still used if possible)",
+    ),
+    Pkg(
+        "sys-kernel/cachyos-kernel-bin",
+        "CachyOS binary dist-kernel (::CachyOS-kernels overlay)",
+        "CachyOS-kernels",
+    ),
+    Pkg(
+        "sys-kernel/cachyos-kernel",
+        "CachyOS source dist-kernel (::CachyOS-kernels overlay)",
+        "CachyOS-kernels",
+    ),
+]
+
+
+def kernel_menu_choices() -> list[tuple[str, str]]:
+    """Wizard rows: (short package name, description)."""
+    return [(pkg.atom.rsplit("/", 1)[-1], pkg.desc) for pkg in KERNEL_OPTIONS]
+
+
+def kernel_atom(name: str) -> str:
+    """Full emerge atom for a short kernel package name."""
+    bare = (name or "gentoo-kernel-bin").split("::", 1)[0]
+    if "/" in bare:
+        return bare
+    return f"sys-kernel/{bare}"
+
+
+def kernel_overlay(name: str) -> str:
+    """Overlay required for this kernel choice, or gentoo."""
+    atom = kernel_atom(name)
+    for pkg in KERNEL_OPTIONS:
+        if pkg.atom == atom:
+            return pkg.overlay
+    return "gentoo"
 
 # Compositors that speak the wlroots protocols grim, slurp, and portal-wlr need.
 # Niri, Weston, and Gamescope do not. Niri uses the GNOME portal instead.
@@ -478,6 +528,7 @@ BOOTLOADERS = [
 FEATURED_OVERLAYS: list[tuple[str, str]] = [
     ("wayland-desktop", "Wayland compositors and tools not yet in ::gentoo"),
     ("hyproverlay", "Hyprland and Hypr* utilities"),
+    ("CachyOS-kernels", "CachyOS dist-kernel and sources (cachyos-kernel / -bin)"),
     ("steam-overlay", "Steam client and Steam-based games"),
     ("gentoo-zh", "Packages useful for Chinese-speaking users"),
     ("science", "Experimental scientific packages"),
@@ -1024,6 +1075,7 @@ def dotfile_package_atoms(shell: str, window_managers: list[str], wm_dotfiles: l
 
 def _known_packages() -> list[Pkg]:
     pkgs = list(WINDOW_MANAGERS) + list(WAYLAND_BASE) + list(WAYLAND_COMMON_UTILS)
+    pkgs.extend(KERNEL_OPTIONS)
     pkgs.extend(PLYMOUTH_THEME_PACKAGES.values())
     for group in list(WM_REQUIREMENTS.values()) + list(SHELL_PACKAGES.values()):
         pkgs.extend(group)
@@ -1038,8 +1090,12 @@ def atom_overlay(atom: str) -> str:
         return "guru"
     if atom.startswith("flatpak-app/"):
         return "gentoo"
+    if bare.startswith("sys-kernel/"):
+        ov = kernel_overlay(bare)
+        if ov != "gentoo":
+            return ov
     for pkg in _known_packages():
-        if pkg.atom == atom:
+        if pkg.atom == atom or pkg.atom == bare:
             return pkg.overlay
     for _, _, pkgs in CATEGORIES:
         for value, desc in pkgs:

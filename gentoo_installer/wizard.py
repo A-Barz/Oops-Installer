@@ -405,6 +405,11 @@ def _disks(cfg: InstallConfig) -> None:
 def _stage(cfg: InstallConfig) -> None:
     """Handbook: Stage file — stage1/2/3, OpenRC/systemd, desktop vs hardened/musl."""
     ui.chapter("5", "Installing the Gentoo installation files", f"{HANDBOOK}/Installation/Stage")
+    ui.info(
+        "The stage tarball is the base system archive (stage1 / stage2 / stage3). "
+        "It is not a kernel. Stage3 does not include a bootable kernel image — "
+        "you choose which kernel package to emerge in chapter 7."
+    )
     cfg.stage_level = ui.menu(
         "Stage tarball (handbook default is stage3)",
         [
@@ -430,6 +435,8 @@ def _stage(cfg: InstallConfig) -> None:
             "If the stage file or emerge returns HTTP 404, the installer checks the next Gentoo mirror and retries."
         )
         cfg.install_type = "server"
+    else:
+        ui.info("Kernel package selection comes later (chapter 7), after the base-system questions.")
     cfg.init_system = ui.menu(
         "Init system",
         [
@@ -614,15 +621,27 @@ def _default_use(cfg: InstallConfig) -> list[str]:
 def _kernel(cfg: InstallConfig) -> None:
     """Handbook: Kernel — dist-kernel vs source, firmware, dracut, UKI."""
     ui.chapter("7", "Configuring the Linux kernel", f"{HANDBOOK}/Installation/Kernel")
-    cfg.kernel = ui.menu(
-        "Kernel (handbook: distribution kernel recommended)",
-        [
-            ("gentoo-kernel-bin", "Binary dist-kernel — fastest, matches binhost"),
-            ("gentoo-kernel", "Source dist-kernel — compiled on this machine"),
-            ("gentoo-sources", "gentoo-sources (manual config; dist-kernel helpers still used if possible)"),
-        ],
-        "gentoo-kernel-bin",
+    ui.info(
+        "Stage3 left the root filesystem without a bootable kernel. "
+        "Pick the Portage package that will be emerged into /boot (and onto /efi for some loaders)."
     )
+    ui.info(
+        "CachyOS options enable the CachyOS-kernels overlay. "
+        "There is no Ubuntu LTS kernel ebuild in Gentoo Portage for this installer to emerge; "
+        "gentoo-sources tracks upstream LTS instead."
+    )
+    known = {name for name, _desc in catalog.kernel_menu_choices()}
+    preferred = cfg.kernel if cfg.kernel in known else "gentoo-kernel-bin"
+    cfg.kernel = ui.menu(
+        "Kernel package (always asked for stage3 — not bundled in the stage tarball)",
+        catalog.kernel_menu_choices(),
+        preferred,
+    )
+    if catalog.kernel_overlay(cfg.kernel) != "gentoo":
+        ui.info(
+            f"{cfg.kernel} comes from the {catalog.kernel_overlay(cfg.kernel)} overlay, "
+            "which will be enabled before emerge."
+        )
     cfg.linux_firmware = ui.ask_yes_no("Install linux-firmware?", True)
     if not cfg.linux_firmware:
         if detect.is_virtual_machine():

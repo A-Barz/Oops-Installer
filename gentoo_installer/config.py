@@ -102,7 +102,9 @@ class InstallConfig:
     gentoo_mirrors: str = ""  # Empty → mirrorselect speed test, then distfiles.gentoo.org
 
     # --- Handbook ch. 7: kernel ---
-    kernel: str = "gentoo-kernel-bin"  # dist-kernel binary is fastest on a live USB; alternatives: gentoo-kernel, gentoo-sources
+    # Short package name under sys-kernel/ (gentoo-kernel-bin, cachyos-kernel, …).
+    # Stage3 never bundles a bootable kernel; chapter 7 always asks for this.
+    kernel: str = "gentoo-kernel-bin"
     linux_firmware: bool = True
     sof_firmware: bool = False
     intel_microcode: bool = False

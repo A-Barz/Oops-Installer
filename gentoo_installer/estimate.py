@@ -114,10 +114,12 @@ def _world_minutes(cfg: InstallConfig) -> int:
 
 def _kernel_raw_minutes(cfg: InstallConfig) -> int:
     binary = bool(cfg.binhost)
-    kernel = cfg.kernel or "gentoo-kernel-bin"
-    if kernel == "gentoo-kernel-bin":
+    kernel = (cfg.kernel or "gentoo-kernel-bin").split("::", 1)[0]
+    if "/" in kernel:
+        kernel = kernel.rsplit("/", 1)[-1]
+    if kernel in {"gentoo-kernel-bin", "cachyos-kernel-bin"}:
         return 10 if binary else 25
-    if kernel == "gentoo-kernel":
+    if kernel in {"gentoo-kernel", "cachyos-kernel"}:
         return 55 if binary else 90
     return 80
 
