@@ -916,7 +916,8 @@ def _finalize(cfg: InstallConfig) -> None:
     ui.chapter("11", "Wayland session", f"{HANDBOOK}/Installation/Finalizing")
     cfg.desktop = "none"
     cfg.kde_games = False
-    cfg.browser = "none"
+    # Mandatory pair: Chrome + Firefox ESR (firefox-bin:esr). See catalog.REQUIRED_BROWSERS.
+    cfg.browser = "chrome+firefox-esr"
     ui.info("Each compositor installs its own required packages (portal, wallpaper, lock, terminal).")
     ui.info("Utilities that work on every compositor are a separate list in the next chapter.")
     ui.info(
@@ -956,34 +957,24 @@ def _finalize(cfg: InstallConfig) -> None:
     graphical = bool(cfg.window_managers) or cfg.shell != "none"
     cfg.pipewire = ui.ask_yes_no("Install PipeWire audio?", graphical)
     _ask_nonfree_codecs(cfg)
-    if catalog.wayland_selected(cfg.window_managers) or cfg.shell != "none":
-        greet = (
-            "greetd + noctalia-greeter — Wayland login screen"
-            if cfg.shell == "noctalia"
-            else "greetd + gtkgreet — Wayland login screen"
-        )
-        cfg.display_manager = ui.menu(
-            "Login",
-            [
-                ("greetd", greet),
-                ("none", "Text console — start the compositor yourself"),
-            ],
-            "greetd",
-        )
-    else:
-        cfg.display_manager = "none"
-        if cfg.window_managers:
-            ui.info("dwm and i3 start from the text console with startx.")
     if cfg.shell != "none" and not catalog.wayland_selected(cfg.window_managers):
         ui.info("Noctalia and DMS run on a Wayland compositor. labwc will be installed with the shell.")
-        cfg.window_managers.append("gui-wm/labwc")
-    if cfg.display_manager == "greetd":
+        if "gui-wm/labwc" not in cfg.window_managers:
+            cfg.window_managers.append("gui-wm/labwc")
+    # Wayland / shell installs must boot to a greeter. Offering "none" failed that goal.
+    if catalog.needs_login_greeter(cfg.window_managers, cfg.shell):
+        cfg.display_manager = "greetd"
         who = cfg.username or "your user"
-        screen = "Noctalia's login screen" if cfg.shell == "noctalia" else "that login screen"
+        screen = "Noctalia's login screen" if cfg.shell == "noctalia" else "greetd + gtkgreet"
         ui.info(
             f"The installed system boots to {screen}. "
             f"Sign in as {who}. The compositors you chose are the sessions."
         )
+        ui.info("A text console remains on tty2 if you need one.")
+    else:
+        cfg.display_manager = "none"
+        if cfg.window_managers:
+            ui.info("dwm and i3 start from the text console with startx.")
     ui.info("The next chapter is suckless tools and popular apps. There is no desktop list.")
 
 
@@ -1034,12 +1025,14 @@ def _packages_locked_from_earlier_steps(cfg: InstallConfig) -> set[str]:
     locked.update(catalog.dotfile_package_atoms(cfg.shell, cfg.window_managers, cfg.wm_dotfiles))
     if getattr(cfg, "nonfree_codecs", False):
         locked.update(catalog.nonfree_codec_atoms())
-    if cfg.display_manager == "greetd":
+    if catalog.needs_login_greeter(cfg.window_managers, cfg.shell) or cfg.display_manager == "greetd":
         locked.add("gui-libs/greetd")
         if cfg.shell == "noctalia":
             locked.add(catalog.NOCTALIA_GREETER.atom)
         else:
             locked.add("gui-apps/gtkgreet")
+            locked.add("gui-wm/labwc")
+    locked.update(catalog.required_browser_atoms())
     return locked
 
 
@@ -1051,7 +1044,15 @@ def _packages(cfg: InstallConfig) -> None:
         "https://packages.gentoo.org/",
     )
     ui.info("Compositor requirements are already queued. This list is optional apps.")
-    ui.info("Packages already chosen earlier (compositors, deps, dotfiles) stay off later lists.")
+    ui.info(
+        "Google Chrome and Firefox ESR (www-client/firefox-bin:esr) are always installed. "
+        "Bonus browsers are optional in the browsers category."
+    )
+    ui.info(
+        "Flatpak is suggested for most desktop apps (Flathub). Tick sys-apps/flatpak or a "
+        "flatpak-app/* row, or install apps from Flathub after first boot."
+    )
+    ui.info("Packages already chosen earlier (compositors, deps, browsers, dotfiles) stay off later lists.")
     ui.info("GURU packages are not in these lists. Noctalia and DMS were chosen in the previous chapter.")
     ui.info("Search with /text  ·  n/p pages  ·  toggle numbers  ·  0 when a list is finished.")
     ui.info("The top row, Select all, ticks every package in that section.")
@@ -1158,19 +1159,16 @@ def _packages(cfg: InstallConfig) -> None:
     needed += catalog.dotfile_package_atoms(cfg.shell, cfg.window_managers, cfg.wm_dotfiles)
     if cfg.nonfree_codecs:
         needed += catalog.nonfree_codec_atoms()
-    # Proprietary Portage apps (Chrome, Sublime, …) need ACCEPT_LICENSE beyond @FREE.
-    proprietary_apps = {
-        "www-client/google-chrome",
-        "app-editors/sublime-text",
-        "app-editors/vscode",
-        "games-util/steam-launcher",
-    }
-    if any(atom.split("::", 1)[0] in proprietary_apps for atom in picked):
-        tokens = (cfg.accept_license or "").split()
-        if "*" not in tokens:
-            tokens.append("*")
-            cfg.accept_license = " ".join(tokens)
-            ui.info("ACCEPT_LICENSE was expanded so proprietary apps you ticked can emerge.")
+    # Mandatory browsers need ACCEPT_LICENSE beyond @FREE (Chrome is proprietary).
+    cfg.browser = "chrome+firefox-esr"
+    for atom in catalog.required_browser_atoms():
+        if atom not in picked:
+            picked.append(atom)
+    tokens = (cfg.accept_license or "").split()
+    if "*" not in tokens:
+        tokens.append("*")
+        cfg.accept_license = " ".join(tokens)
+        ui.info("ACCEPT_LICENSE was expanded so Google Chrome and other proprietary apps can emerge.")
     # extra_packages is the emerge set: catalogue picks + WMs + compositor requirements.
     cfg.extra_packages = list(dict.fromkeys(cfg.window_managers + needed + picked))
     cfg.overlays = [name for name in cfg.overlays if name != "guru"]
@@ -1195,20 +1193,13 @@ def _plymouth_review(cfg: InstallConfig) -> str:
 
 
 def _login_manager_label(cfg: InstallConfig) -> str:
-    name = catalog.resolved_display_manager(
-        cfg.display_manager,
-        cfg.desktop,
-        cfg.extra_packages + cfg.window_managers + cfg.selected_packages,
-    )
+    atoms = cfg.extra_packages + cfg.window_managers + cfg.selected_packages
+    name = catalog.resolved_display_manager(cfg.display_manager, cfg.desktop, atoms)
     if name == "none":
         return "text console"
     if name == "greetd" and cfg.shell == "noctalia":
         name = "noctalia-greeter"
-    sessions = catalog.login_sessions(
-        cfg.desktop,
-        cfg.extra_packages + cfg.window_managers + cfg.selected_packages,
-        cfg.shell,
-    )
+    sessions = catalog.ensure_login_sessions(cfg.desktop, atoms, cfg.shell)
     who = cfg.username or "root"
     if sessions:
         label = "session" if len(sessions) == 1 else "sessions"
@@ -1384,6 +1375,7 @@ def _review(cfg: InstallConfig) -> None:
         ("Compositors", ", ".join(cfg.window_managers) or "none"),
         ("Dotfiles", _dotfile_review(cfg)),
         ("Shell", cfg.shell or "none"),
+        ("Browsers", "Chrome + Firefox ESR (mandatory)"),
         ("Non-free codecs", "yes (license accepted)" if cfg.nonfree_codecs else "no"),
         ("ZRAM", "yes" if cfg.zram else "no"),
         (

@@ -1824,6 +1824,40 @@ def _final_tool_checks(cfg: InstallConfig, loaders: list[str]) -> str:
     lines.append(f"if {joined}; then boot_ok=1; else echo '>> no selected bootloader was installed' >&2; fi")
     lines.append('if [ "$kernel_ok" -eq 0 ]; then echo ">> no kernel image was installed" >&2; missing=1; fi')
     lines.append('if [ "$boot_ok" -eq 0 ]; then missing=1; fi')
+    # Greeter presence is fatal when a greeter was requested — same as kernel/bootloader.
+    greeter_fatal: list[tuple[str, str]] = []
+    dm = _resolved_dm(cfg)
+    if dm == "greetd":
+        if openrc:
+            greeter_fatal.append(
+                ("[ -e /etc/init.d/greetd ] || command -v greetd >/dev/null 2>&1", "greetd")
+            )
+            greeter_fatal.append(("[ -e /etc/runlevels/default/greetd ]", "greetd in default runlevel"))
+            greeter_fatal.append(
+                (
+                    "[ -e /etc/runlevels/boot/elogind ] || [ -e /etc/runlevels/default/elogind ]",
+                    "elogind",
+                )
+            )
+        else:
+            greeter_fatal.append(
+                (
+                    _systemd_unit_test("greetd") + " || command -v greetd >/dev/null 2>&1",
+                    "greetd",
+                )
+            )
+        greeter_fatal.append(("[ -s /etc/greetd/config.toml ]", "greetd config.toml"))
+        greeter_fatal.append(
+            (
+                "find /usr/share/wayland-sessions /usr/share/xsessions "
+                "-name '*.desktop' 2>/dev/null | grep -q .",
+                "session .desktop",
+            )
+        )
+    for test, label in greeter_fatal:
+        lines.append(
+            f'if ! {{ {test}; }}; then echo ">> greeter check failed: {label}" >&2; missing=1; fi'
+        )
     lines.append('if [ "$missing" -ne 0 ]; then echo ">> chroot configuration incomplete" >&2; exit 1; fi')
     return "\n".join(lines) + "\n"
 
@@ -2343,6 +2377,113 @@ def _resolved_dm(cfg: InstallConfig) -> str:
     return catalog.resolved_display_manager(cfg.display_manager, cfg.desktop, _graphical_atoms(cfg))
 
 
+def ensure_boot_to_greeter(cfg: InstallConfig) -> None:
+    """Mutate cfg so Wayland/shell installs always enable greetd with a session WM.
+
+    Called before chroot script generation and by greeter assertion tests. A
+    TTY-only boot after choosing a Wayland compositor is a project failure.
+    """
+    wms = list(cfg.window_managers or [])
+    shell = getattr(cfg, "shell", "") or "none"
+    if shell != "none" and not catalog.wayland_selected(wms):
+        if catalog.FALLBACK_WAYLAND_WM not in wms:
+            wms.append(catalog.FALLBACK_WAYLAND_WM)
+        cfg.window_managers = wms
+    if catalog.needs_login_greeter(cfg.window_managers, shell, _graphical_atoms(cfg)):
+        cfg.display_manager = "greetd"
+        sessions = catalog.login_sessions(
+            cfg.desktop, _graphical_atoms(cfg), shell
+        )
+        if not sessions and catalog.FALLBACK_WAYLAND_WM not in (cfg.window_managers or []):
+            cfg.window_managers = list(cfg.window_managers or []) + [catalog.FALLBACK_WAYLAND_WM]
+    # Chrome is mandatory; Portage rejects it under a free-only ACCEPT_LICENSE.
+    tokens = (cfg.accept_license or "").split()
+    if "*" not in tokens:
+        tokens.append("*")
+        cfg.accept_license = " ".join(tokens)
+    if not (cfg.browser or "").strip() or cfg.browser == "none":
+        cfg.browser = "chrome+firefox-esr"
+
+
+def greeter_boot_failures(cfg: InstallConfig) -> list[str]:
+    """Return reasons this config would not reboot to a usable login greeter.
+
+    Empty list means the post-install path looks sound for: reboot → greeter →
+    session. Does not prove GPU drivers or real hardware seat access.
+    """
+    ensure_boot_to_greeter(cfg)
+    failures: list[str] = []
+    dm = _resolved_dm(cfg)
+    shell = getattr(cfg, "shell", "") or "none"
+    needs = catalog.needs_login_greeter(cfg.window_managers, shell, _graphical_atoms(cfg))
+    if needs and dm == "none":
+        failures.append("Wayland/shell selected but display manager resolved to none")
+    if dm == "none":
+        return failures
+    sessions = _login_sessions_for(cfg)
+    if not sessions:
+        failures.append("no session .desktop would be written for the greeter")
+    tools = {atom for atom, _test in _display_manager_tools(cfg)}
+    if dm == "greetd":
+        if "gui-libs/greetd" not in tools:
+            failures.append("greetd package missing from display-manager tools")
+        if _greetd_uses_noctalia(cfg):
+            if catalog.NOCTALIA_GREETER.atom not in tools:
+                failures.append("noctalia-greeter missing while Noctalia shell is selected")
+        elif _greetd_uses_tuigreet(cfg):
+            if "gui-apps/tuigreet" not in tools:
+                failures.append("tuigreet selected but not in display-manager tools")
+        else:
+            if "gui-apps/gtkgreet" not in tools:
+                failures.append("gtkgreet missing for greetd greeter")
+            if "gui-wm/labwc" not in tools:
+                failures.append("labwc missing (required to host gtkgreet)")
+        if cfg.init_system == "openrc":
+            if "sys-auth/elogind" not in tools:
+                failures.append("elogind missing (OpenRC greeter needs a seat manager)")
+            if "sys-apps/dbus" not in tools:
+                failures.append("dbus missing (OpenRC greeter needs dbus)")
+        script = _display_manager_script(cfg)
+        if "login manager:" not in script and ">> login manager:" not in script:
+            failures.append("display-manager script is empty")
+        if dm == "greetd" and "config.toml" not in script:
+            failures.append("greetd config.toml would not be written")
+        if dm == "greetd" and not _greetd_uses_noctalia(cfg) and not _greetd_uses_tuigreet(cfg):
+            if "/etc/greetd/environments" not in script:
+                failures.append("greetd environments file would not be written")
+            else:
+                # Heredoc is: cat > /etc/greetd/environments << 'EOF'\ncmds...\nEOF
+                marker = "cat > /etc/greetd/environments << 'EOF'"
+                if marker not in script:
+                    failures.append("greetd environments heredoc missing")
+                else:
+                    body = script.split(marker, 1)[1].split("\nEOF", 1)[0]
+                    commands = [line.strip() for line in body.splitlines() if line.strip()]
+                    if not commands:
+                        failures.append("greetd environments file would be empty (no sessions)")
+                    for _title, command, _kind in sessions:
+                        if command not in commands:
+                            failures.append(f"session {command!r} missing from greetd environments")
+        if dm not in _enabled_dm_services(cfg):
+            failures.append(f"{dm} would not be enabled as a boot service")
+        if cfg.init_system != "openrc":
+            if "default.target" not in script and "graphical.target" not in script:
+                failures.append("systemd graphical boot target would not be set")
+    queued = set(_desktop_packages(cfg)) | set(_atoms_to_unmask(cfg))
+    for atom in catalog.required_browser_atoms():
+        if atom not in queued:
+            failures.append(f"mandatory browser {atom} is not queued for emerge")
+    return failures
+
+
+def _enabled_dm_services(cfg: InstallConfig) -> set[str]:
+    """Display-manager service names that render_chroot_script would enable."""
+    dm = _resolved_dm(cfg)
+    if dm in {"none", "auto", ""}:
+        return set()
+    return {dm}
+
+
 def _greetd_uses_noctalia(cfg: InstallConfig) -> bool:
     """Noctalia Shell brings its own greetd greeter."""
     if getattr(cfg, "shell", "") == "noctalia":
@@ -2418,7 +2559,7 @@ def _login_username(cfg: InstallConfig) -> str:
 
 
 def _login_sessions_for(cfg: InstallConfig) -> list[tuple[str, str, str]]:
-    return catalog.login_sessions(
+    return catalog.ensure_login_sessions(
         cfg.desktop, _graphical_atoms(cfg), getattr(cfg, "shell", "") or ""
     )
 
@@ -2446,14 +2587,22 @@ def _display_manager_script(cfg: InstallConfig) -> str:
     The password is still required. The greeter is given the username and the
     window managers so the first boot is that screen, not a text shell.
     """
+    ensure_boot_to_greeter(cfg)
     dm = _resolved_dm(cfg)
     if dm == "none":
         return ""
     sessions = _login_sessions_for(cfg)
+    if dm == "greetd" and not sessions:
+        # Should be unreachable after ensure_login_sessions; keep a hard stop.
+        sessions = [catalog.FALLBACK_WAYLAND_SESSION]
     user = _login_username(cfg)
     lines = [f'echo ">> login manager: {dm}"']
     for atom, test in _display_manager_tools(cfg):
         lines.append(_emerge_checked_call(atom, test))
+    # When gtkgreet needs a session host and labwc was only a fallback, emerge it.
+    if dm == "greetd" and not _greetd_uses_noctalia(cfg) and not _greetd_uses_tuigreet(cfg):
+        if not any(atom == "gui-wm/labwc" for atom, _ in _display_manager_tools(cfg)):
+            lines.append(_emerge_checked_call("gui-wm/labwc", ("command", "-v", "labwc")))
     lines.append("mkdir -p /usr/share/wayland-sessions /usr/share/xsessions")
     for title, command, kind in sessions:
         folder = "/usr/share/wayland-sessions" if kind == "wayland" else "/usr/share/xsessions"
@@ -2573,6 +2722,67 @@ def _display_manager_script(cfg: InstallConfig) -> str:
             ]
         )
     lines.extend(_login_manager_boot_lines(cfg, dm))
+    # Hard assertions the chroot script can fail on before claiming success.
+    if dm == "greetd":
+        lines.extend(
+            [
+                'echo ">> verify greeter can present a login"',
+                "greeter_ok=1",
+                "if ! command -v greetd >/dev/null 2>&1 && ! [ -e /etc/init.d/greetd ] "
+                "&& ! [ -e /usr/lib/systemd/system/greetd.service ] "
+                "&& ! [ -e /lib/systemd/system/greetd.service ]; then",
+                '  echo ">> greeter package missing: greetd" >&2',
+                "  greeter_ok=0",
+                "fi",
+                "if ! [ -s /etc/greetd/config.toml ]; then",
+                '  echo ">> greeter config missing: /etc/greetd/config.toml" >&2',
+                "  greeter_ok=0",
+                "fi",
+                "if ! grep -q 'default_session' /etc/greetd/config.toml 2>/dev/null; then",
+                '  echo ">> greeter config has no default_session" >&2',
+                "  greeter_ok=0",
+                "fi",
+            ]
+        )
+        if not _greetd_uses_noctalia(cfg) and not _greetd_uses_tuigreet(cfg):
+            lines.extend(
+                [
+                    "if ! [ -s /etc/greetd/environments ]; then",
+                    '  echo ">> greetd environments empty — greeter would show no sessions" >&2',
+                    "  greeter_ok=0",
+                    "fi",
+                    "if ! command -v gtkgreet >/dev/null 2>&1; then",
+                    '  echo ">> greeter frontend missing: gtkgreet" >&2',
+                    "  greeter_ok=0",
+                    "fi",
+                    "if ! command -v labwc >/dev/null 2>&1; then",
+                    '  echo ">> greeter compositor missing: labwc" >&2',
+                    "  greeter_ok=0",
+                    "fi",
+                ]
+            )
+        elif _greetd_uses_noctalia(cfg):
+            lines.extend(
+                [
+                    "if ! command -v noctalia-greeter-session >/dev/null 2>&1; then",
+                    '  echo ">> greeter frontend missing: noctalia-greeter-session" >&2',
+                    "  greeter_ok=0",
+                    "fi",
+                ]
+            )
+        lines.extend(
+            [
+                "if ! find /usr/share/wayland-sessions /usr/share/xsessions "
+                "-name '*.desktop' 2>/dev/null | grep -q .; then",
+                '  echo ">> no session .desktop files for the greeter" >&2',
+                "  greeter_ok=0",
+                "fi",
+                'if [ "$greeter_ok" -ne 1 ]; then',
+                '  echo ">> boot-to-greeter checks failed" >&2',
+                "  exit 1",
+                "fi",
+            ]
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -2819,6 +3029,8 @@ def _atoms_to_unmask(cfg: InstallConfig) -> list[str]:
     )
     if getattr(cfg, "nonfree_codecs", False):
         atoms.extend(catalog.nonfree_codec_atoms())
+    atoms.extend(catalog.required_browser_atoms())
+    atoms.extend(_desktop_packages(cfg))
     out: list[str] = []
     seen: set[str] = set()
     for atom in atoms:
@@ -2896,6 +3108,7 @@ def render_chroot_script(cfg: InstallConfig, devices: dict[str, str]) -> str:
 
     Keep this as bash, not Python: the chroot only has the stage3 toolchain.
     """
+    ensure_boot_to_greeter(cfg)
     loaders = selected_bootloaders(cfg)
     binrepo = ""
     if cfg.binhost and cfg.architecture == "amd64":
@@ -4070,17 +4283,16 @@ def _user_session_script(cfg: InstallConfig) -> str:
 
 
 def _desktop_packages(cfg: InstallConfig) -> list[str]:
-    """Browsers and Flatpak from the profile. Desktop metas are not installed."""
-    pkgs: list[str] = []
+    """Mandatory browsers, PipeWire, and Flatpak. Desktop metas are not installed."""
+    pkgs: list[str] = list(catalog.required_browser_atoms())
+    # Legacy saved profiles that only asked for one browser still get the pair.
+    if cfg.browser == "firefox":
+        pkgs.append("www-client/firefox")
     if cfg.pipewire:
         pkgs.extend(["media-video/pipewire", "media-video/wireplumber"])
-    if cfg.browser == "firefox-bin":
-        pkgs.append("www-client/firefox-bin")
-    elif cfg.browser == "firefox":
-        pkgs.append("www-client/firefox")
     if cfg.flatpak:
         pkgs.append("sys-apps/flatpak")
-    return pkgs
+    return list(dict.fromkeys(pkgs))
 
 
 def _crypttab(cfg: InstallConfig, devices: dict[str, str]) -> str:

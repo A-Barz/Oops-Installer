@@ -48,7 +48,8 @@ class AlreadySelectedPackageTests(unittest.TestCase):
         self.assertIn("gui-wm/hyprland", locked)
         self.assertIn("gui-apps/hyprpaper", locked)
         self.assertIn("media-video/pipewire", locked)
-        self.assertIn("www-client/firefox-bin", locked)
+        self.assertIn("www-client/firefox-bin:esr", locked)
+        self.assertIn("www-client/google-chrome", locked)
 
     def test_locked_includes_greetd_when_chosen(self) -> None:
         cfg = InstallConfig()

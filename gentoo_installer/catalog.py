@@ -37,6 +37,19 @@ def _p(atom: str, desc: str, overlay: str = "gentoo") -> tuple[str, str]:
     return (atom, desc + tag)
 
 
+# Always emerged. Gentoo has no www-client/firefox-esr; ESR is the :esr slot of
+# firefox-bin. Chrome needs ACCEPT_LICENSE beyond @FREE (handled in the wizard).
+REQUIRED_BROWSERS: tuple[Pkg, ...] = (
+    Pkg("www-client/firefox-bin:esr", "Firefox ESR — official binary (mandatory)"),
+    Pkg("www-client/google-chrome", "Google Chrome — official binary (mandatory)"),
+)
+
+
+def required_browser_atoms() -> list[str]:
+    """Chrome + Firefox ESR atoms every install receives."""
+    return [pkg.atom for pkg in REQUIRED_BROWSERS]
+
+
 # Roughly the top Wayland compositors people actually use, plus previously
 # offered GURU options that are still viable (river, SwayFX, MangoWM, miracle-wm).
 # GURU compositors enable that overlay only when selected. Hyprland stays on
@@ -453,6 +466,11 @@ def packages_for_selection(wm_atoms: list[str], shell: str, pipewire: bool) -> l
     return out
 
 
+# Fallback greeter session when Wayland is chosen but no compositor mapped.
+FALLBACK_WAYLAND_SESSION: tuple[str, str, str] = ("labwc", "labwc", "wayland")
+FALLBACK_WAYLAND_WM = "gui-wm/labwc"
+
+
 def login_sessions(desktop: str, atoms: list[str], shell: str = "") -> list[tuple[str, str, str]]:
     """Sessions the greeter should offer: (title, exec, wayland|x11)."""
     del desktop  # Desktop environments are not installed.
@@ -468,30 +486,61 @@ def login_sessions(desktop: str, atoms: list[str], shell: str = "") -> list[tupl
         sessions.append((title, command, kind))
 
     for atom in atoms:
-        if atom == "gui-wm/dwl":
+        bare = atom.split("::", 1)[0]
+        if bare == "gui-wm/dwl":
             add("dwl", dwl_cmd, "wayland")
             continue
-        if atom == "x11-wm/qtile" and shell_exec(shell):
+        if bare == "x11-wm/qtile" and shell_exec(shell):
             add("Qtile (Wayland)", "start-qtile", "wayland")
             continue
-        if atom in _SESSION_OVERRIDE:
-            override = _SESSION_OVERRIDE[atom]
+        if bare in _SESSION_OVERRIDE:
+            override = _SESSION_OVERRIDE[bare]
             if override:
                 add(*override)
             continue
         known = {p.atom for p in WINDOW_MANAGERS}
-        if atom not in known:
+        if bare not in known:
             continue
-        kind = "wayland" if any(p.atom == atom for p in WAYLAND_COMPOSITORS) else "x11"
-        command = atom.rsplit("/", 1)[-1]
-        add(_pkg_title(atom), command, kind)
+        kind = "wayland" if any(p.atom == bare for p in WAYLAND_COMPOSITORS) else "x11"
+        command = bare.rsplit("/", 1)[-1]
+        add(_pkg_title(bare), command, kind)
+    return sessions
+
+
+def needs_login_greeter(window_managers: list[str], shell: str = "", atoms: list[str] | None = None) -> bool:
+    """True when the install must boot to a graphical greeter (not a TTY)."""
+    picked = list(window_managers or [])
+    if atoms:
+        picked = list(dict.fromkeys(picked + list(atoms)))
+    shell_name = (shell or "none").strip()
+    if shell_name and shell_name != "none":
+        return True
+    if wayland_selected(picked):
+        return True
+    return any(
+        atom.split("::", 1)[0] in {"gui-apps/noctalia-shell", "gui-apps/dankmaterialshell"}
+        for atom in picked
+    )
+
+
+def ensure_login_sessions(
+    desktop: str, atoms: list[str], shell: str = ""
+) -> list[tuple[str, str, str]]:
+    """Sessions for the greeter, with a labwc fallback so the list is never empty."""
+    sessions = login_sessions(desktop, atoms, shell)
+    if sessions:
+        return sessions
+    if needs_login_greeter([], shell, atoms):
+        return [FALLBACK_WAYLAND_SESSION]
     return sessions
 
 
 def resolved_display_manager(display_manager: str, desktop: str, atoms: list[str]) -> str:
-    """Login manager after GRUB. Wayland sessions use greetd. X11 uses startx.
+    """Login manager after GRUB. Wayland sessions always get a greeter.
 
-    An explicit greetd/sddm/lightdm/gdm choice still wins. "none" stays on the TTY.
+    Explicit sddm/gdm/lightdm/greetd/slim still wins. For Wayland or a shell,
+    "none"/"auto" become greetd — a TTY-only boot is a project failure.
+    X11-only (dwm/i3) without Wayland keeps startx on the text console.
     """
     del desktop
     choice = (display_manager or "auto").strip()
@@ -508,12 +557,10 @@ def resolved_display_manager(display_manager: str, desktop: str, atoms: list[str
         return "gdm"
     if "x11-misc/lightdm" in picked:
         return "lightdm"
+    if needs_login_greeter([], "", list(picked)):
+        return "greetd"
     if choice == "none":
         return "none"
-    if wayland_selected(list(picked)) or any(
-        atom in picked for atom in ("gui-apps/noctalia-shell", "gui-apps/dankmaterialshell")
-    ):
-        return "greetd"
     return "none"
 
 
@@ -746,11 +793,12 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
     ),
     (
         "browsers",
-        "Web browsers",
+        "Bonus browsers (Chrome + Firefox ESR are already queued)",
         _pkgs(
-            Pkg("www-client/firefox-bin", "Firefox — official binary (no compile)"),
-            Pkg("www-client/firefox", "Firefox — compile from source (hours)"),
-            Pkg("www-client/google-chrome", "Google Chrome — official binary"),
+            # Chrome and Firefox ESR are mandatory (see REQUIRED_BROWSERS). This
+            # list is optional extras only. Gentoo has no www-client/firefox-esr
+            # package; ESR is the :esr slot of www-client/firefox-bin.
+            Pkg("www-client/firefox", "Firefox — compile from source (hours, Rapid)"),
             Pkg("www-client/librewolf", "LibreWolf — privacy-forked Firefox", "librewolf"),
             Pkg("www-client/qutebrowser", "qutebrowser — keyboard-driven Qt browser"),
             Pkg("www-client/falkon", "Falkon — KDE Qt WebEngine browser"),
@@ -1064,7 +1112,7 @@ WM_DOTFILES: dict[str, tuple[DotfileChoice, ...]] = {
                 "x11-terms/alacritty",
                 "kde-apps/dolphin",
                 "xfce-base/thunar",
-                "www-client/firefox-bin",
+                "www-client/firefox-bin:esr",
                 "app-shells/fish",
                 "media-fonts/jetbrains-mono",
                 "sys-process/btop",
