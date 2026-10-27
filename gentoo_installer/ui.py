@@ -106,7 +106,22 @@ def banner() -> None:
     print(paint("║" + "Handbook-ordered  ·  wiki.gentoo.org".center(w - 2) + "║", C.PURPLE))
     print(paint("╚" + line + "╝", C.BOLD, C.PURPLE))
     print()
+    opening_thanks()
     navigation_help()
+
+
+def opening_thanks() -> None:
+    """Brief welcome before handbook chapters. Stars are GitHub’s “rating”."""
+    print(paint("  Thanks for testing Oops-Installer.", C.BOLD, C.GREEN))
+    print(
+        paint(
+            "  If you enjoy it, a GitHub star is the usual rating "
+            "(https://github.com/A-Barz/Oops-Installer), and sharing an install "
+            "story on social media is welcome too — only if you want to.",
+            C.PURPLE,
+        )
+    )
+    print()
 
 
 def navigation_help() -> None:

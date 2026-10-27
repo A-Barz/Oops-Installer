@@ -3047,12 +3047,25 @@ def _keyword_text(cfg: InstallConfig) -> str:
 
     Skipping this leaves ~amd64/~arm64 packages masked and abort the emerge
     calculation (NetworkManager, chrony, overlay kernels, …). When the user
-    already accepted testing keywords globally, nothing extra is needed here.
+    already accepted testing keywords globally, nothing extra is needed here
+    except the Gentoo LTS sources pin (stable keywords only).
     """
+    arch = "amd64" if cfg.architecture == "amd64" else "arm64"
+    keyword = f"~{arch}"
+    lines: list[str] = []
+    # Real LTS path: sys-kernel/gentoo-sources at Gentoo stable. Negate ~arch so
+    # a global */* ~arch line cannot pull a testing series for that package.
+    if catalog.kernel_uses_stable_lts(cfg.kernel):
+        lines.append(f"sys-kernel/gentoo-sources -~{arch}")
     if cfg.testing_keywords:
-        return ""
-    keyword = "~amd64" if cfg.architecture == "amd64" else "~arm64"
-    lines = [f"{atom} {keyword}" for atom in _atoms_to_unmask(cfg)]
+        return ("\n".join(lines) + "\n") if lines else ""
+    skip_lts = set()
+    if catalog.kernel_uses_stable_lts(cfg.kernel):
+        skip_lts.add("sys-kernel/gentoo-sources")
+    for atom in _atoms_to_unmask(cfg):
+        if atom in skip_lts:
+            continue
+        lines.append(f"{atom} {keyword}")
     if not lines:
         return ""
     return "\n".join(lines) + "\n"

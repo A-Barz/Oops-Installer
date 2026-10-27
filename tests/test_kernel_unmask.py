@@ -22,6 +22,7 @@ class KernelChoiceTests(unittest.TestCase):
             [
                 "gentoo-kernel-bin",
                 "gentoo-kernel",
+                "gentoo-sources-lts",
                 "gentoo-sources",
                 "cachyos-kernel-bin",
                 "cachyos-kernel",
@@ -29,6 +30,33 @@ class KernelChoiceTests(unittest.TestCase):
         )
         joined = " ".join(names).lower()
         self.assertNotIn("ubuntu", joined)
+
+    def test_lts_menu_emerges_real_gentoo_sources_stable(self) -> None:
+        """No fake *-lts ebuild — Gentoo LTS is stable sys-kernel/gentoo-sources."""
+        self.assertEqual(catalog.kernel_atom("gentoo-sources-lts"), "sys-kernel/gentoo-sources")
+        self.assertTrue(catalog.kernel_uses_stable_lts("gentoo-sources-lts"))
+        self.assertFalse(catalog.kernel_uses_stable_lts("gentoo-sources"))
+        self.assertEqual(catalog.kernel_overlay("gentoo-sources-lts"), "gentoo")
+        labels = dict(catalog.kernel_menu_choices())
+        self.assertIn("LTS", labels["gentoo-sources-lts"])
+        self.assertIn("gentoo-sources", labels["gentoo-sources-lts"])
+
+    def test_lts_keywords_stay_stable(self) -> None:
+        cfg = InstallConfig()
+        cfg.architecture = "amd64"
+        cfg.testing_keywords = False
+        cfg.kernel = "gentoo-sources-lts"
+        text = _keyword_text(cfg)
+        self.assertIn("sys-kernel/gentoo-sources -~amd64", text)
+        self.assertNotIn("sys-kernel/gentoo-sources ~amd64", text)
+
+    def test_lts_keywords_pin_when_global_testing(self) -> None:
+        cfg = InstallConfig()
+        cfg.architecture = "amd64"
+        cfg.testing_keywords = True
+        cfg.kernel = "gentoo-sources-lts"
+        text = _keyword_text(cfg)
+        self.assertEqual(text.strip(), "sys-kernel/gentoo-sources -~amd64")
 
     def test_cachy_maps_to_overlay(self) -> None:
         self.assertEqual(catalog.kernel_overlay("cachyos-kernel-bin"), "CachyOS-kernels")

@@ -121,6 +121,9 @@ def _kernel_raw_minutes(cfg: InstallConfig) -> int:
         return 10 if binary else 25
     if kernel in {"gentoo-kernel", "cachyos-kernel"}:
         return 55 if binary else 90
+    # gentoo-sources and gentoo-sources-lts (menu id → same emerge) are source builds.
+    if kernel in {"gentoo-sources", "gentoo-sources-lts"}:
+        return 80
     return 80
 
 

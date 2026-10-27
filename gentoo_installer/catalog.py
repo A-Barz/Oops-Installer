@@ -170,12 +170,21 @@ TESTING_ATOMS = frozenset(
 # package name only (no category). Overlay kernels need eselect repository enable.
 # There is no Ubuntu LTS kernel ebuild in ::gentoo or a known repos.gentoo.org
 # overlay that this installer can emerge (Ubuntu ships .deb kernels).
+#
+# Gentoo also has no package named *-lts or a dedicated LTS SLOT. Gentoo stable
+# for sys-kernel/gentoo-sources is the real LTS path (stable keywords track
+# upstream longterm series). The gentoo-sources-lts menu id emerges that package
+# and keeps stable keywords (see kernel_uses_stable_lts).
 KERNEL_OPTIONS: list[Pkg] = [
     Pkg("sys-kernel/gentoo-kernel-bin", "Binary dist-kernel — fastest, matches binhost"),
     Pkg("sys-kernel/gentoo-kernel", "Source dist-kernel — compiled on this machine"),
     Pkg(
+        "sys-kernel/gentoo-sources-lts",
+        "Gentoo LTS — stable sys-kernel/gentoo-sources (upstream longterm; Gentoo stable keywords)",
+    ),
+    Pkg(
         "sys-kernel/gentoo-sources",
-        "gentoo-sources — manual config; tracks upstream LTS (dist-kernel helpers still used if possible)",
+        "gentoo-sources — manual config; follows your accept_keywords (may be newer than stable LTS)",
     ),
     Pkg(
         "sys-kernel/cachyos-kernel-bin",
@@ -189,25 +198,59 @@ KERNEL_OPTIONS: list[Pkg] = [
     ),
 ]
 
+# Menu ids that are not real Portage package names. Value is the emerge name.
+KERNEL_MENU_TO_PACKAGE: dict[str, str] = {
+    "gentoo-sources-lts": "gentoo-sources",
+}
+
+
+def kernel_menu_name(name: str) -> str:
+    """Short menu / config id (no category)."""
+    bare = (name or "gentoo-kernel-bin").split("::", 1)[0].strip()
+    if "/" in bare:
+        bare = bare.rsplit("/", 1)[-1]
+    return bare or "gentoo-kernel-bin"
+
+
+def kernel_package_name(name: str) -> str:
+    """Real Portage package name under sys-kernel/ for emerge."""
+    short = kernel_menu_name(name)
+    return KERNEL_MENU_TO_PACKAGE.get(short, short)
+
+
+def kernel_uses_stable_lts(name: str) -> bool:
+    """True when this choice must stay on Gentoo stable gentoo-sources (LTS path)."""
+    return kernel_menu_name(name) == "gentoo-sources-lts"
+
 
 def kernel_menu_choices() -> list[tuple[str, str]]:
-    """Wizard rows: (short package name, description)."""
+    """Wizard rows: (short package or menu name, description)."""
     return [(pkg.atom.rsplit("/", 1)[-1], pkg.desc) for pkg in KERNEL_OPTIONS]
 
 
 def kernel_atom(name: str) -> str:
-    """Full emerge atom for a short kernel package name."""
+    """Full emerge atom for a short kernel package or menu name."""
     bare = (name or "gentoo-kernel-bin").split("::", 1)[0]
     if "/" in bare:
+        # Allow saved profiles that already stored a full atom.
+        cat_pkg = bare
+        pkg = cat_pkg.rsplit("/", 1)[-1]
+        if pkg in KERNEL_MENU_TO_PACKAGE:
+            return f"sys-kernel/{KERNEL_MENU_TO_PACKAGE[pkg]}"
         return bare
-    return f"sys-kernel/{bare}"
+    return f"sys-kernel/{kernel_package_name(bare)}"
 
 
 def kernel_overlay(name: str) -> str:
     """Overlay required for this kernel choice, or gentoo."""
+    menu = kernel_menu_name(name)
+    for pkg in KERNEL_OPTIONS:
+        if pkg.atom.rsplit("/", 1)[-1] == menu:
+            return pkg.overlay
+    # Real package name fallback (e.g. after alias resolution).
     atom = kernel_atom(name)
     for pkg in KERNEL_OPTIONS:
-        if pkg.atom == atom:
+        if kernel_atom(pkg.atom.rsplit("/", 1)[-1]) == atom and pkg.overlay != "gentoo":
             return pkg.overlay
     return "gentoo"
 

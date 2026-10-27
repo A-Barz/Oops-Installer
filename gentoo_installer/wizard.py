@@ -159,6 +159,7 @@ def warn_if_ntfs_present() -> None:
 
 def run_wizard(cfg: InstallConfig) -> InstallConfig:
     """Drive every chapter in handbook order, then the pre-wipe review."""
+    # Opening thanks is printed with the banner (install.py main) before this runs.
     ui.info("This installer follows the Gentoo AMD64 Handbook chapter by chapter.")
     ui.info(HANDBOOK)
     ui.warn("It can wipe the selected disk. Back up first. Prefer testing in a VM.")
@@ -629,8 +630,8 @@ def _kernel(cfg: InstallConfig) -> None:
     )
     ui.info(
         "CachyOS options enable the CachyOS-kernels overlay. "
-        "There is no Ubuntu LTS kernel ebuild in Gentoo Portage for this installer to emerge; "
-        "gentoo-sources tracks upstream LTS instead."
+        "There is no Ubuntu LTS ebuild and no separate gentoo-*-lts package in Portage. "
+        "Gentoo’s LTS path is stable sys-kernel/gentoo-sources (Gentoo stabilizes upstream longterm)."
     )
     known = {name for name, _desc in catalog.kernel_menu_choices()}
     preferred = cfg.kernel if cfg.kernel in known else "gentoo-kernel-bin"
@@ -639,6 +640,11 @@ def _kernel(cfg: InstallConfig) -> None:
         catalog.kernel_menu_choices(),
         preferred,
     )
+    if catalog.kernel_uses_stable_lts(cfg.kernel):
+        ui.info(
+            "Gentoo LTS selected: emerging sys-kernel/gentoo-sources with Gentoo stable keywords "
+            f"({catalog.kernel_atom(cfg.kernel)}). Testing (~arch) will not be applied to that package."
+        )
     if catalog.kernel_overlay(cfg.kernel) != "gentoo":
         ui.info(
             f"{cfg.kernel} comes from the {catalog.kernel_overlay(cfg.kernel)} overlay, "
