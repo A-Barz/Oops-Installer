@@ -173,8 +173,20 @@ def install_wait_notice() -> None:
     info(INSTALL_WAIT_NOTICE)
 
 
+_STATUS_ROWS = 2
+
+
+def progress_bar(percent: int, remaining: str, cells: int = 28) -> str:
+    """Render `[####----]  42%  1h 12m left` (no newline)."""
+    percent = max(0, min(100, int(percent)))
+    filled = percent * cells // 100
+    bar = paint("#" * filled, C.BOLD, C.GREEN) + paint("-" * (cells - filled), C.DIM, C.PURPLE)
+    label = paint(f"{percent:3d}%", C.BOLD, C.GREEN) + "  " + paint(remaining, C.PURPLE)
+    return f"  [{bar}]  {label}"
+
+
 def progress_percent(percent: int) -> None:
-    """One line with the install percent. Command output above it stays on screen."""
+    """Fallback one-line percent when a sticky status region is not available."""
     percent = max(0, min(100, int(percent)))
     line = "  " + paint(f"{percent}%", C.BOLD, C.GREEN)
     with OUTPUT_LOCK:
@@ -199,12 +211,12 @@ _INSTALL_ATOM = re.compile(r"^>> installing (\S+/\S+)\s*$")
 
 
 class InstallProgress:
-    """Print the install percent while host commands run.
+    """Sticky top progress: bar, percent, emerge Jobs countdown.
 
-    The slices are the minute budget from estimate.progress_plan. @world
-    follows that emerge's finished/total counter. Each later package follows
-    the counter of its own emerge, weighted by the same minutes as the
-    spoken estimate. The chroot's closing line does not add a leftover slice.
+    A skill once replaced the bar with a bare percent that scrolled away under
+    emerge output, so the window looked like it had no progress. This restores
+    a two-line status pinned at the top (scroll region) while keeping the
+    emerge-driven minute slices from estimate.progress_plan.
     """
 
     _PRE_PHASES = ("host_packages", "network", "disks", "stage3", "chroot_mounts")
@@ -215,6 +227,7 @@ class InstallProgress:
         self._atoms = dict(plan.atoms)
         self._alongside = max(0, int(plan.alongside))
         self.after = max(1, sum(self._atoms.values()) + self._alongside)
+        self._plan_minutes = max(1, int(plan.total))
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -226,9 +239,15 @@ class InstallProgress:
         self._world_ratio = 0.0
         self._atom_ratio: dict[str, float] = {}
         self._open_key: str | None = None
+        self._open_label = ""
+        self._jobs_done = 0
+        self._jobs_total = 0
+        self._status_sig = ""
+        self._pinned = False
 
     def start(self) -> None:
         self._started = time.monotonic()
+        self._pin_header()
         self.tick()
         self._thread = threading.Thread(target=self._loop, name="install-progress", daemon=True)
         self._thread.start()
@@ -237,7 +256,7 @@ class InstallProgress:
         with self._lock:
             self._chroot_at = time.monotonic()
             self._phase = "early"
-        self._publish()
+        self._publish(force=True)
 
     def phase_done(self, name: str) -> None:
         """Host phase finished. Those five steps share the opening band."""
@@ -246,28 +265,44 @@ class InstallProgress:
         with self._lock:
             idx = self._PRE_PHASES.index(name) + 1
             self._floor = max(self._floor, idx)
-        self._publish()
+            self._open_label = name.replace("_", " ")
+            self._jobs_done = 0
+            self._jobs_total = 0
+        self._publish(force=True)
 
     def feed(self, line: str) -> None:
-        """One line of chroot output. Emerge counters move the percent."""
+        """One line of chroot output. Emerge counters move the percent and Jobs line."""
         clean = _ANSI.sub("", line).strip()
         if not clean:
             return
+        jobs_changed = False
         with self._lock:
             emerged = _EMERGE_ATOM.match(clean)
             installing = _INSTALL_ATOM.match(clean)
             if clean.endswith(">> emerge @world"):
                 self._phase = "world"
                 self._open_key = None
+                self._open_label = "@world"
+                self._jobs_done = 0
+                self._jobs_total = 0
+                jobs_changed = True
             elif "@world" in clean and "rebuilding from source" in clean:
                 # The source rebuild starts its own counter. A package build
                 # log that mentions "Calculating dependencies" must not.
                 self._world_ratio = 0.0
+                self._jobs_done = 0
+                self._jobs_total = 0
+                jobs_changed = True
             elif ">> fetch kernel and package sources" in clean:
                 self._phase = "fetch"
                 self._open_key = None
+                self._open_label = "fetch sources"
+                self._jobs_done = 0
+                self._jobs_total = 0
+                jobs_changed = True
             elif "Chroot configuration complete." in clean:
                 self._phase = "tail"
+                self._open_label = "finishing"
             elif (
                 emerged
                 or installing
@@ -278,23 +313,37 @@ class InstallProgress:
                 self._phase = "after"
                 if emerged:
                     self._open_known(emerged.group(1))
+                    jobs_changed = True
                 elif installing:
                     self._open_known(installing.group(1))
+                    jobs_changed = True
+                elif clean.endswith(">> emerge kernel"):
+                    self._open_label = "kernel"
+                    self._jobs_done = 0
+                    self._jobs_total = 0
+                    jobs_changed = True
             else:
                 match = _JOBS_LINE.search(clean) or _INSTALLING_LINE.search(clean)
                 if match:
                     total = int(match.group(2))
                     if total > 0:
-                        self._note_jobs(int(match.group(1)), total)
-        self._publish()
+                        done = int(match.group(1))
+                        self._note_jobs(done, total)
+                        self._jobs_done = done
+                        self._jobs_total = total
+                        jobs_changed = True
+        self._publish(force=jobs_changed)
 
     def tick(self) -> None:
-        self._publish()
+        self._publish(force=True)
 
     def finish(self) -> None:
         self.stop()
         try:
-            progress_percent(100)
+            line = progress_bar(100, "done")
+            with OUTPUT_LOCK:
+                print(line, flush=True)
+                print("  " + paint("emerge complete", C.GREEN), flush=True)
         except Exception:
             return
 
@@ -303,6 +352,7 @@ class InstallProgress:
         if self._thread is not None:
             self._thread.join(timeout=2)
             self._thread = None
+        self._unpin_header()
 
     def snapshot(self) -> int:
         """Current percent, 0–96 until finish() prints 100.
@@ -319,6 +369,22 @@ class InstallProgress:
             return min(8, self._floor + int(elapsed / (20 * 60) * 3))
         elapsed = now - self._started if self._started else 0.0
         return min(5, max(self._floor, int(elapsed / (25 * 60) * 5)))
+
+    def status_lines(self) -> tuple[str, str]:
+        """Bar/percent/ETA line plus emerge Jobs countdown (for tests and draw)."""
+        from .estimate import format_remaining
+
+        percent = max(self._shown, self.snapshot()) if self._shown >= 0 else self.snapshot()
+        left = max(0, int(self._plan_minutes * (100 - percent) / 100))
+        bar = progress_bar(percent, format_remaining(left))
+        if self._jobs_total > 0:
+            left_pkgs = max(0, self._jobs_total - self._jobs_done)
+            jobs = f"Jobs: {self._jobs_done} of {self._jobs_total}  ({left_pkgs} left in this emerge)"
+        else:
+            jobs = "Jobs: waiting for emerge counters"
+        label = self._open_label or self._phase or "starting"
+        detail = "  " + paint(label, C.BOLD, C.GREEN) + "  " + paint(jobs, C.PURPLE)
+        return bar, detail
 
     def _from_units(self) -> int:
         total = self.early + self.world + self.after
@@ -337,6 +403,9 @@ class InstallProgress:
         # Unknown emerges (sudo, dbus, a retry of a package already counted)
         # must not invent weight or the bar fills before the long packages.
         self._open_key = key if key in self._atoms else None
+        self._open_label = atom
+        self._jobs_done = 0
+        self._jobs_total = 0
 
     def _note_jobs(self, done: int, total: int) -> None:
         done = max(0, min(done, total))
@@ -350,23 +419,70 @@ class InstallProgress:
         if ratio > current:
             self._atom_ratio[self._open_key] = ratio
 
-    def _publish(self) -> None:
+    def _publish(self, force: bool = False) -> None:
         with self._lock:
             percent = self.snapshot()
             if percent < self._shown:
                 percent = self._shown
-            if percent == self._shown:
-                return
             self._shown = percent
+            bar, detail = self.status_lines()
+            sig = f"{percent}|{self._jobs_done}|{self._jobs_total}|{self._open_label}|{self._phase}"
+            if not force and sig == self._status_sig:
+                return
+            self._status_sig = sig
         if not self._started:
             return
         try:
-            progress_percent(percent)
+            self._draw_status(bar, detail)
         except Exception:
             return
 
+    def _pin_header(self) -> None:
+        """Reserve the top two rows; emerge output scrolls underneath."""
+        if not sys.stdout.isatty():
+            return
+        try:
+            rows = max(_STATUS_ROWS + 4, shutil.get_terminal_size((100, 24)).lines)
+            with OUTPUT_LOCK:
+                sys.stdout.write(f"\033[{_STATUS_ROWS + 1};{rows}r")
+                sys.stdout.write(f"\033[{_STATUS_ROWS + 1};1H")
+                sys.stdout.flush()
+            self._pinned = True
+        except Exception:
+            self._pinned = False
+
+    def _unpin_header(self) -> None:
+        if not self._pinned:
+            return
+        try:
+            with OUTPUT_LOCK:
+                sys.stdout.write("\033[r")
+                for row in range(1, _STATUS_ROWS + 1):
+                    sys.stdout.write(f"\033[{row};1H\033[2K")
+                sys.stdout.write(f"\033[{_STATUS_ROWS + 1};1H")
+                sys.stdout.flush()
+        except Exception:
+            pass
+        self._pinned = False
+
+    def _draw_status(self, bar: str, detail: str) -> None:
+        cols = width()
+        # Strip ANSI when truncating length is hard; keep full colour when it fits.
+        with OUTPUT_LOCK:
+            if self._pinned:
+                sys.stdout.write("\033[s")
+                sys.stdout.write(f"\033[1;1H\033[2K{bar}")
+                sys.stdout.write(f"\033[2;1H\033[2K{detail}")
+                sys.stdout.write("\033[u")
+                sys.stdout.flush()
+            else:
+                # Non-TTY / no pin: print a compact status line so progress is still visible.
+                print(bar, flush=True)
+                print(detail, flush=True)
+
     def _loop(self) -> None:
-        while not self._stop.wait(15):
+        # Refresh often enough that the Jobs countdown and ETA stay live.
+        while not self._stop.wait(2):
             self.tick()
 
 

@@ -785,11 +785,6 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
                 "flatpak-app/dev.pulsar_edit.Pulsar",
                 "Pulsar — Atom successor (Flatpak; Atom itself is discontinued)",
             ),
-            # Obsidian is not in ::gentoo; install from Flathub after Flatpak is queued.
-            Pkg(
-                "flatpak-app/md.obsidian.Obsidian",
-                "Obsidian — Markdown knowledge base (Flatpak)",
-            ),
             Pkg("app-editors/logseq-desktop-bin", "Logseq — open-source knowledge base (binary)"),
         ),
     ),
@@ -800,20 +795,6 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
             Pkg("app-editors/vscode", "Visual Studio Code — Microsoft binary"),
             Pkg("app-editors/vscodium", "VSCodium — open-source VS Code builds"),
             Pkg("app-editors/zed", "Zed — high-performance GUI editor"),
-            Pkg("dev-util/geany", "Geany — lightweight IDE"),
-            # JetBrains IDEs are not in ::gentoo; offer official Flathub apps.
-            Pkg(
-                "flatpak-app/com.jetbrains.IntelliJ-IDEA-Community",
-                "IntelliJ IDEA Community (Flatpak)",
-            ),
-            Pkg(
-                "flatpak-app/com.jetbrains.PyCharm-Community",
-                "PyCharm Community (Flatpak)",
-            ),
-            Pkg(
-                "flatpak-app/com.jetbrains.WebStorm",
-                "WebStorm (Flatpak — proprietary JetBrains IDE)",
-            ),
         ),
     ),
     (

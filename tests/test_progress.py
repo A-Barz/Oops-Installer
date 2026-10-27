@@ -16,7 +16,7 @@ from gentoo_installer.estimate import (
     estimate_minutes,
     progress_plan,
 )
-from gentoo_installer.ui import InstallProgress
+from gentoo_installer.ui import InstallProgress, progress_bar
 
 
 def legacy_minutes(cfg: InstallConfig) -> int:
@@ -186,6 +186,33 @@ class ProgressTests(unittest.TestCase):
         progress.feed(">> emerge failed (1): www-client/firefox; building this package from source")
         progress.feed(">>> Jobs: 1 of 1 complete")
         self.assertEqual(progress.snapshot(), held)
+
+    def test_status_lines_include_bar_percent_and_jobs_countdown(self) -> None:
+        progress = InstallProgress(progress_plan(desktop_source()))
+        progress.feed(">> emerge @world")
+        progress.feed(">>> Jobs: 5 of 40 complete")
+        bar, detail = progress.status_lines()
+        self.assertIn("%", bar)
+        self.assertIn("[", bar)
+        self.assertIn("#", progress_bar(42, "still going"))
+        self.assertIn("Jobs: 5 of 40", detail)
+        self.assertIn("35 left in this emerge", detail)
+        self.assertIn("@world", detail)
+
+    def test_per_package_jobs_countdown_updates_status(self) -> None:
+        cfg = InstallConfig()
+        cfg.binhost = False
+        cfg.profile = "default/linux/amd64/23.0"
+        cfg.selected_packages = ["www-client/firefox"]
+        progress = InstallProgress(progress_plan(cfg))
+        progress.feed(">> emerge @world")
+        progress.feed(">>> Jobs: 4 of 4 complete")
+        progress.feed(">> emerge www-client/firefox")
+        progress.feed(">>> Jobs: 3 of 10 complete")
+        _bar, detail = progress.status_lines()
+        self.assertIn("www-client/firefox", detail)
+        self.assertIn("Jobs: 3 of 10", detail)
+        self.assertIn("7 left in this emerge", detail)
 
 
 if __name__ == "__main__":

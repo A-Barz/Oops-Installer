@@ -87,22 +87,21 @@ class EditorsIdesTests(unittest.TestCase):
         self.fail(f"missing category {key}")
         return set()
 
-    def test_editors_include_sublime_obsidian_pulsar_note(self) -> None:
+    def test_editors_include_sublime_and_pulsar_not_obsidian(self) -> None:
         atoms = self._category_atoms("editors")
         self.assertIn("app-editors/sublime-text", atoms)
-        self.assertIn("flatpak-app/md.obsidian.Obsidian", atoms)
         self.assertIn("flatpak-app/dev.pulsar_edit.Pulsar", atoms)
         self.assertIn("app-editors/helix", atoms)
         self.assertIn("app-editors/neovim", atoms)
+        self.assertNotIn("flatpak-app/md.obsidian.Obsidian", atoms)
 
-    def test_ides_include_vscode_zed_jetbrains_flatpaks(self) -> None:
+    def test_ides_include_vscode_zed_without_jetbrains_or_geany(self) -> None:
         atoms = self._category_atoms("ides")
         self.assertIn("app-editors/vscode", atoms)
         self.assertIn("app-editors/vscodium", atoms)
         self.assertIn("app-editors/zed", atoms)
-        self.assertIn("flatpak-app/com.jetbrains.IntelliJ-IDEA-Community", atoms)
-        self.assertIn("flatpak-app/com.jetbrains.PyCharm-Community", atoms)
-        # vscode is no longer treated as a removed GURU atom.
+        self.assertNotIn("dev-util/geany", atoms)
+        self.assertTrue(all("jetbrains" not in atom.lower() for atom in atoms))
         self.assertNotIn("app-editors/vscode", catalog.REMOVED_GURU_ATOMS)
 
 
