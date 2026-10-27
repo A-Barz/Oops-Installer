@@ -93,7 +93,10 @@ class InstallConfig:
     binpkg_respect_use: bool = False
     use_flags: str = "dist-kernel"
     extra_use: list[str] = field(default_factory=list)
-    accept_license: str = "*"
+    # Default stays free-only-ish; proprietary codecs expand this after explicit accept.
+    accept_license: str = "@FREE @BINARY-REDISTRIBUTABLE"
+    # Set only after the wizard's accept/decline license prompt for proprietary codecs.
+    nonfree_codecs: bool = False
     video_cards: str = "auto"  # auto = lspci heuristic in detect.detect_gpu()
     input_devices: str = "libinput"  # libinput, plus wacom when a tablet is present
     lto: bool = False

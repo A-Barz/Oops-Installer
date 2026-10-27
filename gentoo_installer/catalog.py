@@ -37,20 +37,25 @@ def _p(atom: str, desc: str, overlay: str = "gentoo") -> tuple[str, str]:
     return (atom, desc + tag)
 
 
-# Compositors offered by the wizard. Other GURU compositors (river, swayfx, …)
-# are not options. Niri is the GURU exception, enabled only when it is selected.
-# Hyprland stays on hyproverlay, which is not GURU.
+# Roughly the top Wayland compositors people actually use, plus previously
+# offered GURU options that are still viable (river, SwayFX, MangoWM, miracle-wm).
+# GURU compositors enable that overlay only when selected. Hyprland stays on
+# hyproverlay (not GURU).
 
 WAYLAND_COMPOSITORS: list[Pkg] = [
     Pkg("gui-wm/hyprland", "Hyprland — dynamic tiling Wayland compositor", "hyproverlay"),
     Pkg("gui-wm/sway", "Sway — i3-compatible wlroots compositor"),
+    Pkg("gui-wm/swayfx", "SwayFX — Sway with eye-candy (rounded corners, blur)", "guru"),
+    Pkg("gui-wm/niri", "Niri — scrollable tiling Wayland compositor", "guru"),
+    Pkg("gui-wm/river", "River — dynamic tiling Wayland compositor (Zig)", "guru"),
     Pkg("gui-wm/wayfire", "Wayfire — stacking Wayland compositor"),
     Pkg("gui-wm/labwc", "Labwc — Openbox-style stacking compositor"),
     Pkg("gui-wm/dwl", "dwl — suckless dwm for Wayland"),
-    Pkg("gui-wm/niri", "Niri — scrollable tiling Wayland compositor", "guru"),
+    Pkg("gui-wm/mangowm", "MangoWM — wlroots compositor with SceneFX eye-candy", "guru"),
+    Pkg("gui-wm/miracle-wm", "miracle-wm — Mir-based tiling Wayland compositor", "guru"),
     Pkg("x11-wm/qtile", "Qtile — Python WM on Wayland"),
+    Pkg("gui-wm/gamescope", "Gamescope — Steam/micro-compositor"),
     Pkg("dev-libs/weston", "Weston — Wayland reference compositor"),
-    Pkg("gui-wm/gamescope", "Gamescope — micro-compositor"),
 ]
 
 # Suckless dwm and i3. The long X11/DE window-manager list is not offered.
@@ -65,6 +70,10 @@ WINDOW_MANAGERS: list[Pkg] = WAYLAND_COMPOSITORS + X11_WINDOW_MANAGERS
 _SESSION_OVERRIDE: dict[str, tuple[str, str, str] | None] = {
     "gui-wm/hyprland": ("Hyprland", "Hyprland", "wayland"),
     "gui-wm/niri": ("Niri", "niri-session", "wayland"),
+    "gui-wm/swayfx": ("SwayFX", "sway", "wayland"),
+    "gui-wm/river": ("River", "river", "wayland"),
+    "gui-wm/mangowm": ("MangoWM", "mango", "wayland"),
+    "gui-wm/miracle-wm": ("miracle-wm", "miracle-wm", "wayland"),
     "x11-wm/qtile": ("Qtile (Wayland)", "qtile start -b wayland", "wayland"),
     "dev-libs/weston": ("Weston", "weston", "wayland"),
     "gui-wm/gamescope": ("Gamescope", "gamescope -- foot", "wayland"),
@@ -93,15 +102,12 @@ SHELL_EXEC: dict[str, str] = {
     "dms": "dms",
 }
 
-# Previously offered from GURU. They are not menu options, and a saved profile
-# or a typed atom must not emerge them. The selected shell is the exception.
+# Previously offered from GURU but not restored as menu options. A saved profile
+# or typed atom must not emerge them. Wizard-offered GURU WMs/shells are the
+# exception (see offered_guru_atoms). vscode/vscodium/helix now live in ::gentoo.
 REMOVED_GURU_ATOMS = frozenset(
     {
-        "gui-wm/swayfx",
-        "gui-wm/river",
         "gui-wm/cage",
-        "gui-wm/mangowm",
-        "gui-wm/miracle-wm",
         "gui-apps/fuzzel",
         "gui-apps/swaylock-effects",
         "gui-apps/xwayland-satellite",
@@ -109,9 +115,6 @@ REMOVED_GURU_ATOMS = frozenset(
         "x11-misc/ly",
         "gui-apps/tuigreet",
         "www-client/brave-bin",
-        "app-editors/helix",
-        "app-editors/vscode",
-        "app-editors/vscodium",
         "app-misc/fastfetch",
         "app-office/onlyoffice-bin",
         "net-im/discord",
@@ -128,6 +131,10 @@ REMOVED_GURU_ATOMS = frozenset(
 TESTING_ATOMS = frozenset(
     {
         "gui-wm/niri",
+        "gui-wm/swayfx",
+        "gui-wm/river",
+        "gui-wm/mangowm",
+        "gui-wm/miracle-wm",
         "gui-wm/gamescope",
         "x11-themes/kvantum",
         "x11-themes/tela-icon-theme",
@@ -142,6 +149,7 @@ TESTING_ATOMS = frozenset(
         "sys-kernel/cachyos-kernel",
         "sys-kernel/cachyos-kernel-bin",
         "sys-kernel/cachyos-sources",
+        "media-libs/fdk-aac",
     }
 )
 
@@ -196,9 +204,12 @@ _WLR_HELPER_COMPOSITORS = frozenset(
     {
         "gui-wm/hyprland",
         "gui-wm/sway",
+        "gui-wm/swayfx",
+        "gui-wm/river",
         "gui-wm/wayfire",
         "gui-wm/labwc",
         "gui-wm/dwl",
+        "gui-wm/mangowm",
         "x11-wm/qtile",
     }
 )
@@ -233,6 +244,17 @@ WM_REQUIREMENTS: dict[str, list[Pkg]] = {
         Pkg("gui-apps/swaylock", "Swaylock"),
         Pkg("gui-apps/foot", "foot terminal"),
     ],
+    "gui-wm/swayfx": [
+        Pkg("gui-apps/swaybg", "SwayBG wallpaper"),
+        Pkg("gui-apps/swayidle", "Swayidle"),
+        Pkg("gui-apps/swaylock", "Swaylock"),
+        Pkg("gui-apps/foot", "foot terminal"),
+    ],
+    "gui-wm/river": [
+        Pkg("gui-apps/foot", "foot terminal"),
+        Pkg("gui-apps/swaybg", "Wallpaper"),
+        Pkg("gui-apps/swaylock", "Swaylock"),
+    ],
     "gui-wm/wayfire": [
         Pkg("gui-apps/wf-shell", "wf-shell — Wayfire panel and background"),
     ],
@@ -242,6 +264,13 @@ WM_REQUIREMENTS: dict[str, list[Pkg]] = {
         Pkg("gui-apps/foot", "foot terminal"),
     ],
     "gui-wm/dwl": [
+        Pkg("gui-apps/foot", "foot terminal"),
+    ],
+    "gui-wm/mangowm": [
+        Pkg("gui-apps/foot", "foot terminal"),
+        Pkg("gui-apps/swaybg", "Wallpaper"),
+    ],
+    "gui-wm/miracle-wm": [
         Pkg("gui-apps/foot", "foot terminal"),
     ],
     "gui-wm/niri": [
@@ -336,12 +365,37 @@ def shell_exec(shell: str) -> str:
 
 
 def offered_guru_atoms(shell: str) -> set[str]:
-    """GURU atoms the wizard may emerge: the chosen shell, its greeter, and Niri."""
+    """GURU atoms the wizard may emerge: shells, greeter, and offered GURU WMs."""
     allowed = set(shell_atoms(shell))
-    allowed.add("gui-wm/niri")
+    for pkg in WINDOW_MANAGERS:
+        if pkg.overlay == "guru":
+            allowed.add(pkg.atom)
     if shell == "noctalia":
         allowed.add(NOCTALIA_GREETER.atom)
     return allowed
+
+
+# Proprietary / patent-encumbered multimedia stack. Only emerged after the user
+# explicitly accepts the licenses in the wizard (cfg.nonfree_codecs).
+NONFREE_CODEC_PACKAGES: list[Pkg] = [
+    Pkg("media-libs/gst-plugins-ugly", "GStreamer ugly plugins — MPEG, DVD, patented codecs"),
+    Pkg("media-libs/gst-plugins-bad", "GStreamer bad plugins — extra formats"),
+    Pkg("media-plugins/gst-plugins-libav", "GStreamer FFmpeg plugin — broad codec coverage"),
+    Pkg("media-libs/fdk-aac", "Fraunhofer FDK AAC (proprietary license)"),
+    Pkg("media-libs/faac", "FAAC AAC encoder"),
+    Pkg("media-sound/lame", "LAME MP3 encoder"),
+    Pkg("media-video/ffmpeg", "FFmpeg — decode/encode many formats"),
+]
+
+# Licenses appended to ACCEPT_LICENSE when non-free codecs are accepted.
+NONFREE_CODEC_LICENSES = (
+    "FraunhoferFDK",
+    "MPEG-4",
+)
+
+
+def nonfree_codec_atoms() -> list[str]:
+    return [pkg.atom for pkg in NONFREE_CODEC_PACKAGES]
 
 
 def niri_app_rows() -> list[tuple[str, str]]:
@@ -708,16 +762,58 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
     ),
     (
         "editors",
-        "Editors & IDEs",
+        "Text editors",
         _pkgs(
             Pkg("app-editors/neovim", "Neovim"),
             Pkg("app-editors/vim", "Vim"),
+            Pkg("app-editors/gvim", "gVim — Vim with a GUI"),
             Pkg("app-editors/emacs", "GNU Emacs"),
             Pkg("app-editors/nano", "nano"),
-            Pkg("dev-util/geany", "Geany"),
+            Pkg("app-editors/helix", "Helix — modal editor"),
+            Pkg("app-editors/kakoune", "Kakoune"),
+            Pkg("app-editors/micro", "micro — friendly terminal editor"),
+            Pkg("app-editors/sublime-text", "Sublime Text — proprietary"),
             Pkg("app-editors/kate", "Kate"),
             Pkg("app-editors/gedit", "gedit"),
-            Pkg("app-editors/kile", "Kile"),
+            Pkg("app-editors/gnome-text-editor", "GNOME Text Editor"),
+            Pkg("app-editors/featherpad", "FeatherPad"),
+            Pkg("app-editors/mousepad", "Mousepad"),
+            Pkg("app-editors/kile", "Kile — LaTeX"),
+            Pkg("app-editors/ghostwriter", "ghostwriter — Markdown"),
+            # Atom is discontinued; Pulsar is the community fork (Flathub, not Portage).
+            Pkg(
+                "flatpak-app/dev.pulsar_edit.Pulsar",
+                "Pulsar — Atom successor (Flatpak; Atom itself is discontinued)",
+            ),
+            # Obsidian is not in ::gentoo; install from Flathub after Flatpak is queued.
+            Pkg(
+                "flatpak-app/md.obsidian.Obsidian",
+                "Obsidian — Markdown knowledge base (Flatpak)",
+            ),
+            Pkg("app-editors/logseq-desktop-bin", "Logseq — open-source knowledge base (binary)"),
+        ),
+    ),
+    (
+        "ides",
+        "IDEs (2026)",
+        _pkgs(
+            Pkg("app-editors/vscode", "Visual Studio Code — Microsoft binary"),
+            Pkg("app-editors/vscodium", "VSCodium — open-source VS Code builds"),
+            Pkg("app-editors/zed", "Zed — high-performance GUI editor"),
+            Pkg("dev-util/geany", "Geany — lightweight IDE"),
+            # JetBrains IDEs are not in ::gentoo; offer official Flathub apps.
+            Pkg(
+                "flatpak-app/com.jetbrains.IntelliJ-IDEA-Community",
+                "IntelliJ IDEA Community (Flatpak)",
+            ),
+            Pkg(
+                "flatpak-app/com.jetbrains.PyCharm-Community",
+                "PyCharm Community (Flatpak)",
+            ),
+            Pkg(
+                "flatpak-app/com.jetbrains.WebStorm",
+                "WebStorm (Flatpak — proprietary JetBrains IDE)",
+            ),
         ),
     ),
     (

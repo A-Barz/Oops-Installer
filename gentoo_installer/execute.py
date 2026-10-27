@@ -2817,6 +2817,8 @@ def _atoms_to_unmask(cfg: InstallConfig) -> list[str]:
             cfg.plymouth_openrc_plugin and cfg.init_system == "openrc",
         )
     )
+    if getattr(cfg, "nonfree_codecs", False):
+        atoms.extend(catalog.nonfree_codec_atoms())
     out: list[str] = []
     seen: set[str] = set()
     for atom in atoms:
@@ -3041,6 +3043,7 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
     ]
     if blocked:
         ui.warn("Not installing GURU packages: " + ", ".join(blocked))
+    codec_atoms = catalog.nonfree_codec_atoms() if getattr(cfg, "nonfree_codecs", False) else []
     late_atoms = [
         atom
         for atom in dict.fromkeys(
@@ -3051,6 +3054,7 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
             + _window_managers(cfg)
             + dm_atoms
             + catalog.dotfile_package_atoms(cfg.shell, cfg.window_managers, cfg.wm_dotfiles)
+            + codec_atoms
         )
         if atom
         and _atom_allowed(cfg, atom)
@@ -3139,6 +3143,19 @@ cat > /etc/portage/package.unmask/installer << 'EOF'
 {unmask_atoms}
 EOF
 """
+    codec_license_block = ""
+    if getattr(cfg, "nonfree_codecs", False):
+        license_lines = [
+            f"{atom} {' '.join(catalog.NONFREE_CODEC_LICENSES)}"
+            for atom in catalog.nonfree_codec_atoms()
+        ]
+        codec_license_block = (
+            "mkdir -p /etc/portage/package.license\n"
+            "cat > /etc/portage/package.license/codecs << 'EOF'\n"
+            + "\n".join(license_lines)
+            + "\nEOF\n"
+            'echo ">> proprietary codec licenses accepted by the user"\n'
+        )
     dracut_block = ""
     if dracut_conf:
         dracut_block = f"""mkdir -p /etc/dracut.conf.d /etc/conf.d
@@ -3367,6 +3384,7 @@ echo ">> binhost / installkernel"
 {installkernel_conf}
 {dracut_luks}
 echo 'sys-kernel/linux-firmware @BINARY-REDISTRIBUTABLE' > /etc/portage/package.license/firmware || true
+{codec_license_block}
 {keywords}
 
 echo ">> sync Portage tree"

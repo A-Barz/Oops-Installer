@@ -66,6 +66,8 @@ def queue_saved_software(cfg: InstallConfig) -> None:
     cfg.selected_packages = kept
     needed = [pkg.atom for pkg in catalog.packages_for_selection(managers, cfg.shell, cfg.pipewire)]
     needed += catalog.dotfile_package_atoms(cfg.shell, managers, cfg.wm_dotfiles)
+    if getattr(cfg, "nonfree_codecs", False):
+        needed += catalog.nonfree_codec_atoms()
     cfg.extra_packages = list(dict.fromkeys(managers + needed + kept))
     cfg.overlays = [name for name in cfg.overlays if name != "guru"]
     cfg.overlays = catalog.overlays_required_by(cfg.extra_packages, cfg.overlays)
@@ -917,14 +919,28 @@ def _finalize(cfg: InstallConfig) -> None:
     cfg.browser = "none"
     ui.info("Each compositor installs its own required packages (portal, wallpaper, lock, terminal).")
     ui.info("Utilities that work on every compositor are a separate list in the next chapter.")
+    ui.info(
+        "Popular Wayland compositors (Hyprland, Sway, SwayFX, Niri, River, Wayfire, labwc, "
+        "dwl, MangoWM, miracle-wm, Qtile, Gamescope, Weston) plus dwm and i3."
+    )
     cfg.window_managers = ui.paged_checklist(
         "Wayland compositors, dwl, dwm, and i3",
         catalog.wm_choices(),
         selected=[atom for atom in cfg.window_managers if atom in {p.atom for p in catalog.WINDOW_MANAGERS}],
-        page_size=12,
+        page_size=14,
     )
+    guru_wms = [
+        atom
+        for atom in cfg.window_managers
+        if catalog.atom_overlay(atom) == "guru"
+    ]
+    if guru_wms:
+        ui.info(
+            "GURU overlay compositors selected: "
+            + ", ".join(guru_wms)
+            + ". That overlay is enabled only because you chose them."
+        )
     if "gui-wm/niri" in cfg.window_managers:
-        ui.info("Niri comes from the GURU overlay. That overlay is enabled only because Niri was selected.")
         ui.info(
             "Niri gets the GNOME portal, GNOME Keyring, and foot. "
             "Waybar, Wofi, Mako, swaybg, swayidle, and swaylock are in the next chapter."
@@ -939,6 +955,7 @@ def _finalize(cfg: InstallConfig) -> None:
     _wm_dotfiles(cfg)
     graphical = bool(cfg.window_managers) or cfg.shell != "none"
     cfg.pipewire = ui.ask_yes_no("Install PipeWire audio?", graphical)
+    _ask_nonfree_codecs(cfg)
     if catalog.wayland_selected(cfg.window_managers) or cfg.shell != "none":
         greet = (
             "greetd + noctalia-greeter — Wayland login screen"
@@ -970,6 +987,43 @@ def _finalize(cfg: InstallConfig) -> None:
     ui.info("The next chapter is suckless tools and popular apps. There is no desktop list.")
 
 
+def _ask_nonfree_codecs(cfg: InstallConfig) -> None:
+    """Offer proprietary codecs only after an explicit license acceptance."""
+    ui.info(
+        "Proprietary multimedia codecs (H.264/AAC and related GStreamer/FFmpeg pieces) "
+        "are optional. They are not installed unless you accept their licenses."
+    )
+    if not ui.ask_yes_no(
+        "Do you want the option to install proprietary / non-free multimedia codecs?",
+        False,
+    ):
+        cfg.nonfree_codecs = False
+        return
+    ui.warn(
+        "These packages include patented and proprietary codecs (including Fraunhofer FDK AAC). "
+        "By continuing you confirm you accept those licenses and that using them is legal "
+        "where you live."
+    )
+    ui.info("Packages: " + ", ".join(catalog.nonfree_codec_atoms()))
+    if ui.ask_yes_no(
+        "I accept the licenses for proprietary multimedia codecs and want them installed.",
+        False,
+    ):
+        cfg.nonfree_codecs = True
+        tokens = (cfg.accept_license or "").split()
+        for lic in catalog.NONFREE_CODEC_LICENSES:
+            if lic not in tokens:
+                tokens.append(lic)
+        if "*" not in tokens:
+            # Allow other proprietary deps those ebuilds may pull.
+            tokens.append("*")
+        cfg.accept_license = " ".join(tokens)
+        ui.ok("Proprietary codecs will be emerged after you confirm the disk.")
+    else:
+        cfg.nonfree_codecs = False
+        ui.info("Proprietary codecs were declined and will not be installed.")
+
+
 def _packages_locked_from_earlier_steps(cfg: InstallConfig) -> set[str]:
     """Atoms already chosen before the optional package lists (WMs, deps, dotfiles)."""
     locked = set(cfg.window_managers or [])
@@ -978,6 +1032,8 @@ def _packages_locked_from_earlier_steps(cfg: InstallConfig) -> set[str]:
         for pkg in catalog.packages_for_selection(cfg.window_managers, cfg.shell, cfg.pipewire)
     )
     locked.update(catalog.dotfile_package_atoms(cfg.shell, cfg.window_managers, cfg.wm_dotfiles))
+    if getattr(cfg, "nonfree_codecs", False):
+        locked.update(catalog.nonfree_codec_atoms())
     if cfg.display_manager == "greetd":
         locked.add("gui-libs/greetd")
         if cfg.shell == "noctalia":
@@ -1100,6 +1156,21 @@ def _packages(cfg: InstallConfig) -> None:
     cfg.selected_packages = picked
     needed = [pkg.atom for pkg in catalog.packages_for_selection(cfg.window_managers, cfg.shell, cfg.pipewire)]
     needed += catalog.dotfile_package_atoms(cfg.shell, cfg.window_managers, cfg.wm_dotfiles)
+    if cfg.nonfree_codecs:
+        needed += catalog.nonfree_codec_atoms()
+    # Proprietary Portage apps (Chrome, Sublime, …) need ACCEPT_LICENSE beyond @FREE.
+    proprietary_apps = {
+        "www-client/google-chrome",
+        "app-editors/sublime-text",
+        "app-editors/vscode",
+        "games-util/steam-launcher",
+    }
+    if any(atom.split("::", 1)[0] in proprietary_apps for atom in picked):
+        tokens = (cfg.accept_license or "").split()
+        if "*" not in tokens:
+            tokens.append("*")
+            cfg.accept_license = " ".join(tokens)
+            ui.info("ACCEPT_LICENSE was expanded so proprietary apps you ticked can emerge.")
     # extra_packages is the emerge set: catalogue picks + WMs + compositor requirements.
     cfg.extra_packages = list(dict.fromkeys(cfg.window_managers + needed + picked))
     cfg.overlays = [name for name in cfg.overlays if name != "guru"]
@@ -1313,6 +1384,7 @@ def _review(cfg: InstallConfig) -> None:
         ("Compositors", ", ".join(cfg.window_managers) or "none"),
         ("Dotfiles", _dotfile_review(cfg)),
         ("Shell", cfg.shell or "none"),
+        ("Non-free codecs", "yes (license accepted)" if cfg.nonfree_codecs else "no"),
         ("ZRAM", "yes" if cfg.zram else "no"),
         (
             "Login manager",

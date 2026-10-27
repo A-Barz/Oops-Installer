@@ -40,6 +40,8 @@ _SOFTWARE_FIELDS = (
     "shell",
     "overlays",
     "pipewire",
+    "nonfree_codecs",
+    "accept_license",
     "display_manager",
     "browser",
     "flatpak",
