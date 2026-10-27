@@ -913,9 +913,9 @@ class DotfileChoice:
     packages: tuple[str, ...] = ()
 
 
-# At most five choices per compositor, installer default included.
-# Star counts checked on GitHub, 2026-10-25. Paths are the compositor
-# config only (not waybar, the shell, or the upstream install script).
+# Exactly two choices per compositor: installer default plus the top-rated
+# GitHub config. Star counts checked on GitHub, 2026-10-25. Paths are the
+# compositor config only (not waybar, the shell, or the upstream install script).
 WM_DOTFILES: dict[str, tuple[DotfileChoice, ...]] = {
     "gui-wm/hyprland": (
         DotfileChoice("installer", "Installer default — keymap and a short Hyprland config"),
@@ -943,62 +943,6 @@ WM_DOTFILES: dict[str, tuple[DotfileChoice, ...]] = {
                 "app-misc/jq",
             ),
         ),
-        DotfileChoice(
-            "hyde",
-            "HyDE-Project/HyDE",
-            "HyDE-Project/HyDE",
-            "master",
-            "Configs/.config/hypr",
-            ".config/hypr",
-            packages=(
-                "gui-apps/waybar",
-                "x11-misc/rofi",
-                "x11-misc/dunst",
-                "x11-terms/kitty",
-                "app-shells/fish",
-                "app-shells/starship",
-                "gui-apps/swaylock",
-                "kde-apps/dolphin",
-            ),
-        ),
-        DotfileChoice(
-            "ml4w",
-            "mylinuxforwork/dotfiles — ML4W",
-            "mylinuxforwork/dotfiles",
-            "main",
-            "dotfiles/.config/hypr",
-            ".config/hypr",
-            packages=(
-                "gui-apps/waybar",
-                "x11-misc/rofi",
-                "x11-terms/kitty",
-                "app-shells/fish",
-                "sys-process/btop",
-            ),
-        ),
-        DotfileChoice(
-            "caelestia",
-            "caelestia-dots/caelestia",
-            "caelestia-dots/caelestia",
-            "main",
-            "hypr",
-            ".config/hypr",
-            packages=(
-                "gui-apps/foot",
-                "app-shells/fish",
-                "sys-apps/eza",
-                "sys-process/btop",
-                "xfce-base/thunar",
-                "app-shells/starship",
-                "www-client/firefox-bin",
-                "x11-themes/papirus-icon-theme",
-                "media-fonts/jetbrains-mono",
-                "sys-apps/bat",
-                "sys-apps/ripgrep",
-                "app-misc/jq",
-                "gnome-base/gnome-keyring",
-            ),
-        ),
     ),
     "gui-wm/niri": (
         DotfileChoice("installer", "Installer default — keymap, binds, and the packages you selected"),
@@ -1016,66 +960,25 @@ WM_DOTFILES: dict[str, tuple[DotfileChoice, ...]] = {
                 "gui-apps/swaylock",
             ),
         ),
-        DotfileChoice(
-            "saatvik",
-            "saatvik333/niri-dotfiles",
-            "saatvik333/niri-dotfiles",
-            "main",
-            "niri",
-            ".config/niri",
-            "dir",
-            (
-                "gui-apps/waybar",
-                "x11-terms/alacritty",
-                "x11-terms/kitty",
-                "xfce-base/thunar",
-                "gnome-extra/polkit-gnome",
-            ),
-        ),
-        DotfileChoice(
-            "niri-land",
-            "kianblakley/niri-land",
-            "kianblakley/niri-land",
-            "main",
-            ".config/niri",
-            ".config/niri",
-            "dir",
-            (
-                "gui-apps/waybar",
-                "gui-apps/mako",
-                "x11-misc/rofi",
-                "x11-terms/kitty",
-                "gui-apps/swaylock",
-            ),
-        ),
-        DotfileChoice(
-            "niri-setup",
-            "acaibowlz/niri-setup",
-            "acaibowlz/niri-setup",
-            "main",
-            "niri",
-            ".config/niri",
-            "dir",
-            (
-                "gui-apps/waybar",
-                "x11-misc/dunst",
-                "gui-apps/swayidle",
-                "gui-apps/swaylock",
-                "x11-terms/alacritty",
-                "www-client/firefox-bin",
-                "gnome-base/nautilus",
-                "media-sound/playerctl",
-                "sys-fs/udiskie",
-                "gnome-extra/polkit-gnome",
-            ),
-        ),
     ),
 }
 
+# Hard cap so a longer WM_DOTFILES entry still only offers two options.
+_MAX_DOTFILE_CHOICES = 2
+
 
 def dotfile_choices(atom: str) -> list[DotfileChoice]:
-    """Up to five config choices for this compositor, or none."""
-    return list(WM_DOTFILES.get(atom, ()))[:5]
+    """Top two config choices for this compositor, or none."""
+    return list(WM_DOTFILES.get(atom, ()))[:_MAX_DOTFILE_CHOICES]
+
+
+def without_already_selected(
+    rows: list[tuple[str, str]], already: set[str]
+) -> list[tuple[str, str]]:
+    """Drop checklist rows whose atoms were chosen in an earlier step."""
+    if not already:
+        return list(rows)
+    return [(atom, desc) for atom, desc in rows if atom not in already]
 
 
 # Noctalia and DMS already provide the bar, launcher, and their own config.

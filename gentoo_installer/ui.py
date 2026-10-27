@@ -102,7 +102,7 @@ def banner() -> None:
     print(paint("║" + f"GENTOO LINUX INSTALLER  ·  {rev}".center(w - 2) + "║", C.BOLD, C.GREEN))
     for art in _gentoo_ascii():
         print(paint("║", C.PURPLE) + paint(art.center(w - 2), C.BOLD, C.GREEN) + paint("║", C.PURPLE))
-    print(paint("║" + "Ubuntu XFCE live  →  disk".center(w - 2) + "║", C.GREEN))
+    print(paint("║" + "Ubuntu Boot Image live  →  disk".center(w - 2) + "║", C.GREEN))
     print(paint("║" + "Handbook-ordered  ·  wiki.gentoo.org".center(w - 2) + "║", C.PURPLE))
     print(paint("╚" + line + "╝", C.BOLD, C.PURPLE))
     print()

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Entry point for the Gentoo live installer.
 
-Run this as root from an Ubuntu XFCE live USB:
+Run this as root from an Ubuntu Boot Image live USB:
 
     sudo python3 install.py
 
@@ -50,7 +50,7 @@ _SOFTWARE_FIELDS = (
 def parse_args() -> argparse.Namespace:
     """CLI flags for dry-run, resume, and saving answers without installing."""
     p = argparse.ArgumentParser(
-        description="Colourful Gentoo installer (Ubuntu XFCE live → disk), handbook-ordered.",
+        description="Colourful Gentoo installer (Ubuntu Boot Image live → disk), handbook-ordered.",
     )
     p.add_argument(
         "--config",

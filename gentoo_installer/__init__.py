@@ -1,6 +1,6 @@
 """Gentoo live installer package.
 
-This package is designed to run on an Ubuntu XFCE live session and install
+This package is designed to run on an Ubuntu Boot Image live session and install
 Gentoo onto a local disk. Layout:
 
   ui.py        Colourful terminal widgets (menus, checklists, passwords).

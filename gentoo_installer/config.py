@@ -33,7 +33,7 @@ SECRET_FIELDS = (
 
 @dataclass
 class InstallConfig:
-    # --- Handbook ch. 2: live host (Ubuntu XFCE instead of the Gentoo ISO) ---
+    # --- Handbook ch. 2: live host (Ubuntu Boot Image instead of the Gentoo ISO) ---
     architecture: str = "amd64"
     dry_run: bool = False  # Print commands only; never wipe disks.
     resume: bool = False  # Skip phases already listed in state_file.

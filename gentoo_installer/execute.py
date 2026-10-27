@@ -1,4 +1,4 @@
-"""Execute the handbook installation from an Ubuntu XFCE live host.
+"""Execute the handbook installation from an Ubuntu Boot Image live host.
 
 Two environments:
 
@@ -75,7 +75,7 @@ def execute(cfg: InstallConfig) -> None:
     """Run host phases in handbook order. Requires root on Linux unless dry-run."""
     if not cfg.dry_run:
         if not detect.is_linux():
-            raise SystemExit("Execution requires a Linux live environment (Ubuntu XFCE live).")
+            raise SystemExit("Execution requires a Linux live environment (Ubuntu Boot Image live).")
         if not detect.is_root():
             raise SystemExit("Re-run as root: sudo python3 install.py")
 
@@ -346,7 +346,7 @@ def _linux_root_type(cfg: InstallConfig) -> str:
 def _release_disk_mounts(runner: Runner, disk: str) -> None:
     """Unmount live-desktop automounts of this disk so mkfs and mount can use it.
 
-    Ubuntu XFCE mounts a Windows volume as soon as it sees one. Leaving that
+    Ubuntu Boot Image mounts a Windows volume as soon as it sees one. Leaving that
     mount up makes the later Gentoo mount look at a busy or half-wiped NTFS.
     """
     if not disk or not disk.startswith("/dev/"):

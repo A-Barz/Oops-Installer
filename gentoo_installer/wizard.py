@@ -185,7 +185,7 @@ def run_wizard(cfg: InstallConfig) -> InstallConfig:
 def _about(cfg: InstallConfig) -> None:
     """Handbook: About — dry-run, resume, mountpoint."""
     ui.chapter("1", "About the installation", f"{HANDBOOK}/Installation/About")
-    ui.info("A live Ubuntu XFCE session is used as the host instead of the Gentoo minimal ISO.")
+    ui.info("A live Ubuntu Boot Image session is used as the host instead of the Gentoo minimal ISO.")
     ui.info("After you answer every chapter, a summary is shown before any disk is touched.")
     cfg.dry_run = ui.ask_yes_no("Dry-run only (print commands, do not change disks)?", False)
     if getattr(cfg, "_resume_decided", False):
@@ -199,7 +199,7 @@ def _about(cfg: InstallConfig) -> None:
 
 
 def _media(cfg: InstallConfig) -> None:
-    """Handbook: Media — we treat Ubuntu XFCE live as the installation medium."""
+    """Handbook: Media — we treat Ubuntu Boot Image live as the installation medium."""
     ui.chapter("2", "Choosing the right installation medium (Ubuntu live host)", f"{HANDBOOK}/Installation/Media")
     if detect.is_linux():
         ui.ok(f"Linux host detected ({detect.nproc()} CPUs, ~{detect.mem_gib()} GiB RAM)")
@@ -860,7 +860,8 @@ def _wm_dotfiles(cfg: InstallConfig) -> None:
         cfg.wm_dotfiles = []
         return
     ui.info(
-        "Window manager dotfiles. Each compositor has at most five choices. "
+        "Window manager dotfiles. Each compositor has two choices: the installer default "
+        "and the top-rated GitHub config. "
         "A GitHub choice is downloaded during the install from the latest commit on that project's branch. "
         "The compositor config is copied, and the Gentoo packages that config starts are installed. "
         "The project's install script is not run."
@@ -879,18 +880,13 @@ def _wm_dotfiles(cfg: InstallConfig) -> None:
             default = "installer"
         picked = ui.menu(f"{title} dotfiles", [(choice.id, choice.label) for choice in choices], default)
         kept.append(f"{atom}={picked}")
-        if picked == "hyde":
-            ui.warn(
-                "HyDE's hyprland.lua stops unless ~/.local/share/hypr/hyde.lua exists. "
-                "This installer copies the Hyprland config only, not HyDE's install script, so that file will be missing."
-            )
     cfg.wm_dotfiles = kept
     packages = catalog.dotfile_package_atoms(cfg.shell, cfg.window_managers, kept)
     if packages:
         ui.info("Gentoo packages from the chosen configs will be installed: " + ", ".join(packages))
         ui.info(
-            "Quickshell, fuzzel, cliphist, swaync, wlogout, brightnessctl, "
-            "and the Caelestia shell are not in the Gentoo tree this installer uses, so they are not emerged."
+            "Quickshell, fuzzel, cliphist, swaync, wlogout, and brightnessctl "
+            "are not in the Gentoo tree this installer uses, so they are not emerged."
         )
 
 
@@ -955,6 +951,23 @@ def _finalize(cfg: InstallConfig) -> None:
     ui.info("The next chapter is suckless tools and popular apps. There is no desktop list.")
 
 
+def _packages_locked_from_earlier_steps(cfg: InstallConfig) -> set[str]:
+    """Atoms already chosen before the optional package lists (WMs, deps, dotfiles)."""
+    locked = set(cfg.window_managers or [])
+    locked.update(
+        pkg.atom
+        for pkg in catalog.packages_for_selection(cfg.window_managers, cfg.shell, cfg.pipewire)
+    )
+    locked.update(catalog.dotfile_package_atoms(cfg.shell, cfg.window_managers, cfg.wm_dotfiles))
+    if cfg.display_manager == "greetd":
+        locked.add("gui-libs/greetd")
+        if cfg.shell == "noctalia":
+            locked.add(catalog.NOCTALIA_GREETER.atom)
+        else:
+            locked.add("gui-apps/gtkgreet")
+    return locked
+
+
 def _packages(cfg: InstallConfig) -> None:
     """Suckless tools, shared Wayland utilities, and popular apps."""
     ui.chapter(
@@ -963,6 +976,7 @@ def _packages(cfg: InstallConfig) -> None:
         "https://packages.gentoo.org/",
     )
     ui.info("Compositor requirements are already queued. This list is optional apps.")
+    ui.info("Packages already chosen earlier (compositors, deps, dotfiles) stay off later lists.")
     ui.info("GURU packages are not in these lists. Noctalia and DMS were chosen in the previous chapter.")
     ui.info("Search with /text  ·  n/p pages  ·  toggle numbers  ·  0 when a list is finished.")
     ui.info("The top row, Select all, ticks every package in that section.")
@@ -978,13 +992,19 @@ def _packages(cfg: InstallConfig) -> None:
         if more.strip():
             cfg.overlays = list(dict.fromkeys(cfg.overlays + more.split()))
 
-    picked: list[str] = list(cfg.selected_packages)
+    locked = _packages_locked_from_earlier_steps(cfg)
+    picked: list[str] = [atom for atom in cfg.selected_packages if atom not in locked]
     niri_rows = catalog.niri_app_rows() if "gui-wm/niri" in cfg.window_managers else []
     if niri_rows and not getattr(cfg, "_software_loaded", False):
         for atom in catalog.niri_preselected(cfg.shell):
-            if atom not in picked:
+            if atom not in picked and atom not in locked:
                 picked.append(atom)
+    # Atoms claimed by a category stay hidden in every later category, but remain
+    # editable when that same category is opened again.
+    claimed_by_category: dict[str, set[str]] = {}
     if niri_rows:
+        niri_atoms = {atom for atom, _ in niri_rows}
+        claimed_by_category["niri-apps"] = {atom for atom in picked if atom in niri_atoms}
         if cfg.shell == "none" and not getattr(cfg, "_software_loaded", False):
             ui.info("Niri apps are preselected. Untick any you do not want, including with Select all.")
         elif cfg.shell == "none":
@@ -1011,15 +1031,25 @@ def _packages(cfg: InstallConfig) -> None:
             else:
                 packages = next(pkgs for key, _title, pkgs in catalog.CATEGORIES if key == choice)
                 title = next(title for key, title, _ in catalog.CATEGORIES if key == choice)
+            hide = set(locked)
+            for cat, atoms in claimed_by_category.items():
+                if cat != choice:
+                    hide |= atoms
+            visible = catalog.without_already_selected(packages, hide)
+            if not visible:
+                ui.info(f"{title}: every package here was already chosen earlier.")
+                continue
             selected = ui.paged_checklist(
-                title, packages, selected=picked, page_size=14, select_all=True
+                title, visible, selected=picked, page_size=14, select_all=True
             )
+            visible_atoms = {atom for atom, _ in visible}
             for atom in selected:
                 if atom not in picked:
                     picked.append(atom)
             for atom in list(picked):
-                if atom in {a for a, _ in packages} and atom not in selected:
+                if atom in visible_atoms and atom not in selected:
                     picked.remove(atom)
+            claimed_by_category[choice] = set(selected)
 
     extra = ui.prompt("Additional emerge atoms (space-separated, e.g. app-misc/jq media-gfx/feh)", "")
     if extra.strip():
