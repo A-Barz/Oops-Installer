@@ -10,7 +10,7 @@ The project is open for testing and bug reports. Try it in a virtual machine, or
 
 ## What the installer sets up
 
-Oops-Installer runs in a terminal on an Ubuntu live USB and installs Gentoo onto a disk. The questions follow the AMD64 Handbook. A summary, including an estimated time, is shown before the disk is touched, and you re-type the disk path before partitioning. After that confirmation the installer tells you to step away, and a percent tracks emerge for the rest of the install.
+Oops-Installer runs in a terminal on an Ubuntu live USB and installs Gentoo onto a disk. The questions follow the AMD64 Handbook. A summary, including an estimated time, is shown before the disk is touched, and you re-type the disk path before partitioning. After that confirmation the installer tells you to take a long nap — there is no live progress bar.
 
 - **Disks.** GPT or BIOS, a full wipe or existing partitions, LUKS, LVM, RAID1, Btrfs, ZFS, and swap. A weekly `fstrim` is offered for an SSD. Dual boot is not set up.
 - **Base system.** OpenRC or systemd, a stage3 (base tarball only — no bootable kernel), Portage profile and USE flags, and a separate kernel choice (`gentoo-kernel-bin`, `gentoo-kernel`, **Gentoo LTS** via stable `sys-kernel/gentoo-sources`, plain `gentoo-sources`, or CachyOS via the `CachyOS-kernels` overlay). There is no Ubuntu LTS ebuild and no fake `*-lts` package — Gentoo’s LTS path is stable `gentoo-sources`. Binary packages are offered so a desktop install does not have to compile everything.
@@ -94,7 +94,7 @@ See `example-config.yaml` for the file shape.
 
 Answer every colourful prompt. A summary is shown, including how long this selection should take. You must confirm the disk path before partitioning.
 
-After that confirmation, the installer repeats the estimate and says to get some fresh air or take a nap. While the install runs it prints a percent on its own line, under the command output. Partitioning and the stage download stay in the single digits. During `emerge`, the percent follows Portage’s finished-package count. `@world` moves its own slice, and each later package moves the slice that matches its share of the estimate. The number does not climb on the clock. It prints 100% when the install finishes, then asks you to power down and to remove the USB only after the machine is off.
+After that confirmation, the installer repeats the estimate and tells you to take a long nap or step away. There is no percent bar and no Jobs countdown — emerge output streams normally until the install finishes, then the installer asks you to power down and to remove the USB only after the machine is off.
 
 A full desktop emerge can take **many hours**. Prefer **binary packages** and **gentoo-kernel-bin** unless you want to compile everything.
 
@@ -154,8 +154,8 @@ Python modules have comments that map each step to the Gentoo AMD64 Handbook.
 | `install.py` | Entry point |
 | `gentoo_installer/wizard.py` | Handbook-ordered colourful Q&A |
 | `gentoo_installer/execute.py` | Host, disk, stage3, chroot phases |
-| `gentoo_installer/estimate.py` | Spoken install time and the percent slices |
-| `gentoo_installer/ui.py` | Colours, menus, passwords, install percent |
+| `gentoo_installer/estimate.py` | Spoken pre-install time estimate |
+| `gentoo_installer/ui.py` | Colours, menus, passwords, nap notice |
 | `gentoo_installer/catalog.py` | Package categories, WMs, overlays, Plymouth themes |
 
 $\scriptsize\textcolor{purple}{\textsf{Y}}\textcolor{green}{\textsf{o}}\textcolor{purple}{\textsf{u}}\textcolor{green}{\textsf{'}}\textcolor{purple}{\textsf{r}}\textcolor{green}{\textsf{e}}\ \textcolor{purple}{\textsf{W}}\textcolor{green}{\textsf{e}}\textcolor{purple}{\textsf{l}}\textcolor{green}{\textsf{c}}\textcolor{purple}{\textsf{o}}\textcolor{green}{\textsf{m}}\textcolor{purple}{\textsf{e}}$ 😈
