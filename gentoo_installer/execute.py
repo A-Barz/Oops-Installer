@@ -4693,6 +4693,16 @@ if [ ! -d /var/db/repos/gentoo/profiles ]; then
   echo ">> cannot set profile — /var/db/repos/gentoo/profiles missing" >&2
   exit 1
 fi
+# Stage3 / resume can leave make.profile as a real directory or file. eselect
+# profile set must create a symlink into /var/db/repos/gentoo — clear blockers first.
+if [ -e /etc/portage/make.profile ] && [ ! -L /etc/portage/make.profile ]; then
+  echo ">> removing non-symlink /etc/portage/make.profile so eselect can link into the gentoo tree"
+  ls -la /etc/portage/make.profile >&2 || true
+  rm -rf /etc/portage/make.profile || {{
+    echo ">> failed to remove non-symlink /etc/portage/make.profile" >&2
+    exit 1
+  }}
+fi
 profile_ok=0
 for profile_path in {quoted}; do
   echo ">> trying profile $profile_path"
