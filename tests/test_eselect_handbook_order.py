@@ -43,6 +43,7 @@ class EselectHandbookOrderTests(unittest.TestCase):
         self.assertIn("eselect profile set", script)
         self.assertIn("profile_ok", script)
         self.assertIn("exit 1", script)
+        self.assertIn("[ -L /etc/portage/make.profile ]", script)
 
     def test_locale_prep_does_not_eselect_before_sync(self) -> None:
         # Early prep only locale-gen + LANG export (Portage ambiguous-C fix).

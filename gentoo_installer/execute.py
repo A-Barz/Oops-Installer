@@ -3987,6 +3987,7 @@ emerge --sync || {
     locale_prep = _locale_prep_script(cfg)
     news_block = _news_read_script()
     locale_eselect = _locale_eselect_script(cfg)
+    tree_verify = _gentoo_tree_present_script()
 
     fstab = _fstab(cfg, devices)
     crypttab = _crypttab(cfg, devices)
@@ -4473,6 +4474,8 @@ EOF
 echo ">> sync Portage tree"
 {sync}
 unset FEATURES
+{tree_verify}
+unset FEATURES
 # Handbook:AMD64/Installation/Base — after sync: news → profile, then repositories,
 # then system locale via eselect. Profile must precede overlay enables and @world.
 {news_block}
@@ -4620,8 +4623,29 @@ def _profile_fallbacks(cfg: InstallConfig) -> list[str]:
     ]
 
 
+def _gentoo_tree_present_script() -> str:
+    """Fail closed unless the synced Gentoo ebuild tree is on disk.
+
+    Stage3 unpack alone is not enough for ``eselect profile`` / emerge — the
+    handbook tree sync must leave ``/var/db/repos/gentoo`` (with profiles).
+    """
+    return """
+echo ">> verify Portage tree at /var/db/repos/gentoo"
+if [ ! -d /var/db/repos/gentoo ]; then
+  echo ">> /var/db/repos/gentoo missing after Portage tree sync (stage unpack is not enough)" >&2
+  exit 1
+fi
+if [ ! -d /var/db/repos/gentoo/profiles ]; then
+  echo ">> /var/db/repos/gentoo/profiles missing after Portage tree sync" >&2
+  ls -la /var/db/repos/gentoo >&2 || true
+  exit 1
+fi
+echo ">> Portage tree OK ($(ls -d /var/db/repos/gentoo/profiles | head -n 1))"
+"""
+
+
 def _profile_set_script(cfg: InstallConfig) -> str:
-    """Set a valid Portage profile before emerge. Fail closed — never soft-continue."""
+    """eselect profile set so make.profile is a symlink. Fail closed if not."""
     wanted = (cfg.profile or "").strip() or _profile_fallbacks(cfg)[0]
     candidates: list[str] = []
     for path in [wanted, *_profile_fallbacks(cfg)]:
@@ -4629,16 +4653,25 @@ def _profile_set_script(cfg: InstallConfig) -> str:
             candidates.append(path)
     quoted = " ".join(shlex.quote(p) for p in candidates)
     return f"""echo ">> eselect profile"
+if [ ! -d /var/db/repos/gentoo/profiles ]; then
+  echo ">> cannot set profile — /var/db/repos/gentoo/profiles missing" >&2
+  exit 1
+fi
 profile_ok=0
 for profile_path in {quoted}; do
   echo ">> trying profile $profile_path"
   if eselect profile set "$profile_path" || eselect profile set --force "$profile_path"; then
-    if [ -e /etc/portage/make.profile ] || [ -L /etc/portage/make.profile ]; then
-      if eselect profile show 2>/dev/null | grep -q .; then
-        echo ">> Portage profile is $profile_path"
+    # Handbook: make.profile must be a symlink into the tree (not a plain dir/file).
+    if [ -L /etc/portage/make.profile ]; then
+      _mp_target=$(readlink -f /etc/portage/make.profile 2>/dev/null || true)
+      if [ -n "$_mp_target" ] && [ -e "$_mp_target" ] && eselect profile show 2>/dev/null | grep -q .; then
+        echo ">> Portage profile is $profile_path (make.profile -> $_mp_target)"
         profile_ok=1
         break
       fi
+    else
+      echo ">> /etc/portage/make.profile is not a symlink after eselect profile set $profile_path" >&2
+      ls -la /etc/portage/make.profile >&2 || true
     fi
   fi
   echo ">> profile $profile_path was not accepted" >&2
@@ -4646,6 +4679,16 @@ done
 if [ "$profile_ok" -ne 1 ]; then
   echo ">> valid Portage profile could not be set before emerge" >&2
   eselect profile list 2>/dev/null || true
+  ls -la /etc/portage/make.profile >&2 || true
+  exit 1
+fi
+if [ ! -L /etc/portage/make.profile ]; then
+  echo ">> /etc/portage/make.profile must be a symlink after eselect profile set" >&2
+  ls -la /etc/portage/make.profile >&2 || true
+  exit 1
+fi
+if [ ! -d /var/db/repos/gentoo ]; then
+  echo ">> /var/db/repos/gentoo missing after profile set" >&2
   exit 1
 fi
 """
