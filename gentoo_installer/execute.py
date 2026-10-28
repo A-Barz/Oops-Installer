@@ -3951,38 +3951,8 @@ EOF
     )
     # git sync-type needs `git` on PATH — `_ensure_git_script` runs before this.
     # Fail closed: with ``set +eu`` a bare failing sync would otherwise continue.
-    sync = {
-        "webrsync": """
-retry404 emerge-webrsync || retry404 emerge --sync || {
-  echo ">> Portage tree sync failed (webrsync/emerge --sync)" >&2
-  exit 1
-}
-""",
-        "rsync": """
-emerge --sync || {
-  echo ">> Portage tree sync failed (emerge --sync / rsync)" >&2
-  exit 1
-}
-""",
-        "git": """
-if ! command -v git >/dev/null 2>&1; then
-  echo ">> git missing before Portage tree sync (sync_method=git)" >&2
-  exit 1
-fi
-mkdir -p /etc/portage/repos.conf
-cat > /etc/portage/repos.conf/gentoo.conf << 'EOF'
-[gentoo]
-location = /var/db/repos/gentoo
-sync-type = git
-sync-uri = https://github.com/gentoo-mirror/gentoo.git
-auto-sync = yes
-EOF
-emerge --sync || {
-  echo ">> Portage tree sync failed (sync_method=git)" >&2
-  exit 1
-}
-""",
-    }[cfg.sync_method]
+    # Create /var/db/repos/gentoo *before* any repos.conf sets location= there.
+    sync = _portage_tree_sync_script(cfg)
     git_prep = _ensure_git_script(cfg)
     locale_prep = _locale_prep_script(cfg)
     news_block = _news_read_script()
@@ -4621,6 +4591,72 @@ def _profile_fallbacks(cfg: InstallConfig) -> list[str]:
         f"default/linux/{arch}/23.0/desktop/systemd",
         f"default/linux/{arch}/23.0/systemd",
     ]
+
+
+def _portage_tree_sync_script(cfg: InstallConfig) -> str:
+    """Create ``/var/db/repos/gentoo``, then (for git) write repos.conf, then sync.
+
+    Order matters: never point ``repos.conf`` ``location=`` at a path that does
+    not exist yet. Fail closed if sync does not leave the tree on disk (the
+    caller also runs ``_gentoo_tree_present_script``).
+    """
+    method = (cfg.sync_method or "webrsync").strip()
+    # Always create the location first (stage3 may not have made it).
+    prelude = """
+echo ">> create /var/db/repos/gentoo before repos.conf location="
+mkdir -p /var/db/repos/gentoo
+if [ ! -d /var/db/repos/gentoo ]; then
+  echo ">> failed to create /var/db/repos/gentoo before Portage tree sync" >&2
+  exit 1
+fi
+"""
+    if method == "git":
+        return (
+            prelude
+            + """
+if ! command -v git >/dev/null 2>&1; then
+  echo ">> git missing before Portage tree sync (sync_method=git)" >&2
+  exit 1
+fi
+# Location directory exists — now safe to point repos.conf at it.
+mkdir -p /etc/portage/repos.conf
+cat > /etc/portage/repos.conf/gentoo.conf << 'EOF'
+[gentoo]
+location = /var/db/repos/gentoo
+sync-type = git
+sync-uri = https://github.com/gentoo-mirror/gentoo.git
+auto-sync = yes
+EOF
+if ! grep -q 'location = /var/db/repos/gentoo' /etc/portage/repos.conf/gentoo.conf; then
+  echo ">> repos.conf gentoo location not set to /var/db/repos/gentoo" >&2
+  exit 1
+fi
+emerge --sync || {
+  echo ">> Portage tree sync failed (sync_method=git)" >&2
+  exit 1
+}
+"""
+        )
+    if method == "rsync":
+        return (
+            prelude
+            + """
+emerge --sync || {
+  echo ">> Portage tree sync failed (emerge --sync / rsync)" >&2
+  exit 1
+}
+"""
+        )
+    # webrsync (default)
+    return (
+        prelude
+        + """
+retry404 emerge-webrsync || retry404 emerge --sync || {
+  echo ">> Portage tree sync failed (webrsync/emerge --sync)" >&2
+  exit 1
+}
+"""
+    )
 
 
 def _gentoo_tree_present_script() -> str:
