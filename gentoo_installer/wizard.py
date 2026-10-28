@@ -278,7 +278,7 @@ def _network(cfg: InstallConfig) -> None:
         )
         cfg.static_ip = ui.prompt("CIDR address (e.g. 192.168.1.50/24)", cfg.static_ip)
         cfg.static_gateway = ui.prompt("Gateway", cfg.static_gateway)
-        cfg.static_dns = ui.prompt("DNS", cfg.static_dns)
+    _ask_dns(cfg)
     cfg.ntp = ui.ask_yes_no(
         "Synchronise clock before downloading stage3? "
         "(uses Ubuntu ntc when installed; needed for stage3 GPG checks)",
@@ -289,6 +289,37 @@ def _network(cfg: InstallConfig) -> None:
             "If sync tools are missing on the live USB, install Ubuntu package ntc: "
             "sudo apt-get install -y ntc"
         )
+
+
+def _ask_dns(cfg: InstallConfig) -> None:
+    """Guru-styled DNS picker: Cloudflare / Google / OpenDNS / custom."""
+    print()
+    print(ui.paint("  ▸ DNS resolvers", ui.C.BOLD, ui.C.PURPLE))
+    ui.guru_note(
+        "Same nameservers for the live USB and the installed Gentoo — "
+        "stage3 download and first boot both use them."
+    )
+    default = cfg.dns_provider if cfg.dns_provider in {k for k, _ in catalog.DNS_MENU} else "cloudflare"
+    cfg.dns_provider = ui.menu(
+        "DNS resolvers (live host + installed system)",
+        catalog.DNS_MENU,
+        default,
+    )
+    if cfg.dns_provider == "custom":
+        raw = ui.prompt(
+            "Custom nameservers (space-separated IPs)",
+            cfg.dns_servers or cfg.static_dns or "1.1.1.1 1.0.0.1",
+        )
+        servers = catalog.dns_servers_for("custom", raw)
+        if not servers:
+            ui.warn("No nameservers typed — falling back to Cloudflare.")
+            cfg.dns_provider = "cloudflare"
+            servers = catalog.dns_servers_for("cloudflare")
+    else:
+        servers = catalog.dns_servers_for(cfg.dns_provider)
+    cfg.dns_servers = " ".join(servers)
+    cfg.static_dns = servers[0]
+    ui.ok(f"DNS: {cfg.dns_provider} → {cfg.dns_servers}")
 
 
 def _disks(cfg: InstallConfig) -> None:
@@ -433,6 +464,12 @@ def _disks(cfg: InstallConfig) -> None:
 
     # btrfs-subvols creates @swap (nodatacow, mounted at /swap) but does not
     # enable swap by itself — the user still picks file / partition / zram / none.
+    ram_gib = detect.mem_gib()
+    ui.guru_note(
+        f"This machine has ~{ram_gib} GiB RAM. Swap is for lower-spec machines — "
+        "not suggested at 32 GiB RAM or more (pick none unless you know you need it)."
+    )
+    swap_default = "none" if ram_gib >= 32 else ("file" if cfg.layout == "btrfs-subvols" else "partition")
     if cfg.layout == "btrfs-subvols":
         ui.info(
             "Btrfs @swap is only a nodatacow subvolume at /swap for a swap *file*. "
@@ -447,7 +484,7 @@ def _disks(cfg: InstallConfig) -> None:
                 ("both", "Swap file on @swap + ZRAM"),
                 ("none", "No swap and no ZRAM"),
             ],
-            "file",
+            swap_default if swap_default in {"file", "none"} else "file",
         )
     else:
         cfg.swap_mode = ui.menu(
@@ -459,7 +496,7 @@ def _disks(cfg: InstallConfig) -> None:
                 ("both", "Swap partition/file + ZRAM"),
                 ("none", "No swap"),
             ],
-            "partition",
+            swap_default if swap_default in {"partition", "none"} else "partition",
         )
     if cfg.swap_mode in {"partition", "file", "both"}:
         suggested = max(2, min(8, detect.mem_gib()))
@@ -482,7 +519,15 @@ def _disks(cfg: InstallConfig) -> None:
     elif cfg.keymap and cfg.keymap != "us":
         ui.info("A graphical terminal keeps the desktop layout. loadkeys only changes a text console.")
 
-    cfg.luks = cfg.layout == "lvm-luks" or ui.ask_yes_no("LUKS2 encrypt the root (and optionally swap)?", cfg.layout == "lvm-luks")
+    if cfg.layout != "lvm-luks":
+        ui.guru_note(
+            "Encrypting root (and home on that volume) keeps the disk unreadable if "
+            "the machine is lost or stolen — cold plugs cannot read your files."
+        )
+    cfg.luks = cfg.layout == "lvm-luks" or ui.ask_yes_no(
+        "LUKS2 encrypt the root (and home on it; optionally swap)?",
+        cfg.layout == "lvm-luks",
+    )
     if cfg.luks:
         cfg.luks_passphrase = ui.ask_password("LUKS passphrase")
         if cfg.swap_mode in {"partition", "both"}:
@@ -491,6 +536,10 @@ def _disks(cfg: InstallConfig) -> None:
                 cfg.encrypted_swap = True
             else:
                 ui.info("Encrypted swap is a separate LUKS2 volume opened as /dev/mapper/swap (same passphrase as root).")
+                ui.guru_note(
+                    "Unencrypted swap can leak passwords and keys from RAM to disk — "
+                    "encrypting swap closes that hole when the drive leaves your hands."
+                )
                 cfg.encrypted_swap = ui.ask_yes_no("Encrypt the swap partition/LV as well?", True)
         else:
             cfg.encrypted_swap = False
@@ -1517,6 +1566,7 @@ def _review(cfg: InstallConfig) -> None:
         ("Mirrors", cfg.gentoo_mirrors or "mirrorselect"),
         ("Plymouth", _plymouth_review(cfg)),
         ("Hostname", cfg.hostname),
+        ("DNS", f"{cfg.dns_provider}: {cfg.dns_servers}"),
         ("Timezone", cfg.timezone),
         ("Locale", cfg.locale),
         ("User", cfg.username or "(root only)"),

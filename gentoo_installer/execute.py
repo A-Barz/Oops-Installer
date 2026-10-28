@@ -252,6 +252,33 @@ def sync_live_clock(cfg: InstallConfig, runner: Runner) -> bool:
     return False
 
 
+def _dns_nameservers(cfg: InstallConfig) -> list[str]:
+    """Nameservers from dns_servers / dns_provider / static_dns."""
+    servers = catalog.dns_servers_for(
+        getattr(cfg, "dns_provider", "") or "cloudflare",
+        getattr(cfg, "dns_servers", "") or "",
+    )
+    if not servers and (cfg.static_dns or "").strip():
+        servers = [cfg.static_dns.strip()]
+    return servers or list(catalog.DNS_PRESETS["cloudflare"])
+
+
+def _resolv_conf_text(cfg: InstallConfig) -> str:
+    lines = [
+        f"# Oops-Installer DNS ({getattr(cfg, 'dns_provider', 'cloudflare')})",
+        *[f"nameserver {ip}" for ip in _dns_nameservers(cfg)],
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _apply_live_dns(cfg: InstallConfig) -> None:
+    """Write /etc/resolv.conf on the Ubuntu live host from the wizard DNS pick."""
+    text = _resolv_conf_text(cfg)
+    Path("/etc/resolv.conf").write_text(text, encoding="utf-8")
+    ui.ok(f"Live DNS → {' '.join(_dns_nameservers(cfg))}")
+
+
 def phase_network(cfg: InstallConfig, runner: Runner) -> None:
     """Bring up live Wi-Fi/static IP and NTP so distfiles.gentoo.org works."""
     if cfg.network_mode == "wifi":
@@ -279,8 +306,9 @@ def phase_network(cfg: InstallConfig, runner: Runner) -> None:
         runner.shell(f"ip link set {shlex.quote(iface)} up")
         if cfg.static_gateway:
             runner.shell(f"ip route add default via {shlex.quote(cfg.static_gateway)} || true")
-        if not cfg.dry_run:
-            Path("/etc/resolv.conf").write_text(f"nameserver {cfg.static_dns}\n", encoding="utf-8")
+    # Apply chosen DNS on the live host (dhcp/wifi/static) so stage3 uses the same resolvers.
+    if cfg.network_mode != "skip" and not cfg.dry_run:
+        _apply_live_dns(cfg)
     sync_live_clock(cfg, runner)
     if not cfg.dry_run and not detect.has_network():
         ui.warn("Network still looks down. Stage3 download may fail.")
@@ -523,22 +551,126 @@ def _unmount_path(runner: Runner, path: str) -> None:
     )
 
 
-def _unmount_target(cfg: InstallConfig, runner: Runner) -> None:
-    """Drop chroot binds, the target, swap, and LUKS so a new install can use the disk."""
+def _disk_teardown_script(cfg: InstallConfig) -> str:
+    """Bash that swapoffs, unmounts, and deactivates dm/LVM before wipe/mkfs.
+
+    Order matters: a swap *file* on btrfs `@swap` (or partition swap) keeps the
+    device busy if umount runs first — the resume→reformat path hit that and
+    mkfs.btrfs / subvolume create failed with device busy. Fail closed if the
+    target mountpoint or any partition of the target disk stays busy.
+    """
+    root = (cfg.mountpoint or "/mnt/gentoo").rstrip("/") or "/mnt/gentoo"
+    disks = [d for d in (cfg.target_disk, cfg.extra_raid_disk) if d and str(d).startswith("/dev/")]
+    qroot = shlex.quote(root)
+    disk_list = " ".join(shlex.quote(d) for d in disks)
+    lvm = cfg.layout in {"lvm", "lvm-luks"}
+    md = cfg.layout == "mdraid1"
+    lines = [
+        "set +e",
+        f'ROOT={qroot}',
+        f'DISKS="{disk_list}"',
+        'echo ">> teardown: swapoff before unmount (resume reformat / wipe)"',
+        # Swap first — partition swap and @swap swapfiles both pin block devices.
+        "swapoff -a 2>/dev/null || true",
+        "if command -v swapon >/dev/null 2>&1; then",
+        "  swapon --show=NAME --noheadings 2>/dev/null | while IFS= read -r sw; do",
+        '    [ -n "$sw" ] || continue',
+        '    swapoff "$sw" 2>/dev/null || true',
+        "  done",
+        "fi",
+        'echo ">> teardown: unmount chroot binds and target tree under $ROOT"',
+        # Deepest mounts first so btrfs subvols (@home, @swap, …) detach cleanly.
+        'if [ -n "$ROOT" ] && [ "$ROOT" != "/" ]; then',
+        '  findmnt -Rn -o TARGET --submounts "$ROOT" 2>/dev/null | awk \'{print length, $0}\' | sort -rn | while read -r _ mnt; do',
+        '    [ -n "$mnt" ] || continue',
+        '    umount "$mnt" 2>/dev/null || umount -l "$mnt" 2>/dev/null || true',
+        "  done",
+        '  if mountpoint -q "$ROOT" 2>/dev/null; then',
+        '    umount -R "$ROOT" 2>/dev/null || umount -l "$ROOT" 2>/dev/null || true',
+        "  fi",
+        "fi",
+        'echo ">> teardown: release mounts on target disk partitions"',
+        'for disk in $DISKS; do',
+        '  [ -b "$disk" ] || continue',
+        '  for part in $(lsblk -ln -o PATH "$disk" 2>/dev/null || true); do',
+        '    findmnt -rn -o TARGET -S "$part" 2>/dev/null | while IFS= read -r mnt; do',
+        '      [ -n "$mnt" ] || continue',
+        '      umount "$mnt" 2>/dev/null || umount -l "$mnt" 2>/dev/null || true',
+        "    done",
+        "  done",
+        "done",
+        'echo ">> teardown: close LUKS / deactivate LVM / stop MD if used"',
+        "cryptsetup close swap 2>/dev/null || true",
+        "cryptsetup close root 2>/dev/null || true",
+    ]
+    if lvm:
+        lines.append("vgchange -an vg0 2>/dev/null || true")
+        lines.append("vgchange -an 2>/dev/null || true")
+    if md:
+        lines.append("mdadm --stop /dev/md/root 2>/dev/null || true")
+        lines.append("mdadm --stop --scan 2>/dev/null || true")
+    lines.extend(
+        [
+            "udevadm settle --timeout=8 2>/dev/null || udevadm settle 2>/dev/null || true",
+            "sleep 0.2 || true",
+            # ---- fail closed (no pipe subshells mutating busy) ----
+            "busy=0",
+            'if [ -n "$ROOT" ] && [ "$ROOT" != "/" ] && mountpoint -q "$ROOT" 2>/dev/null; then',
+            '  echo ">> $ROOT is still mounted after teardown" >&2',
+            '  findmnt "$ROOT" >&2 || true',
+            "  busy=1",
+            "fi",
+            'if [ -n "$ROOT" ] && [ "$ROOT" != "/" ]; then',
+            '  still=$(findmnt -Rn -o TARGET --submounts "$ROOT" 2>/dev/null || true)',
+            '  if [ -n "$still" ]; then',
+            '    echo ">> still mounted under target:" >&2',
+            '    printf "%s\\n" "$still" >&2',
+            "    busy=1",
+            "  fi",
+            "fi",
+            'for disk in $DISKS; do',
+            '  [ -b "$disk" ] || continue',
+            '  for part in $(lsblk -ln -o PATH "$disk" 2>/dev/null || true); do',
+            '    if findmnt -rn -S "$part" >/dev/null 2>&1; then',
+            '      echo ">> partition $part is still mounted:" >&2',
+            '      findmnt -rn -S "$part" >&2 || true',
+            "      busy=1",
+            "    fi",
+            '    if command -v swapon >/dev/null 2>&1 && swapon --show=NAME --noheadings 2>/dev/null | grep -Fxq "$part"; then',
+            '      echo ">> swap is still active on $part (swapoff failed)" >&2',
+            "      busy=1",
+            "    fi",
+            "  done",
+            "done",
+            'if [ "$busy" -ne 0 ]; then',
+            '  echo ">> disk teardown failed: target still busy (swap or mounts)." >&2',
+            '  echo ">> Close anything using the install mountpoint, run swapoff -a, then retry." >&2',
+            '  echo ">> Cannot wipe or format while devices are in use." >&2',
+            "  exit 1",
+            "fi",
+            'echo ">> teardown: target disk is idle"',
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _teardown_disk_for_reformat(cfg: InstallConfig, runner: Runner) -> None:
+    """Fail-closed teardown before wipe/mkfs (including resume → format again)."""
     root = cfg.mountpoint.rstrip("/") or "/"
     _leave_tree(root)
-    ui.info(f"Unmounting {root} if it is busy from a previous run")
-    for rel in ("dev/shm", "dev/pts", "dev", "sys", "proc", "run", "boot/efi", "efi", "boot"):
-        _unmount_path(runner, root + "/" + rel)
-    _release_disk_mounts(runner, cfg.target_disk)
-    if cfg.extra_raid_disk:
-        _release_disk_mounts(runner, cfg.extra_raid_disk)
-    _unmount_path(runner, root)
-    runner.shell("swapoff -a || true")
-    runner.shell("cryptsetup close swap || true")
-    runner.shell("cryptsetup close root || true")
-    if cfg.layout in {"lvm", "lvm-luks"}:
-        runner.shell("vgchange -an vg0 || true")
+    ui.info(
+        f"Tearing down swap and mounts under {root} before wipe/format "
+        "(required after a previous install / resume restart)"
+    )
+    runner.shell(_disk_teardown_script(cfg), check=True)
+
+
+def _unmount_target(cfg: InstallConfig, runner: Runner) -> None:
+    """Drop swap, chroot binds, target mounts, LUKS, and LVM so the disk can be reused.
+
+    Used before wipe/reformat and when declining resume. Fail closed if busy.
+    """
+    _teardown_disk_for_reformat(cfg, runner)
 
 
 class RestartFromBeginning(Exception):
@@ -987,6 +1119,9 @@ def _mkfs_xfs(device: str) -> str:
 
 def _mkfs(cfg: InstallConfig, runner: Runner, devices: dict[str, str]) -> None:
     """Format ESP as FAT32, swap with mkswap, root with the chosen filesystem."""
+    # Always tear down before mkfs: resume→fresh restart often leaves swap and
+    # btrfs subvols mounted even when wipefs already ran earlier in this phase.
+    _teardown_disk_for_reformat(cfg, runner)
     for node in (devices.get("esp"), devices.get("boot"), devices.get("swap"), devices.get("root")):
         if not node or not str(node).startswith("/dev/"):
             continue
@@ -1651,7 +1786,43 @@ def _write_system_files(cfg: InstallConfig, root: str) -> None:
         shutil.rmtree(vc)
     if not vc.is_dir():
         _write_text(vc, f"KEYMAP={cfg.keymap}\n", keep_existing=keep)
-    ui.ok("Wrote hostname, timezone, keymap, locale.gen, and env.d/02locale")
+    _write_dns_config(cfg, rootp, keep_existing=keep)
+    ui.ok("Wrote hostname, timezone, keymap, locale.gen, env.d/02locale, and DNS")
+
+
+def _write_dns_config(cfg: InstallConfig, rootp: Path, *, keep_existing: bool) -> None:
+    """Persist wizard DNS on the installed Gentoo (resolv.conf + stack helpers)."""
+    etc = rootp / "etc"
+    servers = _dns_nameservers(cfg)
+    _write_text(etc / "resolv.conf", _resolv_conf_text(cfg), keep_existing=keep_existing)
+    # NetworkManager would rewrite resolv.conf from DHCP unless dns=none.
+    nm_dir = etc / "NetworkManager" / "conf.d"
+    nm_dir.mkdir(parents=True, exist_ok=True)
+    _write_text(
+        nm_dir / "90-oops-dns-none.conf",
+        "[main]\ndns=none\n",
+        keep_existing=keep_existing,
+    )
+    # dhcpcd static nameservers (used when network_stack is dhcpcd).
+    dhcpcd = etc / "dhcpcd.conf"
+    dns_line = "static domain_name_servers=" + " ".join(servers)
+    marker = "# oops-installer-dns"
+    body = ""
+    if dhcpcd.is_file():
+        body = dhcpcd.read_text(encoding="utf-8", errors="replace")
+    if marker not in body:
+        body = body.rstrip() + f"\n{marker}\n{dns_line}\n"
+        _write_text(dhcpcd, body if body.endswith("\n") else body + "\n", keep_existing=False)
+    # systemd-resolved drop-in when using systemd.
+    if cfg.init_system == "systemd":
+        resolved = etc / "systemd" / "resolved.conf.d"
+        resolved.mkdir(parents=True, exist_ok=True)
+        _write_text(
+            resolved / "oops-dns.conf",
+            "[Resolve]\nDNS=" + " ".join(servers) + "\n",
+            keep_existing=keep_existing,
+        )
+    ui.info(f"Installed DNS ({cfg.dns_provider}): {' '.join(servers)}")
 
 
 def _generate_locales(cfg: InstallConfig, runner: Runner, root: str) -> None:
@@ -3588,6 +3759,7 @@ mkdir -p /etc/dracut.conf.d
 echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
 """
     netifrc_iface = _netifrc_iface(cfg)
+    dns_servers_netifrc = " ".join(_dns_nameservers(cfg))
     pkgs_kernel = (cfg.kernel or "gentoo-kernel-bin").split("::", 1)[0]
     if "/" in pkgs_kernel:
         pkgs_kernel = pkgs_kernel.rsplit("/", 1)[-1]
@@ -4130,6 +4302,7 @@ fi
 
 if [ "{cfg.network_stack}" = "netifrc" ]; then
   echo 'config_{netifrc_iface}="dhcp"' > /etc/conf.d/net || true
+  echo 'dns_servers_{netifrc_iface}="{dns_servers_netifrc}"' >> /etc/conf.d/net || true
   ln -s /etc/init.d/net.lo /etc/init.d/net.{netifrc_iface} || true
   rc-update add net.{netifrc_iface} default || true
 fi

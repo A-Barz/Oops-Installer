@@ -688,6 +688,31 @@ FEATURED_OVERLAYS: list[tuple[str, str]] = [
 ]
 
 
+# DNS presets for the live host and the installed system (wizard chapter 3).
+# Keys match InstallConfig.dns_provider; values are space-separated nameservers.
+DNS_PRESETS: dict[str, tuple[str, ...]] = {
+    "cloudflare": ("1.1.1.1", "1.0.0.1"),
+    "google": ("8.8.8.8", "8.8.4.4"),
+    "opendns": ("208.67.222.222", "208.67.220.220"),
+}
+
+DNS_MENU: list[tuple[str, str]] = [
+    ("cloudflare", "Cloudflare — 1.1.1.1 · 1.0.0.1"),
+    ("google", "Google — 8.8.8.8 · 8.8.4.4"),
+    ("opendns", "OpenDNS — 208.67.222.222 · 208.67.220.220"),
+    ("custom", "Custom nameservers (space-separated IPs)"),
+]
+
+
+def dns_servers_for(provider: str, custom: str = "") -> list[str]:
+    """Resolved nameserver list for a provider id or a custom string."""
+    key = (provider or "cloudflare").strip().lower()
+    if key == "custom":
+        return [tok for tok in (custom or "").split() if tok]
+    preset = DNS_PRESETS.get(key) or DNS_PRESETS["cloudflare"]
+    return list(preset)
+
+
 # Handbook ch. 6 USE flags. Value is the flag written to make.conf; the
 # description is what the wizard shows so you know why you would enable it.
 USE_FLAGS: list[tuple[str, str]] = [
@@ -933,6 +958,7 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
             Pkg("media-video/ffmpeg", "FFmpeg"),
             Pkg("media-sound/audacious", "Audacious"),
             Pkg("media-sound/strawberry", "Strawberry"),
+            Pkg("media-sound/lollypop", "Lollypop — GNOME music player"),
             Pkg("media-gfx/gimp", "GIMP"),
             Pkg("media-gfx/inkscape", "Inkscape"),
             Pkg("media-gfx/imv", "imv image viewer"),
