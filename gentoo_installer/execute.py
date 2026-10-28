@@ -523,22 +523,126 @@ def _unmount_path(runner: Runner, path: str) -> None:
     )
 
 
-def _unmount_target(cfg: InstallConfig, runner: Runner) -> None:
-    """Drop chroot binds, the target, swap, and LUKS so a new install can use the disk."""
+def _disk_teardown_script(cfg: InstallConfig) -> str:
+    """Bash that swapoffs, unmounts, and deactivates dm/LVM before wipe/mkfs.
+
+    Order matters: a swap *file* on btrfs `@swap` (or partition swap) keeps the
+    device busy if umount runs first — the resume→reformat path hit that and
+    mkfs.btrfs / subvolume create failed with device busy. Fail closed if the
+    target mountpoint or any partition of the target disk stays busy.
+    """
+    root = (cfg.mountpoint or "/mnt/gentoo").rstrip("/") or "/mnt/gentoo"
+    disks = [d for d in (cfg.target_disk, cfg.extra_raid_disk) if d and str(d).startswith("/dev/")]
+    qroot = shlex.quote(root)
+    disk_list = " ".join(shlex.quote(d) for d in disks)
+    lvm = cfg.layout in {"lvm", "lvm-luks"}
+    md = cfg.layout == "mdraid1"
+    lines = [
+        "set +e",
+        f'ROOT={qroot}',
+        f'DISKS="{disk_list}"',
+        'echo ">> teardown: swapoff before unmount (resume reformat / wipe)"',
+        # Swap first — partition swap and @swap swapfiles both pin block devices.
+        "swapoff -a 2>/dev/null || true",
+        "if command -v swapon >/dev/null 2>&1; then",
+        "  swapon --show=NAME --noheadings 2>/dev/null | while IFS= read -r sw; do",
+        '    [ -n "$sw" ] || continue',
+        '    swapoff "$sw" 2>/dev/null || true',
+        "  done",
+        "fi",
+        'echo ">> teardown: unmount chroot binds and target tree under $ROOT"',
+        # Deepest mounts first so btrfs subvols (@home, @swap, …) detach cleanly.
+        'if [ -n "$ROOT" ] && [ "$ROOT" != "/" ]; then',
+        '  findmnt -Rn -o TARGET --submounts "$ROOT" 2>/dev/null | awk \'{print length, $0}\' | sort -rn | while read -r _ mnt; do',
+        '    [ -n "$mnt" ] || continue',
+        '    umount "$mnt" 2>/dev/null || umount -l "$mnt" 2>/dev/null || true',
+        "  done",
+        '  if mountpoint -q "$ROOT" 2>/dev/null; then',
+        '    umount -R "$ROOT" 2>/dev/null || umount -l "$ROOT" 2>/dev/null || true',
+        "  fi",
+        "fi",
+        'echo ">> teardown: release mounts on target disk partitions"',
+        'for disk in $DISKS; do',
+        '  [ -b "$disk" ] || continue',
+        '  for part in $(lsblk -ln -o PATH "$disk" 2>/dev/null || true); do',
+        '    findmnt -rn -o TARGET -S "$part" 2>/dev/null | while IFS= read -r mnt; do',
+        '      [ -n "$mnt" ] || continue',
+        '      umount "$mnt" 2>/dev/null || umount -l "$mnt" 2>/dev/null || true',
+        "    done",
+        "  done",
+        "done",
+        'echo ">> teardown: close LUKS / deactivate LVM / stop MD if used"',
+        "cryptsetup close swap 2>/dev/null || true",
+        "cryptsetup close root 2>/dev/null || true",
+    ]
+    if lvm:
+        lines.append("vgchange -an vg0 2>/dev/null || true")
+        lines.append("vgchange -an 2>/dev/null || true")
+    if md:
+        lines.append("mdadm --stop /dev/md/root 2>/dev/null || true")
+        lines.append("mdadm --stop --scan 2>/dev/null || true")
+    lines.extend(
+        [
+            "udevadm settle --timeout=8 2>/dev/null || udevadm settle 2>/dev/null || true",
+            "sleep 0.2 || true",
+            # ---- fail closed (no pipe subshells mutating busy) ----
+            "busy=0",
+            'if [ -n "$ROOT" ] && [ "$ROOT" != "/" ] && mountpoint -q "$ROOT" 2>/dev/null; then',
+            '  echo ">> $ROOT is still mounted after teardown" >&2',
+            '  findmnt "$ROOT" >&2 || true',
+            "  busy=1",
+            "fi",
+            'if [ -n "$ROOT" ] && [ "$ROOT" != "/" ]; then',
+            '  still=$(findmnt -Rn -o TARGET --submounts "$ROOT" 2>/dev/null || true)',
+            '  if [ -n "$still" ]; then',
+            '    echo ">> still mounted under target:" >&2',
+            '    printf "%s\\n" "$still" >&2',
+            "    busy=1",
+            "  fi",
+            "fi",
+            'for disk in $DISKS; do',
+            '  [ -b "$disk" ] || continue',
+            '  for part in $(lsblk -ln -o PATH "$disk" 2>/dev/null || true); do',
+            '    if findmnt -rn -S "$part" >/dev/null 2>&1; then',
+            '      echo ">> partition $part is still mounted:" >&2',
+            '      findmnt -rn -S "$part" >&2 || true',
+            "      busy=1",
+            "    fi",
+            '    if command -v swapon >/dev/null 2>&1 && swapon --show=NAME --noheadings 2>/dev/null | grep -Fxq "$part"; then',
+            '      echo ">> swap is still active on $part (swapoff failed)" >&2',
+            "      busy=1",
+            "    fi",
+            "  done",
+            "done",
+            'if [ "$busy" -ne 0 ]; then',
+            '  echo ">> disk teardown failed: target still busy (swap or mounts)." >&2',
+            '  echo ">> Close anything using the install mountpoint, run swapoff -a, then retry." >&2',
+            '  echo ">> Cannot wipe or format while devices are in use." >&2',
+            "  exit 1",
+            "fi",
+            'echo ">> teardown: target disk is idle"',
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _teardown_disk_for_reformat(cfg: InstallConfig, runner: Runner) -> None:
+    """Fail-closed teardown before wipe/mkfs (including resume → format again)."""
     root = cfg.mountpoint.rstrip("/") or "/"
     _leave_tree(root)
-    ui.info(f"Unmounting {root} if it is busy from a previous run")
-    for rel in ("dev/shm", "dev/pts", "dev", "sys", "proc", "run", "boot/efi", "efi", "boot"):
-        _unmount_path(runner, root + "/" + rel)
-    _release_disk_mounts(runner, cfg.target_disk)
-    if cfg.extra_raid_disk:
-        _release_disk_mounts(runner, cfg.extra_raid_disk)
-    _unmount_path(runner, root)
-    runner.shell("swapoff -a || true")
-    runner.shell("cryptsetup close swap || true")
-    runner.shell("cryptsetup close root || true")
-    if cfg.layout in {"lvm", "lvm-luks"}:
-        runner.shell("vgchange -an vg0 || true")
+    ui.info(
+        f"Tearing down swap and mounts under {root} before wipe/format "
+        "(required after a previous install / resume restart)"
+    )
+    runner.shell(_disk_teardown_script(cfg), check=True)
+
+
+def _unmount_target(cfg: InstallConfig, runner: Runner) -> None:
+    """Drop swap, chroot binds, target mounts, LUKS, and LVM so the disk can be reused.
+
+    Used before wipe/reformat and when declining resume. Fail closed if busy.
+    """
+    _teardown_disk_for_reformat(cfg, runner)
 
 
 class RestartFromBeginning(Exception):
@@ -987,6 +1091,9 @@ def _mkfs_xfs(device: str) -> str:
 
 def _mkfs(cfg: InstallConfig, runner: Runner, devices: dict[str, str]) -> None:
     """Format ESP as FAT32, swap with mkswap, root with the chosen filesystem."""
+    # Always tear down before mkfs: resume→fresh restart often leaves swap and
+    # btrfs subvols mounted even when wipefs already ran earlier in this phase.
+    _teardown_disk_for_reformat(cfg, runner)
     for node in (devices.get("esp"), devices.get("boot"), devices.get("swap"), devices.get("root")):
         if not node or not str(node).startswith("/dev/"):
             continue
