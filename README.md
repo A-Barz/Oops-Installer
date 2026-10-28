@@ -1,6 +1,8 @@
-# gentoo-live-installer
+# Oops-Installer
 
-Python installer that runs **in a terminal on Ubuntu Boot Image live media** and installs **Gentoo Linux onto a hard disk**.
+**Oops-Installer — A Gentoo Wayland First and Suckless Setup Tool**
+
+A terminal installer that runs on **Ubuntu Boot Image** live media and installs **Gentoo Linux** onto a disk. Questions follow the [Gentoo AMD64 Handbook](https://wiki.gentoo.org/wiki/Handbook:AMD64). Nothing is written to the target until you re-type the disk path at the end.
 
 ## Notice
 
@@ -8,38 +10,18 @@ This is a personal project. The name **Oops-Installer** is a poke at Gentoo: an 
 
 The project is open for testing and bug reports. Try it in a virtual machine, or on a disk you can wipe, and file what you find at [GitHub Issues](https://github.com/A-Barz/Oops-Installer/issues). Include the installer revision from the banner, the choices you made, and the command that failed.
 
-## What the installer sets up
+## Why Gentoo for Wayland and suckless
 
-Oops-Installer runs in a terminal on an Ubuntu live USB and installs Gentoo onto a disk. The questions follow the AMD64 Handbook. A summary, including an estimated time, is shown before the disk is touched, and you re-type the disk path before partitioning. After that confirmation the installer tells you to take a nice relaxing nap and dream about the source in the clouds — there is no live progress bar.
+Oops-Installer aims at a **Wayland-first, compositor-centric** Gentoo system — not a GNOME or Plasma meta. You pick Hyprland, Sway, Niri, dwl, or similar; optional Noctalia or DMS; suckless tools; and a handbook-sized app catalogue. There is **no desktop-environment picker** and **no games category**.
 
-- **Disks.** GPT or BIOS, a full wipe or existing partitions, LUKS, LVM, RAID1, Btrfs, ZFS, and swap. A weekly `fstrim` is offered for an SSD. Dual boot is not set up.
-- **Base system.** OpenRC or systemd, a stage3 (base tarball only — no bootable kernel), Portage profile and USE flags, and a separate kernel choice (`gentoo-kernel-bin`, `gentoo-kernel`, **Gentoo LTS** via stable `sys-kernel/gentoo-sources`, plain `gentoo-sources`, or CachyOS via the `CachyOS-kernels` overlay). There is no Ubuntu LTS ebuild and no fake `*-lts` package — Gentoo’s LTS path is stable `gentoo-sources`. Binary packages are offered so a desktop install does not have to compile everything.
-- **Hardware.** The live system is probed for CPU level, input devices, Wi-Fi, Bluetooth, and the GPU. NVIDIA can use nouveau or the proprietary driver. `CPU_FLAGS_X86` is written in the chroot with `cpuid2cpuflags`.
-- **Boot.** GRUB, systemd-boot, EFI stub, and Limine, plus Plymouth themes. The EFI System Partition stays at `/efi`.
-- **Session.** Popular Wayland compositors (Hyprland, Sway, SwayFX, Niri, River, Wayfire, labwc, dwl, MangoWM, miracle-wm, Qtile, Gamescope, Weston), plus dwm and i3. Noctalia Shell and DMS are optional. Proprietary multimedia codecs are offered only after an explicit license accept. Editors include Sublime Text, Helix, and Pulsar (Atom’s successor, Flatpak). IDEs include VS Code, VSCodium, and Zed. With Noctalia and a login manager, the greeter is noctalia-greeter.
-- **Dotfiles.** Hyprland and Niri each offer two choices: the installer config or the top-rated GitHub config. The chosen config is downloaded from the latest commit on its branch during the install, and the Gentoo packages that config starts are emerged. Noctalia and DMS skip this, because those shells bring their own session. Upstream install scripts are not run.
-- **Apps.** Google Chrome and Firefox ESR (`www-client/firefox-bin:esr`) are always installed; other browsers are optional. Flatpak is suggested for most desktop apps. PipeWire, suckless tools, and a handbook-sized list of common programs. `nano` is always installed. You can type any extra Portage atom.
-- **Login.** Wayland compositors and shells always boot to greetd (gtkgreet or noctalia-greeter). The install fails closed if the greeter, session `.desktop` files, or enablement would be missing.
-- **Again.** Answers save to YAML or JSON. `--resume` continues an interrupted install. Passwords are asked again unless you saved them on purpose.
+Gentoo fits that intent:
 
-The wizard is ordered like the [Gentoo AMD64 Handbook](https://wiki.gentoo.org/wiki/Handbook:AMD64) (linked from the [Gentoo wiki main page](https://wiki.gentoo.org/wiki/Main_Page)):
+- **Control** — Portage profiles, USE flags, kernels (including stable LTS `gentoo-sources` or CachyOS), and overlays (`hyproverlay`, GURU when needed) stay explicit. Binary packages are optional so a desktop install need not compile everything.
+- **Minimalism** — Stage3 plus the session you chose. Shared Wayland utilities and suckless packages are offered; nothing assumes a full DE stack.
+- **Performance** — Dist-kernels and binhosts when you want speed; source builds and LTO when you want to tune. Hardware probed on the live USB seeds sensible USE and `VIDEO_CARDS` defaults you can change.
+- **Ownership** — Configs and emerges land on *your* disk. Hyprland/Niri can use the installer config or a top GitHub config (downloaded; upstream install scripts are never run). Dual boot is not set up: the default path wipes the disk you confirm.
 
-1. About the installation  
-2. Installation medium (this Ubuntu live host)  
-3. Network  
-4. Disks  
-5. Stage file  
-6. Base system  
-7. Kernel  
-8. System configuration  
-9. System tools  
-10. Bootloader (multiple loaders + Plymouth themes)  
-11. Wayland compositors, Noctalia or DMS, greetd, and Hyprland or Niri dotfiles
-12. Shared Wayland utilities, suckless tools, and popular apps  
-
-GitHub installer research and the merged feature set: [RESEARCH.md](RESEARCH.md).
-
-In chapter 12 you can search (`/text`), page (`n`/`p`), and toggle packages. Overlays such as `hyproverlay` and `wayland-desktop` are enabled with `eselect repository` when a chosen package needs them. The GURU overlay is enabled only when you choose Noctalia or DMS. You can also type any extra `category/package` atom for emerge.
+Read **[HOWTO.txt](HOWTO.txt)** before a real install.
 
 ## Requirements
 
@@ -47,53 +29,329 @@ In chapter 12 you can search (`/text`), page (`n`/`p`), and toggle packages. Ove
 - Wired or wireless internet
 - Root privileges
 - A target disk you can **wipe** (unless you choose existing partitions)
-- Optional but recommended for stage3 GPG: Ubuntu package **`ntc`** for live-host clock sync (`sudo apt-get install -y ntc`). If NTP tools are missing, the installer prints this hint during the network phase.
-
-Read **[HOWTO.txt](HOWTO.txt)** before a real install (plain-text walkthrough, safety, resume, and limits).
+- Optional but recommended for stage3 GPG: Ubuntu package **`ntc`** for live-host clock sync (`sudo apt-get install -y ntc`)
 
 ## Usage
-
-Boot Ubuntu live, open a terminal:
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y python3 git ntc
 git clone <this-repo>
-cd gentoo-live-installer   # or Oops-Installer
+cd Oops-Installer   # or gentoo-live-installer
 sudo python3 install.py
 ```
 
 Useful flags:
 
 ```bash
-sudo python3 install.py --dry-run          # print commands, no disk changes
+sudo python3 install.py --dry-run
 sudo python3 install.py --wizard-only --save-config ./gentoo-install.yaml
-sudo python3 install.py --config ./gentoo-install.yaml   # reuse answers; passwords are prompted
+sudo python3 install.py --config ./gentoo-install.yaml
 sudo python3 install.py --resume
 ```
 
-## Reusing choices (YAML or JSON)
+Passwords, LUKS, and Wi-Fi keys are omitted from saved YAML/JSON unless you pass `--include-secrets`. See `example-config.yaml`. After disk confirmation the installer shows a full-width nap banner (no progress bar); emerge output streams until finish, then you are asked to power down and remove the USB only after the machine is off.
 
-The wizard can save every non-secret answer so the next live-USB run skips the Q&A:
+---
 
-```bash
-# After answering the wizard, say yes to “Save these choices as YAML…”
-# or pass a path:
-sudo python3 install.py --save-config ./gentoo-install.yaml
+## Wizard flow (code order)
 
-# Later, on the same or another machine:
-sudo python3 install.py --config ./gentoo-install.yaml
-```
+Defaults are `InstallConfig` values unless noted. Conditional steps are marked.
 
-`.yaml` / `.yml` is YAML; `.json` is JSON. Passwords, LUKS, and Wi-Fi keys are **not** written unless you add `--include-secrets` (keep that file private). On import, the installer asks for those secrets and you still confirm the disk path.
+### Before chapter 1
 
-See `example-config.yaml` for the file shape.
+1. **Banner** — Oops-Installer ASCII (Gentoo purple/green), tagline, thanks, navigation keys.
+2. **NTFS gate** — If any NTFS volume exists: confirm you know what you are doing (default No).
+3. **Interrupted mount** (when applicable) — Resume or unmount and restart.
+4. **Loaded profile** (when `--config` / saved YAML has disk or software) — Fill missing secrets; optionally continue without re-walking chapters.
+5. **Preamble** — Handbook link; wipe / VM / catalogue / TPM / Limine / swap-file warnings.
 
-Answer every colourful prompt. A summary is shown, including how long this selection should take. You must confirm the disk path before partitioning.
+### 1 — About the installation
 
-After that confirmation, the installer shows a full-width nap banner (take a nice relaxing nap / dream about the source in the clouds) and repeats it when the unattended phases start. There is no percent bar and no Jobs countdown — emerge output streams normally until the install finishes, then the installer asks you to power down and to remove the USB only after the machine is off.
+| Ask | Options / notes | Default |
+|-----|-----------------|---------|
+| Dry-run only? | yes/no | No |
+| Resume interrupted install? | yes/no (skipped if already decided) | No |
+| Target mountpoint | prompt | `/mnt/gentoo` |
 
-A full desktop emerge can take **many hours**. Prefer **binary packages** and **gentoo-kernel-bin** unless you want to compile everything.
+### 2 — Installation medium (Ubuntu live host)
+
+| Ask | Options / notes | Default |
+|-----|-----------------|---------|
+| CPU architecture | `amd64`, `arm64` | `amd64` |
+| Firmware | `uefi`, `bios` (UEFI bits detected) | Detected |
+| Install host tools on Ubuntu? | gdisk, cryptsetup, btrfs-progs, wget, gnupg, … | Yes |
+
+### 3 — Network (live session)
+
+| Ask | Options / notes | Default |
+|-----|-----------------|---------|
+| Live network | `dhcp`, `wifi`, `static`, `skip` | `dhcp` if online else `wifi` |
+| Wi-Fi / static | iface, SSID/PSK or CIDR/gateway/DNS | DNS `1.1.1.1` |
+| Synchronise clock before stage3? | uses Ubuntu **`ntc`** when installed | Yes |
+
+### 4 — Disks
+
+| Ask | Options / notes | Default |
+|-----|-----------------|---------|
+| Target disk | Detected disks (tags removable / live USB) or typed path | First disk / `/dev/sda` |
+| Wipe mode | `disk`, `partitions`, `none` | `disk` |
+| Partition table | UEFI → forced `gpt`; BIOS → `mbr` / `gpt` | `mbr` on BIOS |
+| Layout | `handbook`, `btrfs-subvols`, `lvm`, `lvm-luks`, `mdraid1`, `zfs`, `existing` | `handbook` (or `existing` if wipe is partitions/none) |
+| Root filesystem | Forced `btrfs` / `zfs` for those layouts; else `ext4`, `xfs`, `btrfs`, `f2fs`, `jfs` | `ext4` |
+| Swap | On btrfs-subvols: `file`, `partition`, `zram`, `both`, `none` (note: `@swap` ≠ swap yet). Else: `partition`, `file`, `zram`, `both`, `none` | `file` / `partition` |
+| Swap size | GiB | ~RAM-based (2–8) |
+| ZRAM | Asked or implied by swap mode | Often yes with partition/file |
+| Console keymap | e.g. `us` | `us` |
+| LUKS2 | Forced on `lvm-luks`; else yes/no; passphrase; encrypt swap; TPM2 helper scripts | Off unless lvm-luks |
+| ESP size | MiB (UEFI) | `1024` |
+
+SSD detection enables weekly `fstrim`. Disks under ~40 GiB get a warning. Dual boot is not supported.
+
+### 5 — Stage file
+
+| Ask | Options / notes | Default |
+|-----|-----------------|---------|
+| Stage level | `stage3`, `stage2`, `stage1` | `stage3` |
+| Init system | `openrc`, `systemd` | `openrc` |
+| Install type | `desktop`, `server` (stage3 only) | `desktop` |
+| Variant | `standard`, `hardened`, `musl` | `standard` |
+| Verify stage GPG? | yes/no | Yes |
+| Testing keywords (`*/* ~arch`)? | yes/no | No |
+
+### 6 — Base system (Portage)
+
+| Ask | Options / notes | Default |
+|-----|-----------------|---------|
+| Profile | Built from variant/init/arch (e.g. `…/23.0/desktop`) | desktop profile |
+| Sync | `webrsync`, `rsync`, `git` | `webrsync` |
+| Binary packages? | ABI `x86-64` / `x86-64-v3`; exact USE match? | Yes on standard; ABI from CPU |
+| NVIDIA (if detected) | `nouveau`, `nvidia` | `nouveau` |
+| `VIDEO_CARDS` / `INPUT_DEVICES` | prompts from live probe | auto / `libinput` (+ wacom) |
+| Global USE | checklist (see below) | pre-ticks `dist-kernel`, `wayland`, … |
+| Extra USE / LTO / hardened CFLAGS | prompts | LTO No; hardened forced if variant hardened |
+| Mirrors / MAKEOPTS | empty = mirrorselect | jobs `0` = CPU count |
+
+**USE checklist flags:** `X`, `wayland`, `gtk`, `qt5`, `qt6`, `opengl`, `vulkan`, `alsa`, `pulseaudio`, `pipewire`, `jack`, `bluetooth`, `networkmanager`, `wifi`, `dbus`, `udev`, `elogind`, `systemd`, `cups`, `pam`, `ssl`, `python`, `nls`, `dist-kernel`.
+
+### 7 — Kernel
+
+| Ask | Options / notes | Default |
+|-----|-----------------|---------|
+| Kernel | see table | `gentoo-kernel-bin` |
+| `linux-firmware` | yes/no | Yes |
+| SOF firmware | yes/no | No |
+| `intel-microcode` | Auto-yes on Intel CPU; else ask | — |
+| Initramfs | `dracut`, `none` | `dracut` |
+| Unified Kernel Image (UKI)? | yes/no | No |
+
+| Menu id | Emerges | Overlay |
+|---------|---------|---------|
+| `gentoo-kernel-bin` | `sys-kernel/gentoo-kernel-bin` | gentoo |
+| `gentoo-kernel` | `sys-kernel/gentoo-kernel` | gentoo |
+| `gentoo-sources-lts` | stable `sys-kernel/gentoo-sources` | gentoo |
+| `gentoo-sources` | `sys-kernel/gentoo-sources` | gentoo |
+| `cachyos-kernel-bin` | `sys-kernel/cachyos-kernel-bin` | CachyOS-kernels |
+| `cachyos-kernel` | `sys-kernel/cachyos-kernel` | CachyOS-kernels |
+
+There is no Ubuntu LTS ebuild and no fake `*-lts` package.
+
+### 8 — System configuration
+
+| Ask | Options / notes | Default |
+|-----|-----------------|---------|
+| Hostname / timezone | prompts | `gentoo` / `UTC` |
+| Locale | common list + custom; optional extra locales | `en_US.UTF-8` |
+| Keymap | confirm | `us` |
+| Root password | | |
+| Non-root user? | username, password, groups | Yes → user `gentoo`, groups `wheel,audio,video,usb,users` |
+
+### 9 — System tools
+
+| Ask | Options / notes | Default |
+|-----|-----------------|---------|
+| Networking stack | `networkmanager`, `dhcpcd`, `netifrc`; + `systemd-networkd` if systemd | NM on desktop |
+| Wireless tools / sshd / nftables | yes/no | Yes |
+| CUPS | yes/no | No |
+| chrony | yes/no | Yes |
+| Syslog | `sysklogd`, `metalog`, `rsyslog`, `none` | `sysklogd` |
+| Cron | `cronie`, `fcron`, `none` | `cronie` |
+
+### 10 — Bootloader
+
+| Ask | Options / notes | Default |
+|-----|-----------------|---------|
+| Bootloaders to install | checklist (firmware filters apply) | `grub` |
+| Primary bootloader | menu of selected | first selected |
+| Plymouth | themes checklist; OpenRC plugin if OpenRC | Yes on desktop |
+| Secure Boot prep | UEFI only | No |
+| GRUB password | if GRUB selected | No |
+| SELinux permissive | hardened variant only | No |
+
+**Bootloader ids:** `grub`, `systemd-boot`, `refind`, `efistub`, `syslinux`, `limine`, `lilo`.
+
+### 11 — Wayland session
+
+No desktop environment. Forced: browsers = Chrome + Firefox ESR.
+
+| Ask | Options / notes | Default |
+|-----|-----------------|---------|
+| Compositors / WMs | checklist (below) | empty / saved |
+| Wayland shell | `none`, `noctalia`, `dms` | `none` |
+| Dotfiles | Hyprland: `installer` \| `end-4`; Niri: `installer` \| `upstream`. Skipped for Noctalia/DMS | `installer` |
+| PipeWire | yes/no | Yes if WM or shell |
+| Proprietary codecs | license accept for ugly/bad/libav, fdk-aac, faac, lame, ffmpeg | Off |
+
+**If a Wayland compositor or shell is chosen**, login is **greetd** (gtkgreet+labwc, or noctalia-greeter with Noctalia). X11-only dwm/i3 → text console / startx (no greeter). Shell without a WM → `labwc` is added.
+
+**Compositors / WMs offered**
+
+| Atom | Notes |
+|------|--------|
+| `gui-wm/hyprland` | ::hyproverlay |
+| `gui-wm/sway` | |
+| `gui-wm/swayfx` | ::guru |
+| `gui-wm/niri` | ::guru |
+| `gui-wm/river` | ::guru |
+| `gui-wm/wayfire` | |
+| `gui-wm/labwc` | |
+| `gui-wm/dwl` | |
+| `gui-wm/mangowm` | ::guru |
+| `gui-wm/miracle-wm` | ::guru |
+| `x11-wm/qtile` | Wayland |
+| `gui-wm/gamescope` | |
+| `dev-libs/weston` | |
+| `x11-wm/dwm` | X11 |
+| `x11-wm/i3` | X11 |
+
+GURU is enabled when a GURU compositor or Noctalia/DMS is selected — not as a free overlay checklist row.
+
+### 12 — Suckless tools and popular apps
+
+1. Optional **extra Portage overlays** (featured + community list; GURU not listed here).
+2. **Browsers** — info only: always `www-client/firefox-bin:esr` and `www-client/google-chrome`.
+3. If Niri: **Niri apps** checklist (preticks waybar/wofi/mako/swaybg/swayidle/swaylock when shell is `none`).
+4. Linear category walk (Space toggle, Enter next, Select all). Categories already decided earlier are skipped: window-managers, browsers, display-managers (and there is no games / DE category).
+5. Extra free-typed emerge atoms.
+
+### Review → confirm → nap
+
+Summary table and time estimate → wipe warning → “Proceed?” → **re-type the disk path** → nap banner (“Take a nice relaxing nap” / dream about the source in the clouds). Then execute phases: host packages → network → disks → stage3 → chroot mounts → chroot install → done.
+
+---
+
+## Default and auto-queued packages
+
+### Always installed
+
+- `www-client/firefox-bin:esr` — Firefox ESR (mandatory)
+- `www-client/google-chrome` — Google Chrome (mandatory; `ACCEPT_LICENSE` expanded)
+
+### When a Wayland compositor or shell is selected
+
+**Shared Wayland base** (`WAYLAND_BASE`):  
+`sys-apps/xdg-desktop-portal`, `gui-libs/xdg-desktop-portal-wlr`*, `sys-apps/xdg-desktop-portal-gtk`, `gui-apps/wl-clipboard`, `gui-apps/grim`*, `gui-apps/slurp`*, `x11-base/xwayland`*, `dev-qt/qtwayland`, `media-fonts/noto`, `media-fonts/noto-emoji`, `sys-auth/polkit`  
+(\* skipped for a Niri-only session)
+
+**PipeWire** (if accepted): `media-video/pipewire`, `media-video/wireplumber`
+
+**Per-compositor requirements** (examples): Hyprland → portal-hyprland, hyprpaper, hypridle, hyprlock; Sway/SwayFX → swaybg, swayidle, swaylock, foot; Niri → xdg-desktop-portal-gnome, gnome-keyring, foot; dwm → xorg-server, xinit, dmenu, st, slstatus, slock; i3 → xorg-server, xinit, dmenu, i3status, st.
+
+**Greeter:** `gui-libs/greetd` plus gtkgreet+labwc, or `gui-apps/noctalia-greeter` with Noctalia (plus greetd user/group / display-manager-init as needed).
+
+**Shells:** `gui-apps/noctalia-shell` or `gui-apps/dankmaterialshell` (::guru) when chosen.
+
+`nano` is installed on the new system. Dotfile choices may pull additional atoms the chosen config launches (upstream install scripts are not run).
+
+### Proprietary codecs (only after explicit license accept)
+
+`media-libs/gst-plugins-ugly`, `media-libs/gst-plugins-bad`, `media-plugins/gst-plugins-libav`, `media-libs/fdk-aac`, `media-libs/faac`, `media-sound/lame`, `media-video/ffmpeg`.
+
+---
+
+## Package categories (chapter 12)
+
+Order and atoms match `catalog.CATEGORIES` (plus conditional Niri apps). There is **no games category**.
+
+### Niri apps (only if Niri selected)
+
+`gui-apps/waybar`, `gui-apps/wofi`, `gui-apps/mako`, `gui-apps/swaybg`, `gui-apps/swayidle`, `gui-apps/swaylock`, `x11-terms/alacritty`, `media-gfx/imv`, `media-video/mpv`
+
+### Utilities that work with every Wayland compositor
+
+`gui-apps/foot`, `x11-terms/alacritty`, `x11-terms/kitty`, `x11-terms/ghostty`, `media-gfx/imv`, `media-video/mpv`, `gui-apps/waybar`, `gui-apps/wofi`, `gui-apps/mako`, `gui-apps/kanshi`
+
+### Suckless tools
+
+`x11-wm/dwm`, `x11-misc/dmenu`, `x11-terms/st`, `x11-misc/slock`, `x11-misc/slstatus`, `www-client/surf`, `x11-misc/tabbed`
+
+### App stores (Flatpak, Bazaar, AppImage)
+
+`sys-apps/flatpak`, `flatpak-app/io.github.kolunmi.Bazaar`, `sys-fs/fuse:0`, `sys-fs/fuse`
+
+### Text editors
+
+`app-editors/sublime-text`, `flatpak-app/dev.pulsar_edit.Pulsar`, `app-editors/neovim`, `app-editors/vim`, `app-editors/gvim`, `app-editors/emacs`, `app-editors/nano`, `app-editors/helix`, `app-editors/kakoune`, `app-editors/micro`, `app-editors/kate`, `app-editors/gedit`, `app-editors/gnome-text-editor`, `app-editors/featherpad`, `app-editors/mousepad`, `app-editors/kile`, `app-editors/ghostwriter`, `app-editors/logseq-desktop-bin`
+
+### IDEs (2026)
+
+`app-editors/vscode`, `app-editors/vscodium`, `app-editors/zed`
+
+### Terminal emulators
+
+`x11-terms/alacritty`, `x11-terms/kitty`, `x11-terms/ghostty`, `gui-apps/foot`, `x11-terms/rxvt-unicode`, `x11-terms/xterm`, `x11-terms/xfce4-terminal`, `kde-apps/konsole`, `x11-terms/gnome-terminal`, `x11-terms/mlterm`
+
+### Shells, CLI, and Portage tools
+
+`app-shells/zsh`, `app-shells/fish`, `app-shells/bash-completion`, `app-shells/starship`, `app-misc/tmux`, `app-misc/screen`, `sys-apps/eza`, `sys-apps/bat`, `sys-apps/ripgrep`, `sys-apps/fd`, `app-misc/neofetch`, `app-portage/gentoolkit`, `app-portage/eix`, `app-portage/flaggie`, `app-eselect/eselect-repository`, `app-portage/cpuid2cpuflags`, `app-text/wgetpaste`
+
+### Audio & video
+
+`media-video/pipewire`, `media-video/wireplumber`, `media-sound/pulseaudio`, `media-sound/alsa-utils`, `media-sound/pavucontrol`, `media-video/mpv`, `media-video/vlc`, `media-video/ffmpeg`, `media-sound/audacious`, `media-sound/strawberry`, `media-gfx/gimp`, `media-gfx/inkscape`, `media-gfx/imv`, `media-gfx/feh`
+
+### Office & documents
+
+`app-office/libreoffice-bin`, `app-office/libreoffice`, `app-text/zathura`, `app-text/evince`, `kde-apps/okular`, `app-text/pandoc-bin`, `app-text/texlive`
+
+### Networking & remote access
+
+`net-misc/networkmanager`, `net-misc/dhcpcd`, `net-vpn/wireguard-tools`, `net-vpn/openvpn`, `net-misc/openssh`, `net-misc/chrony`, `net-misc/wget`, `net-misc/curl`, `net-misc/rsync`, `net-ftp/filezilla`, `net-im/telegram-desktop-bin`, `net-im/signal-desktop-bin`, `net-analyzer/wireshark`, `net-firewall/ufw`, `net-firewall/nftables`
+
+### Containers & virtualisation
+
+`app-containers/docker`, `app-containers/docker-cli`, `app-containers/containerd`, `app-containers/podman`, `app-emulation/qemu`, `app-emulation/libvirt`, `app-emulation/virt-manager`, `app-emulation/virtualbox`, `sys-kernel/linux-headers`
+
+### Development toolchains
+
+`dev-vcs/git`, `dev-lang/python`, `dev-lang/rust-bin`, `dev-lang/go`, `dev-lang/php`, `dev-db/sqlite`, `dev-db/postgresql`, `dev-db/mariadb`, `sys-devel/gdb`, `dev-util/strace`, `dev-util/cmake`, `dev-util/meson`, `dev-util/pkgconf`
+
+### Icon themes
+
+`x11-themes/papirus-icon-theme`, `x11-themes/adwaita-icon-theme`, `x11-themes/tela-icon-theme`, `x11-themes/numix-icon-theme-circle`, `kde-frameworks/breeze-icons`
+
+### GTK themes
+
+`x11-themes/arc-theme`, `x11-themes/greybird`, `x11-themes/numix-gtk-theme`, `x11-themes/clearlooks-phenix`, `x11-themes/adapta-gtk-theme`
+
+### Qt themes
+
+`x11-themes/kvantum`, `x11-themes/adwaita-qt`, `x11-themes/qtcurve`, `kde-plasma/breeze`
+
+### Fonts
+
+`media-fonts/fonts-meta`, `media-fonts/noto`, `media-fonts/noto-emoji`, `media-fonts/noto-cjk`, `media-fonts/hack`, `media-fonts/jetbrains-mono`, `media-fonts/fira-code`, `media-fonts/fira-mono`, `media-fonts/fira-sans`, `media-fonts/iosevka`, `media-fonts/cascadia-code`, `media-fonts/fantasque-sans-mono`, `media-fonts/liberation-fonts`, `media-fonts/dejavu`, `media-fonts/roboto`, `media-fonts/cantarell`, `media-fonts/droid`, `media-fonts/croscorefonts`, `media-fonts/crosextrafonts-carlito`, `media-fonts/crosextrafonts-caladea`, `media-fonts/fontawesome`, `media-fonts/terminus-font`, `media-fonts/unifont`
+
+### System administration
+
+`sys-process/htop`, `sys-process/btop`, `sys-apps/smartmontools`, `sys-apps/usbutils`, `sys-apps/pciutils`, `sys-fs/ncdu`, `app-admin/sudo`, `app-admin/doas`, `app-admin/sysklogd`, `app-admin/rsyslog`, `sys-process/cronie`, `app-backup/restic`, `app-backup/borgbackup`, `sys-apps/flatpak`
+
+You can still type any Portage atom. Some formerly offered GURU atoms (Brave, Discord, tuigreet, RetroArch, …) are blocked even if typed — see `REMOVED_GURU_ATOMS` in `catalog.py`.
+
+### Featured overlays (checklist)
+
+`wayland-desktop`, `hyproverlay`, `CachyOS-kernels`, `gentoo-zh`, `science`, `kde`, `qt`, `haskell`, `emacs`, `java`, `ruby`, `pentoo`, `audio-overlay`, `mv` (plus a longer community list). `::gentoo` is always present; **GURU is not a checklist row**.
+
+---
 
 ## Safety
 
@@ -105,46 +363,30 @@ The installer comes from three comparisons: public Gentoo install scripts ([RESE
 
 ### Arch install guide and the Gentoo Handbook
 
-The [Arch Linux Installation guide](https://wiki.archlinux.org/title/Installation_guide) and [General recommendations](https://wiki.archlinux.org/title/General_recommendations) were read next to the [Gentoo AMD64 Handbook](https://wiki.gentoo.org/wiki/Handbook:AMD64) and the Gentoo wiki pages those chapters link to.
+The wizard follows handbook order. Places where Arch is stricter and this installer follows Arch:
 
-The wizard follows handbook order. Arch is stricter in a few places, and the installer follows Arch there:
+- `/etc/fstab` names a plain partition by PARTUUID on GPT, or by filesystem UUID otherwise. LVM, LUKS, and ZFS stay on `/dev/mapper` names. ESP at `/efi` with `umask=0077`.
+- GRUB keeps the kernel on `/boot`. systemd-boot and EFI stub install the kernel onto `/efi`.
+- Empty mirror answer → `mirrorselect` → `GENTOO_MIRRORS`.
+- Console keymap before LUKS passphrase; SSD → weekly `fstrim`; nftables offered (default yes); SSH opened only when sshd is selected.
+- Small-disk warning; 32-bit UEFI limited to GRUB `i386-efi`; declining `linux-firmware` notes AMD microcode lives there.
+- After install: power down; remove USB only when the machine is off.
 
-- `/etc/fstab` names a plain partition by PARTUUID on GPT, or by filesystem UUID otherwise. LVM, LUKS, and ZFS stay on `/dev/mapper` names, because a filesystem UUID is shared with LVM snapshots. The EFI System Partition is mounted at `/efi` with `umask=0077`.
-- GRUB keeps the kernel on `/boot`. systemd-boot and EFI stub install the kernel onto `/efi`, which is the handbook rule for those loaders. Arch gets the same result by mounting the ESP at `/boot`.
-- An empty mirror answer emerges `mirrorselect`, speed-tests mirrors, and writes `GENTOO_MIRRORS`.
-- The console keymap is asked before any LUKS passphrase, then kept for the installed system.
-- An SSD gets a weekly `fstrim`. The tools chapter offers nftables and defaults to yes. Port 22 is opened only when sshd is selected.
-- A disk under the handbook’s 40 GB suggestion gets a warning. 32-bit UEFI is limited to GRUB with the `i386-efi` target. Declining `linux-firmware` says that AMD CPU microcode lives in that package.
-- `nano` is installed on the new system.
-- At 100% the installer asks you to power down, and to remove the USB only after the machine is off.
-
-Arch will reuse an existing EFI partition for another operating system. This installer still wipes the disk you choose and does not set up dual boot.
+Arch can reuse an existing EFI partition for another OS. This installer still wipes the disk you choose and does not set up dual boot.
 
 ### USE flags from the Ubuntu boot image
 
-The Ubuntu image is the same computer Gentoo will boot, so `lspci`, `lsusb`, `/proc/cpuinfo`, and `ld.so --help` are fair probes. Ubuntu’s own package list is not a source of Gentoo USE flags.
-
-The installer uses that probe only as a default you can change:
-
-- The binhost menu highlights `x86-64-v3` when glibc reports that level, or when the CPU has `avx`, `avx2`, `bmi1`, `bmi2`, `f16c`, `fma`, `abm`, and `movbe`. Otherwise it stays on generic `x86-64`. A v3 package on an older CPU stops with an illegal instruction.
-- `INPUT_DEVICES` is `libinput`, plus `wacom` when a tablet is on the bus.
-- `bluetooth`, `wifi`, and `alsa` start selected when that hardware is present.
-- An NVIDIA card asks for nouveau or the proprietary driver. Nouveau is the default. The proprietary driver needs a matched kernel module and often fails on a first install.
-- A virtual machine with no physical GPU is offered `virtio vmware qxl` instead of `fbdev vesa`.
-
-`CPU_FLAGS_X86` still comes from `cpuid2cpuflags` after the chroot exists. Flag names in `/proc/cpuinfo` do not match Portage (`sse3` appears as `pni`). Global flags such as `opengl`, `vulkan`, `gtk`, and the Qt flags stay with the profile and the compositor questions. Binary packages still install when USE does not match exactly, so glibc is not rebuilt for every locale.
+Live `lspci` / `lsusb` / `/proc/cpuinfo` / `ld.so --help` seed defaults only (binhost ABI, `INPUT_DEVICES`, bluetooth/wifi/alsa, NVIDIA nouveau vs proprietary, virtio/vmware/qxl in VMs). `CPU_FLAGS_X86` still comes from `cpuid2cpuflags` in the chroot.
 
 ## Limits (also shown in the wizard)
 
-- The package catalogue is a handbook-sized set plus overlays, not the entire Portage tree. You can still type any atom.
-- **Encrypted swap** is a separate LUKS2 volume (`/dev/mapper/swap`) when you use a swap partition or LV. **LVM-on-LUKS** already encrypts the VG, so the swap LV is not wrapped twice. A **swap file** is not LUKS-wrapped.
-- **TPM2** only writes a helper script; enroll keys after the first real boot.
-- **Limine** copies `BOOTX64.EFI` / `BOOTAA64.EFI` to the ESP (or runs `limine bios-install` on BIOS) and writes `limine.conf` from the kernel currently in `/boot`. Kernel upgrades need that file or the `vmlinuz` symlink refreshed.
-- **netifrc** uses the NIC you pick in the wizard (live `ip`/`sysfs` list), not a hardcoded `eth0`.
+- The package catalogue is handbook-sized plus overlays, not the entire Portage tree.
+- **Encrypted swap** is a separate LUKS2 volume when using a swap partition/LV. LVM-on-LUKS does not wrap swap twice. A **swap file** is not LUKS-wrapped.
+- **TPM2** only writes a helper script; enroll after first boot.
+- **Limine** needs `limine.conf` / `vmlinuz` refreshed on kernel upgrades.
+- **netifrc** uses the NIC you pick, not a hardcoded `eth0`.
 
 ## Layout
-
-Python modules have comments that map each step to the Gentoo AMD64 Handbook.
 
 | Path | Role |
 | --- | --- |
@@ -152,7 +394,7 @@ Python modules have comments that map each step to the Gentoo AMD64 Handbook.
 | `gentoo_installer/wizard.py` | Handbook-ordered colourful Q&A |
 | `gentoo_installer/execute.py` | Host, disk, stage3, chroot phases |
 | `gentoo_installer/estimate.py` | Spoken pre-install time estimate |
-| `gentoo_installer/ui.py` | Colours, menus, passwords, nap notice |
+| `gentoo_installer/ui.py` | Colours, menus, passwords, nap notice, banner |
 | `gentoo_installer/catalog.py` | Package categories, WMs, overlays, Plymouth themes |
 
 $\scriptsize\textcolor{purple}{\textsf{Y}}\textcolor{green}{\textsf{o}}\textcolor{purple}{\textsf{u}}\textcolor{green}{\textsf{'}}\textcolor{purple}{\textsf{r}}\textcolor{green}{\textsf{e}}\ \textcolor{purple}{\textsf{W}}\textcolor{green}{\textsf{e}}\textcolor{purple}{\textsf{l}}\textcolor{green}{\textsf{c}}\textcolor{purple}{\textsf{o}}\textcolor{green}{\textsf{m}}\textcolor{purple}{\textsf{e}}$ 😈
