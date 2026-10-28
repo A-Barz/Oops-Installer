@@ -1721,10 +1721,16 @@ def _locale_gen_lines(cfg: InstallConfig) -> list[str]:
         return []
     seen: list[str] = []
     extras = getattr(cfg, "extra_locales", None) or []
-    for loc in [cfg.locale, *extras, "C.UTF-8"]:
+    # Prefer a concrete UTF-8 locale (never bare C/POSIX) so Portage and the
+    # installed system do not inherit an ambiguous C locale.
+    for loc in [_installer_utf8_locale(cfg), cfg.locale, *extras, "C.UTF-8"]:
         loc = (loc or "").strip()
-        if loc and loc not in seen and loc != "custom":
+        if loc in {"", "C", "POSIX", "custom"}:
+            continue
+        if loc not in seen:
             seen.append(loc)
+    if not seen:
+        seen.append("C.UTF-8")
     return [f"{loc} UTF-8" for loc in seen]
 
 
@@ -1774,7 +1780,8 @@ def _write_system_files(cfg: InstallConfig, root: str) -> None:
         _write_text(loc_gen, locale_body, keep_existing=False)
     envd = etc / "env.d"
     envd.mkdir(parents=True, exist_ok=True)
-    loc = cfg.locale.strip() or "C.UTF-8"
+    # Never persist bare C/POSIX — Portage treats that as an ambiguous locale.
+    loc = _installer_utf8_locale(cfg)
     _write_text(envd / "02locale", f'LANG="{loc}"\nLC_COLLATE="C"\n', keep_existing=keep)
     locale_conf = etc / "locale.conf"
     if locale_conf.is_dir() and not keep:
@@ -1841,8 +1848,9 @@ def _generate_locales(cfg: InstallConfig, runner: Runner, root: str) -> None:
         ),
         check=False,
     )
-    loc = shlex.quote(cfg.locale)
-    short = shlex.quote(cfg.locale.split(".")[0])
+    utf8 = _installer_utf8_locale(cfg)
+    loc = shlex.quote(utf8)
+    short = shlex.quote(utf8.split(".")[0])
     runner.run(
         _chroot_env_argv(
             "chroot",
@@ -3453,10 +3461,113 @@ def _service_stack_atoms(cfg: InstallConfig) -> list[str]:
 
 
 # Emerged before any eselect-repository enable/sync. Must be keyworded+unmasked first.
+GIT_ATOM = "dev-vcs/git"
 OVERLAY_HELPER_ATOMS: tuple[str, ...] = (
     "app-eselect/eselect-repository",
-    "dev-vcs/git",
+    GIT_ATOM,
 )
+
+
+def _needs_git_for_sync(cfg: InstallConfig) -> bool:
+    """True when Portage tree sync or overlay sync will invoke git."""
+    if (cfg.sync_method or "").strip() == "git":
+        return True
+    return bool(_required_overlays(cfg))
+
+
+def _git_keyword_text(cfg: InstallConfig) -> str:
+    return f"{GIT_ATOM} {_arch_testing_keyword(cfg)}\n"
+
+
+def _git_unmask_text() -> str:
+    return f"{GIT_ATOM}\n"
+
+
+def _ensure_git_script(cfg: InstallConfig) -> str:
+    """Keyword/unmask + emerge git before any git-backed Portage sync. Fail closed."""
+    if not _needs_git_for_sync(cfg):
+        return ""
+    kw = _git_keyword_text(cfg).rstrip("\n")
+    um = _git_unmask_text().rstrip("\n")
+    return f"""
+echo ">> ensure {GIT_ATOM} before Portage git sync / overlay enable"
+mkdir -p /etc/portage/package.accept_keywords /etc/portage/package.unmask
+cat > /etc/portage/package.accept_keywords/git << 'EOF'
+{kw}
+EOF
+cat > /etc/portage/package.unmask/git << 'EOF'
+{um}
+EOF
+emerge --ask=n --noreplace {GIT_ATOM} || {{
+  echo ">> failed to emerge {GIT_ATOM} (required for git sync / eselect-repository overlays)" >&2
+  exit 1
+}}
+if ! command -v git >/dev/null 2>&1; then
+  echo ">> git missing after emerge — cannot sync Portage overlays or a git tree" >&2
+  exit 1
+fi
+echo ">> git ready ($(command -v git))"
+"""
+
+
+def _installer_utf8_locale(cfg: InstallConfig) -> str:
+    """A concrete UTF-8 locale for Portage during chroot emerge/sync (not bare C)."""
+    loc = (cfg.locale or "").strip()
+    if loc in {"", "C", "POSIX", "custom"}:
+        return "C.UTF-8" if cfg.stage_variant == "musl" else "en_US.UTF-8"
+    # Prefer explicit UTF-8 forms; map common utf8 spelling.
+    if loc.upper().endswith(".UTF8") and not loc.upper().endswith(".UTF-8"):
+        loc = loc[:-4] + "UTF-8"
+    if "UTF-8" in loc.upper() or "UTF8" in loc.upper():
+        return loc
+    # Bare language_COUNTRY from the wizard → assume UTF-8.
+    if re.fullmatch(r"[A-Za-z]{2,3}_[A-Za-z0-9]+", loc):
+        return f"{loc}.UTF-8"
+    return "C.UTF-8" if cfg.stage_variant == "musl" else "en_US.UTF-8"
+
+
+def _locale_prep_script(cfg: InstallConfig) -> str:
+    """locale.gen + locale-gen, then export a real UTF-8 LANG before emerge/sync.
+
+    Portage warns when LANG/LC_ALL are bare ``C`` / ``POSIX`` ("ambiguous locale").
+    Host already wrote locale.gen; this regenerates archives in-chroot and switches
+    the installer environment off C before any Portage sync/emerge.
+    """
+    utf8 = _installer_utf8_locale(cfg)
+    q = shlex.quote(utf8)
+    if cfg.stage_variant == "musl":
+        return f"""
+echo ">> musl: set UTF-8 locale env for Portage (no glibc locale-gen)"
+export LANG={q}
+export LC_ALL={q}
+echo ">> installer locale for Portage: $LANG"
+"""
+    # Ensure the chosen UTF-8 line exists even if locale.gen was trimmed on resume.
+    # Grep patterns are built in Python so locale names cannot break the shell.
+    pat_utf8 = re.escape(utf8)
+    return f"""
+echo ">> generate UTF-8 locales before emerge/sync (avoid Portage ambiguous C warning)"
+mkdir -p /etc
+touch /etc/locale.gen
+if ! grep -qE '^{pat_utf8}[[:space:]]+UTF-8' /etc/locale.gen 2>/dev/null; then
+  echo {q} UTF-8 >> /etc/locale.gen
+fi
+if ! grep -qE '^C\\.UTF-8[[:space:]]+UTF-8' /etc/locale.gen 2>/dev/null; then
+  echo 'C.UTF-8 UTF-8' >> /etc/locale.gen
+fi
+locale-gen || true
+export LANG={q}
+export LC_ALL={q}
+# Prefer a locale that localedef actually produced; else C.UTF-8 (still not bare C).
+if ! locale -a 2>/dev/null | grep -qiE "^$(echo "$LANG" | tr '[:upper:]' '[:lower:]')$"; then
+  if locale -a 2>/dev/null | grep -qiE '^c\\.utf(-)?8$'; then
+    export LANG=C.UTF-8
+    export LC_ALL=C.UTF-8
+  fi
+fi
+echo ">> installer locale for Portage: $LANG"
+eselect locale set "$LANG" 2>/dev/null || eselect locale set "$(echo "$LANG" | cut -d. -f1)" 2>/dev/null || true
+"""
 
 
 def _required_overlays(cfg: InstallConfig) -> list[str]:
@@ -3514,27 +3625,32 @@ def _overlay_repo_unmask_text(cfg: InstallConfig, overlays: list[str] | None = N
 
 
 def _write_overlay_portage_files(cfg: InstallConfig, root: str) -> None:
-    """Host-side: keywords + unmask for overlay helpers and every required overlay.
+    """Host-side: keywords + unmask for git, overlay helpers, and required overlays.
 
     Written into the mounted Gentoo root *before* chroot so the first
-    eselect-repository/git emerge and later ::overlay packages are not masked.
+    git / eselect-repository emerge and later ::overlay packages are not masked.
     """
     overlays = _required_overlays(cfg)
-    if not overlays:
+    need_git = _needs_git_for_sync(cfg)
+    if not overlays and not need_git:
         return
     portage = Path(root) / "etc" / "portage"
     kw_dir = portage / "package.accept_keywords"
     um_dir = portage / "package.unmask"
     kw_dir.mkdir(parents=True, exist_ok=True)
     um_dir.mkdir(parents=True, exist_ok=True)
-    _write_text(kw_dir / "overlay-helpers", _overlay_helper_keyword_text(cfg), keep_existing=False)
-    _write_text(um_dir / "overlay-helpers", _overlay_helper_unmask_text(), keep_existing=False)
-    repo_kw = _overlay_repo_keyword_text(cfg, overlays)
-    repo_um = _overlay_repo_unmask_text(cfg, overlays)
-    if repo_kw.strip():
-        _write_text(kw_dir / "overlays", repo_kw, keep_existing=False)
-    if repo_um.strip():
-        _write_text(um_dir / "overlays", repo_um, keep_existing=False)
+    if need_git:
+        _write_text(kw_dir / "git", _git_keyword_text(cfg), keep_existing=False)
+        _write_text(um_dir / "git", _git_unmask_text(), keep_existing=False)
+    if overlays:
+        _write_text(kw_dir / "overlay-helpers", _overlay_helper_keyword_text(cfg), keep_existing=False)
+        _write_text(um_dir / "overlay-helpers", _overlay_helper_unmask_text(), keep_existing=False)
+        repo_kw = _overlay_repo_keyword_text(cfg, overlays)
+        repo_um = _overlay_repo_unmask_text(cfg, overlays)
+        if repo_kw.strip():
+            _write_text(kw_dir / "overlays", repo_kw, keep_existing=False)
+        if repo_um.strip():
+            _write_text(um_dir / "overlays", repo_um, keep_existing=False)
 
 
 def _chroot_helper_atoms(cfg: InstallConfig) -> list[str]:
@@ -3545,9 +3661,14 @@ def _chroot_helper_atoms(cfg: InstallConfig) -> list[str]:
     ]
     if not (cfg.gentoo_mirrors or "").strip():
         atoms.append("app-portage/mirrorselect")
-    # Overlays (guru for niri, hyproverlay, CachyOS, shells) need these first.
+    # Git tree sync and/or overlays (guru, hyproverlay, CachyOS, …) need git first.
+    if _needs_git_for_sync(cfg):
+        if GIT_ATOM not in atoms:
+            atoms.append(GIT_ATOM)
     if _required_overlays(cfg):
-        atoms.extend(OVERLAY_HELPER_ATOMS)
+        for atom in OVERLAY_HELPER_ATOMS:
+            if atom not in atoms:
+                atoms.append(atom)
     # Remote dotfile fetch uses curl from the chroot.
     for atom in cfg.window_managers or []:
         choices = catalog.dotfile_choices(atom)
@@ -3727,10 +3848,15 @@ EOF
         if cfg.testing_keywords
         else ""
     )
+    # git sync-type needs `git` on PATH — `_ensure_git_script` runs before this.
     sync = {
         "webrsync": "retry404 emerge-webrsync || retry404 emerge --sync",
         "rsync": "emerge --sync",
         "git": """
+if ! command -v git >/dev/null 2>&1; then
+  echo ">> git missing before Portage tree sync (sync_method=git)" >&2
+  exit 1
+fi
 mkdir -p /etc/portage/repos.conf
 cat > /etc/portage/repos.conf/gentoo.conf << 'EOF'
 [gentoo]
@@ -3742,6 +3868,8 @@ EOF
 emerge --sync
 """,
     }[cfg.sync_method]
+    git_prep = _ensure_git_script(cfg)
+    locale_prep = _locale_prep_script(cfg)
 
     fstab = _fstab(cfg, devices)
     crypttab = _crypttab(cfg, devices)
@@ -4180,7 +4308,8 @@ emerge --ask=n --emptytree @system || true
 # gentoo-live-installer chroot script rev {CHROOT_SCRIPT_REV}
 # Locales, hostname, timezone, keymap, make.conf are written by the host.
 # This script must never `source /etc/profile` (debuginfod nounset + FEATURES).
-# This script must never `export LANG=` to the user locale (archive not ready).
+# Start with LANG=C only until locale-gen runs; then switch to a real UTF-8 locale
+# so Portage does not warn about an ambiguous C locale during sync/emerge.
 set +eu
 unset FEATURES
 unset PORTAGE_FEATURES
@@ -4218,6 +4347,8 @@ EOF
 {codec_license_block}
 {keywords}
 
+{locale_prep}
+{git_prep}
 echo ">> sync Portage tree"
 {sync}
 unset FEATURES
@@ -4402,7 +4533,6 @@ def _overlay_script(cfg: InstallConfig) -> str:
     overlays = _required_overlays(cfg)
     if not overlays:
         return ""
-    helper_atoms = " ".join(OVERLAY_HELPER_ATOMS)
     helper_kw = _overlay_helper_keyword_text(cfg).rstrip("\n")
     helper_um = _overlay_helper_unmask_text().rstrip("\n")
     repo_kw = _overlay_repo_keyword_text(cfg, overlays).rstrip("\n")
@@ -4415,8 +4545,13 @@ def _overlay_script(cfg: InstallConfig) -> str:
         "cat > /etc/portage/package.unmask/overlay-helpers << 'EOF'",
         helper_um,
         "EOF",
-        f"emerge --ask=n --noreplace {helper_atoms} || {{ "
-        'echo ">> eselect-repository/git required for overlays" >&2; exit 1; }',
+        # Git first (may already be present from _ensure_git_script), then eselect-repository.
+        f"emerge --ask=n --noreplace {GIT_ATOM} || {{ "
+        f'echo ">> {GIT_ATOM} required before overlay enable/sync" >&2; exit 1; }}',
+        "if ! command -v git >/dev/null 2>&1; then "
+        'echo ">> git missing — cannot enable/sync overlays" >&2; exit 1; fi',
+        "emerge --ask=n --noreplace app-eselect/eselect-repository || { "
+        'echo ">> eselect-repository required for overlays" >&2; exit 1; }',
     ]
     for ov in overlays:
         qov = shlex.quote(ov)
