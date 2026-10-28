@@ -18,6 +18,7 @@ _LIGHT_SOURCE = 12
 _HEAVY_MINUTES = {
     "www-client/firefox": (25, 180),
     "www-client/firefox-bin": (12, 12),
+    "www-client/firefox-bin:esr": (12, 12),
     "www-client/google-chrome": (10, 10),
     "www-client/librewolf": (20, 180),
     "www-client/qutebrowser": (15, 40),
@@ -114,11 +115,16 @@ def _world_minutes(cfg: InstallConfig) -> int:
 
 def _kernel_raw_minutes(cfg: InstallConfig) -> int:
     binary = bool(cfg.binhost)
-    kernel = cfg.kernel or "gentoo-kernel-bin"
-    if kernel == "gentoo-kernel-bin":
+    kernel = (cfg.kernel or "gentoo-kernel-bin").split("::", 1)[0]
+    if "/" in kernel:
+        kernel = kernel.rsplit("/", 1)[-1]
+    if kernel in {"gentoo-kernel-bin", "cachyos-kernel-bin"}:
         return 10 if binary else 25
-    if kernel == "gentoo-kernel":
+    if kernel in {"gentoo-kernel", "cachyos-kernel"}:
         return 55 if binary else 90
+    # gentoo-sources and gentoo-sources-lts (menu id → same emerge) are source builds.
+    if kernel in {"gentoo-sources", "gentoo-sources-lts"}:
+        return 80
     return 80
 
 

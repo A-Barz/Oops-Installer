@@ -37,20 +37,38 @@ def _p(atom: str, desc: str, overlay: str = "gentoo") -> tuple[str, str]:
     return (atom, desc + tag)
 
 
-# Compositors offered by the wizard. Other GURU compositors (river, swayfx, …)
-# are not options. Niri is the GURU exception, enabled only when it is selected.
-# Hyprland stays on hyproverlay, which is not GURU.
+# Always emerged. Gentoo has no www-client/firefox-esr; ESR is the :esr slot of
+# firefox-bin. Chrome needs ACCEPT_LICENSE beyond @FREE (handled in the wizard).
+REQUIRED_BROWSERS: tuple[Pkg, ...] = (
+    Pkg("www-client/firefox-bin:esr", "Firefox ESR — official binary (mandatory)"),
+    Pkg("www-client/google-chrome", "Google Chrome — official binary (mandatory)"),
+)
+
+
+def required_browser_atoms() -> list[str]:
+    """Chrome + Firefox ESR atoms every install receives."""
+    return [pkg.atom for pkg in REQUIRED_BROWSERS]
+
+
+# Roughly the top Wayland compositors people actually use, plus previously
+# offered GURU options that are still viable (river, SwayFX, MangoWM, miracle-wm).
+# GURU compositors enable that overlay only when selected. Hyprland stays on
+# hyproverlay (not GURU).
 
 WAYLAND_COMPOSITORS: list[Pkg] = [
     Pkg("gui-wm/hyprland", "Hyprland — dynamic tiling Wayland compositor", "hyproverlay"),
     Pkg("gui-wm/sway", "Sway — i3-compatible wlroots compositor"),
+    Pkg("gui-wm/swayfx", "SwayFX — Sway with eye-candy (rounded corners, blur)", "guru"),
+    Pkg("gui-wm/niri", "Niri — scrollable tiling Wayland compositor", "guru"),
+    Pkg("gui-wm/river", "River — dynamic tiling Wayland compositor (Zig)", "guru"),
     Pkg("gui-wm/wayfire", "Wayfire — stacking Wayland compositor"),
     Pkg("gui-wm/labwc", "Labwc — Openbox-style stacking compositor"),
     Pkg("gui-wm/dwl", "dwl — suckless dwm for Wayland"),
-    Pkg("gui-wm/niri", "Niri — scrollable tiling Wayland compositor", "guru"),
+    Pkg("gui-wm/mangowm", "MangoWM — wlroots compositor with SceneFX eye-candy", "guru"),
+    Pkg("gui-wm/miracle-wm", "miracle-wm — Mir-based tiling Wayland compositor", "guru"),
     Pkg("x11-wm/qtile", "Qtile — Python WM on Wayland"),
+    Pkg("gui-wm/gamescope", "Gamescope — Steam/micro-compositor"),
     Pkg("dev-libs/weston", "Weston — Wayland reference compositor"),
-    Pkg("gui-wm/gamescope", "Gamescope — micro-compositor"),
 ]
 
 # Suckless dwm and i3. The long X11/DE window-manager list is not offered.
@@ -65,6 +83,10 @@ WINDOW_MANAGERS: list[Pkg] = WAYLAND_COMPOSITORS + X11_WINDOW_MANAGERS
 _SESSION_OVERRIDE: dict[str, tuple[str, str, str] | None] = {
     "gui-wm/hyprland": ("Hyprland", "Hyprland", "wayland"),
     "gui-wm/niri": ("Niri", "niri-session", "wayland"),
+    "gui-wm/swayfx": ("SwayFX", "sway", "wayland"),
+    "gui-wm/river": ("River", "river", "wayland"),
+    "gui-wm/mangowm": ("MangoWM", "mango", "wayland"),
+    "gui-wm/miracle-wm": ("miracle-wm", "miracle-wm", "wayland"),
     "x11-wm/qtile": ("Qtile (Wayland)", "qtile start -b wayland", "wayland"),
     "dev-libs/weston": ("Weston", "weston", "wayland"),
     "gui-wm/gamescope": ("Gamescope", "gamescope -- foot", "wayland"),
@@ -93,15 +115,12 @@ SHELL_EXEC: dict[str, str] = {
     "dms": "dms",
 }
 
-# Previously offered from GURU. They are not menu options, and a saved profile
-# or a typed atom must not emerge them. The selected shell is the exception.
+# Previously offered from GURU but not restored as menu options. A saved profile
+# or typed atom must not emerge them. Wizard-offered GURU WMs/shells are the
+# exception (see offered_guru_atoms). vscode/vscodium/helix now live in ::gentoo.
 REMOVED_GURU_ATOMS = frozenset(
     {
-        "gui-wm/swayfx",
-        "gui-wm/river",
         "gui-wm/cage",
-        "gui-wm/mangowm",
-        "gui-wm/miracle-wm",
         "gui-apps/fuzzel",
         "gui-apps/swaylock-effects",
         "gui-apps/xwayland-satellite",
@@ -109,9 +128,6 @@ REMOVED_GURU_ATOMS = frozenset(
         "x11-misc/ly",
         "gui-apps/tuigreet",
         "www-client/brave-bin",
-        "app-editors/helix",
-        "app-editors/vscode",
-        "app-editors/vscodium",
         "app-misc/fastfetch",
         "app-office/onlyoffice-bin",
         "net-im/discord",
@@ -122,10 +138,16 @@ REMOVED_GURU_ATOMS = frozenset(
 )
 
 # Offered packages that are still ~arch on a stable system. Keywording them
-# keeps one masked atom from failing its emerge.
+# keeps one masked atom from failing its emerge. The installer also keywords
+# every atom it plans to emerge (see execute._keyword_text); this set remains
+# as an explicit allow-list for tests and documentation.
 TESTING_ATOMS = frozenset(
     {
         "gui-wm/niri",
+        "gui-wm/swayfx",
+        "gui-wm/river",
+        "gui-wm/mangowm",
+        "gui-wm/miracle-wm",
         "gui-wm/gamescope",
         "x11-themes/kvantum",
         "x11-themes/tela-icon-theme",
@@ -137,8 +159,100 @@ TESTING_ATOMS = frozenset(
         "gnome-extra/polkit-gnome",
         "kde-apps/dolphin",
         "gnome-base/nautilus",
+        "sys-kernel/cachyos-kernel",
+        "sys-kernel/cachyos-kernel-bin",
+        "sys-kernel/cachyos-sources",
+        "media-libs/fdk-aac",
     }
 )
+
+# Kernel packages the wizard offers. Value stored in InstallConfig.kernel is the
+# package name only (no category). Overlay kernels need eselect repository enable.
+# There is no Ubuntu LTS kernel ebuild in ::gentoo or a known repos.gentoo.org
+# overlay that this installer can emerge (Ubuntu ships .deb kernels).
+#
+# Gentoo also has no package named *-lts or a dedicated LTS SLOT. Gentoo stable
+# for sys-kernel/gentoo-sources is the real LTS path (stable keywords track
+# upstream longterm series). The gentoo-sources-lts menu id emerges that package
+# and keeps stable keywords (see kernel_uses_stable_lts).
+KERNEL_OPTIONS: list[Pkg] = [
+    Pkg("sys-kernel/gentoo-kernel-bin", "Binary dist-kernel — fastest, matches binhost"),
+    Pkg("sys-kernel/gentoo-kernel", "Source dist-kernel — compiled on this machine"),
+    Pkg(
+        "sys-kernel/gentoo-sources-lts",
+        "Gentoo LTS — stable sys-kernel/gentoo-sources (upstream longterm; Gentoo stable keywords)",
+    ),
+    Pkg(
+        "sys-kernel/gentoo-sources",
+        "gentoo-sources — manual config; follows your accept_keywords (may be newer than stable LTS)",
+    ),
+    Pkg(
+        "sys-kernel/cachyos-kernel-bin",
+        "CachyOS binary dist-kernel (::CachyOS-kernels overlay)",
+        "CachyOS-kernels",
+    ),
+    Pkg(
+        "sys-kernel/cachyos-kernel",
+        "CachyOS source dist-kernel (::CachyOS-kernels overlay)",
+        "CachyOS-kernels",
+    ),
+]
+
+# Menu ids that are not real Portage package names. Value is the emerge name.
+KERNEL_MENU_TO_PACKAGE: dict[str, str] = {
+    "gentoo-sources-lts": "gentoo-sources",
+}
+
+
+def kernel_menu_name(name: str) -> str:
+    """Short menu / config id (no category)."""
+    bare = (name or "gentoo-kernel-bin").split("::", 1)[0].strip()
+    if "/" in bare:
+        bare = bare.rsplit("/", 1)[-1]
+    return bare or "gentoo-kernel-bin"
+
+
+def kernel_package_name(name: str) -> str:
+    """Real Portage package name under sys-kernel/ for emerge."""
+    short = kernel_menu_name(name)
+    return KERNEL_MENU_TO_PACKAGE.get(short, short)
+
+
+def kernel_uses_stable_lts(name: str) -> bool:
+    """True when this choice must stay on Gentoo stable gentoo-sources (LTS path)."""
+    return kernel_menu_name(name) == "gentoo-sources-lts"
+
+
+def kernel_menu_choices() -> list[tuple[str, str]]:
+    """Wizard rows: (short package or menu name, description)."""
+    return [(pkg.atom.rsplit("/", 1)[-1], pkg.desc) for pkg in KERNEL_OPTIONS]
+
+
+def kernel_atom(name: str) -> str:
+    """Full emerge atom for a short kernel package or menu name."""
+    bare = (name or "gentoo-kernel-bin").split("::", 1)[0]
+    if "/" in bare:
+        # Allow saved profiles that already stored a full atom.
+        cat_pkg = bare
+        pkg = cat_pkg.rsplit("/", 1)[-1]
+        if pkg in KERNEL_MENU_TO_PACKAGE:
+            return f"sys-kernel/{KERNEL_MENU_TO_PACKAGE[pkg]}"
+        return bare
+    return f"sys-kernel/{kernel_package_name(bare)}"
+
+
+def kernel_overlay(name: str) -> str:
+    """Overlay required for this kernel choice, or gentoo."""
+    menu = kernel_menu_name(name)
+    for pkg in KERNEL_OPTIONS:
+        if pkg.atom.rsplit("/", 1)[-1] == menu:
+            return pkg.overlay
+    # Real package name fallback (e.g. after alias resolution).
+    atom = kernel_atom(name)
+    for pkg in KERNEL_OPTIONS:
+        if kernel_atom(pkg.atom.rsplit("/", 1)[-1]) == atom and pkg.overlay != "gentoo":
+            return pkg.overlay
+    return "gentoo"
 
 # Compositors that speak the wlroots protocols grim, slurp, and portal-wlr need.
 # Niri, Weston, and Gamescope do not. Niri uses the GNOME portal instead.
@@ -146,9 +260,12 @@ _WLR_HELPER_COMPOSITORS = frozenset(
     {
         "gui-wm/hyprland",
         "gui-wm/sway",
+        "gui-wm/swayfx",
+        "gui-wm/river",
         "gui-wm/wayfire",
         "gui-wm/labwc",
         "gui-wm/dwl",
+        "gui-wm/mangowm",
         "x11-wm/qtile",
     }
 )
@@ -183,6 +300,17 @@ WM_REQUIREMENTS: dict[str, list[Pkg]] = {
         Pkg("gui-apps/swaylock", "Swaylock"),
         Pkg("gui-apps/foot", "foot terminal"),
     ],
+    "gui-wm/swayfx": [
+        Pkg("gui-apps/swaybg", "SwayBG wallpaper"),
+        Pkg("gui-apps/swayidle", "Swayidle"),
+        Pkg("gui-apps/swaylock", "Swaylock"),
+        Pkg("gui-apps/foot", "foot terminal"),
+    ],
+    "gui-wm/river": [
+        Pkg("gui-apps/foot", "foot terminal"),
+        Pkg("gui-apps/swaybg", "Wallpaper"),
+        Pkg("gui-apps/swaylock", "Swaylock"),
+    ],
     "gui-wm/wayfire": [
         Pkg("gui-apps/wf-shell", "wf-shell — Wayfire panel and background"),
     ],
@@ -192,6 +320,13 @@ WM_REQUIREMENTS: dict[str, list[Pkg]] = {
         Pkg("gui-apps/foot", "foot terminal"),
     ],
     "gui-wm/dwl": [
+        Pkg("gui-apps/foot", "foot terminal"),
+    ],
+    "gui-wm/mangowm": [
+        Pkg("gui-apps/foot", "foot terminal"),
+        Pkg("gui-apps/swaybg", "Wallpaper"),
+    ],
+    "gui-wm/miracle-wm": [
         Pkg("gui-apps/foot", "foot terminal"),
     ],
     "gui-wm/niri": [
@@ -286,12 +421,37 @@ def shell_exec(shell: str) -> str:
 
 
 def offered_guru_atoms(shell: str) -> set[str]:
-    """GURU atoms the wizard may emerge: the chosen shell, its greeter, and Niri."""
+    """GURU atoms the wizard may emerge: shells, greeter, and offered GURU WMs."""
     allowed = set(shell_atoms(shell))
-    allowed.add("gui-wm/niri")
+    for pkg in WINDOW_MANAGERS:
+        if pkg.overlay == "guru":
+            allowed.add(pkg.atom)
     if shell == "noctalia":
         allowed.add(NOCTALIA_GREETER.atom)
     return allowed
+
+
+# Proprietary / patent-encumbered multimedia stack. Only emerged after the user
+# explicitly accepts the licenses in the wizard (cfg.nonfree_codecs).
+NONFREE_CODEC_PACKAGES: list[Pkg] = [
+    Pkg("media-libs/gst-plugins-ugly", "GStreamer ugly plugins — MPEG, DVD, patented codecs"),
+    Pkg("media-libs/gst-plugins-bad", "GStreamer bad plugins — extra formats"),
+    Pkg("media-plugins/gst-plugins-libav", "GStreamer FFmpeg plugin — broad codec coverage"),
+    Pkg("media-libs/fdk-aac", "Fraunhofer FDK AAC (proprietary license)"),
+    Pkg("media-libs/faac", "FAAC AAC encoder"),
+    Pkg("media-sound/lame", "LAME MP3 encoder"),
+    Pkg("media-video/ffmpeg", "FFmpeg — decode/encode many formats"),
+]
+
+# Licenses appended to ACCEPT_LICENSE when non-free codecs are accepted.
+NONFREE_CODEC_LICENSES = (
+    "FraunhoferFDK",
+    "MPEG-4",
+)
+
+
+def nonfree_codec_atoms() -> list[str]:
+    return [pkg.atom for pkg in NONFREE_CODEC_PACKAGES]
 
 
 def niri_app_rows() -> list[tuple[str, str]]:
@@ -349,6 +509,11 @@ def packages_for_selection(wm_atoms: list[str], shell: str, pipewire: bool) -> l
     return out
 
 
+# Fallback greeter session when Wayland is chosen but no compositor mapped.
+FALLBACK_WAYLAND_SESSION: tuple[str, str, str] = ("labwc", "labwc", "wayland")
+FALLBACK_WAYLAND_WM = "gui-wm/labwc"
+
+
 def login_sessions(desktop: str, atoms: list[str], shell: str = "") -> list[tuple[str, str, str]]:
     """Sessions the greeter should offer: (title, exec, wayland|x11)."""
     del desktop  # Desktop environments are not installed.
@@ -364,30 +529,61 @@ def login_sessions(desktop: str, atoms: list[str], shell: str = "") -> list[tupl
         sessions.append((title, command, kind))
 
     for atom in atoms:
-        if atom == "gui-wm/dwl":
+        bare = atom.split("::", 1)[0]
+        if bare == "gui-wm/dwl":
             add("dwl", dwl_cmd, "wayland")
             continue
-        if atom == "x11-wm/qtile" and shell_exec(shell):
+        if bare == "x11-wm/qtile" and shell_exec(shell):
             add("Qtile (Wayland)", "start-qtile", "wayland")
             continue
-        if atom in _SESSION_OVERRIDE:
-            override = _SESSION_OVERRIDE[atom]
+        if bare in _SESSION_OVERRIDE:
+            override = _SESSION_OVERRIDE[bare]
             if override:
                 add(*override)
             continue
         known = {p.atom for p in WINDOW_MANAGERS}
-        if atom not in known:
+        if bare not in known:
             continue
-        kind = "wayland" if any(p.atom == atom for p in WAYLAND_COMPOSITORS) else "x11"
-        command = atom.rsplit("/", 1)[-1]
-        add(_pkg_title(atom), command, kind)
+        kind = "wayland" if any(p.atom == bare for p in WAYLAND_COMPOSITORS) else "x11"
+        command = bare.rsplit("/", 1)[-1]
+        add(_pkg_title(bare), command, kind)
+    return sessions
+
+
+def needs_login_greeter(window_managers: list[str], shell: str = "", atoms: list[str] | None = None) -> bool:
+    """True when the install must boot to a graphical greeter (not a TTY)."""
+    picked = list(window_managers or [])
+    if atoms:
+        picked = list(dict.fromkeys(picked + list(atoms)))
+    shell_name = (shell or "none").strip()
+    if shell_name and shell_name != "none":
+        return True
+    if wayland_selected(picked):
+        return True
+    return any(
+        atom.split("::", 1)[0] in {"gui-apps/noctalia-shell", "gui-apps/dankmaterialshell"}
+        for atom in picked
+    )
+
+
+def ensure_login_sessions(
+    desktop: str, atoms: list[str], shell: str = ""
+) -> list[tuple[str, str, str]]:
+    """Sessions for the greeter, with a labwc fallback so the list is never empty."""
+    sessions = login_sessions(desktop, atoms, shell)
+    if sessions:
+        return sessions
+    if needs_login_greeter([], shell, atoms):
+        return [FALLBACK_WAYLAND_SESSION]
     return sessions
 
 
 def resolved_display_manager(display_manager: str, desktop: str, atoms: list[str]) -> str:
-    """Login manager after GRUB. Wayland sessions use greetd. X11 uses startx.
+    """Login manager after GRUB. Wayland sessions always get a greeter.
 
-    An explicit greetd/sddm/lightdm/gdm choice still wins. "none" stays on the TTY.
+    Explicit sddm/gdm/lightdm/greetd/slim still wins. For Wayland or a shell,
+    "none"/"auto" become greetd — a TTY-only boot is a project failure.
+    X11-only (dwm/i3) without Wayland keeps startx on the text console.
     """
     del desktop
     choice = (display_manager or "auto").strip()
@@ -404,12 +600,10 @@ def resolved_display_manager(display_manager: str, desktop: str, atoms: list[str
         return "gdm"
     if "x11-misc/lightdm" in picked:
         return "lightdm"
+    if needs_login_greeter([], "", list(picked)):
+        return "greetd"
     if choice == "none":
         return "none"
-    if wayland_selected(list(picked)) or any(
-        atom in picked for atom in ("gui-apps/noctalia-shell", "gui-apps/dankmaterialshell")
-    ):
-        return "greetd"
     return "none"
 
 
@@ -478,6 +672,7 @@ BOOTLOADERS = [
 FEATURED_OVERLAYS: list[tuple[str, str]] = [
     ("wayland-desktop", "Wayland compositors and tools not yet in ::gentoo"),
     ("hyproverlay", "Hyprland and Hypr* utilities"),
+    ("CachyOS-kernels", "CachyOS dist-kernel and sources (cachyos-kernel / -bin)"),
     ("steam-overlay", "Steam client and Steam-based games"),
     ("gentoo-zh", "Packages useful for Chinese-speaking users"),
     ("science", "Experimental scientific packages"),
@@ -641,32 +836,49 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
     ),
     (
         "browsers",
-        "Web browsers",
+        "Web browsers (Firefox ESR + Chrome only)",
         _pkgs(
-            Pkg("www-client/firefox-bin", "Firefox — official binary (no compile)"),
-            Pkg("www-client/firefox", "Firefox — compile from source (hours)"),
-            Pkg("www-client/google-chrome", "Google Chrome — official binary"),
-            Pkg("www-client/librewolf", "LibreWolf — privacy-forked Firefox", "librewolf"),
-            Pkg("www-client/qutebrowser", "qutebrowser — keyboard-driven Qt browser"),
-            Pkg("www-client/falkon", "Falkon — KDE Qt WebEngine browser"),
-            Pkg("www-client/epiphany", "GNOME Web — GTK WebKit browser"),
-            Pkg("www-client/w3m", "w3m — text browser with images in a terminal"),
-            Pkg("www-client/lynx", "Lynx — classic text-only browser"),
-            Pkg("www-client/links", "Links — text/graphical lightweight browser"),
+            # Only the mandatory pair. Gentoo has no www-client/firefox-esr;
+            # ESR is the :esr slot of firefox-bin. No other browsers are listed.
+            Pkg("www-client/firefox-bin:esr", "Firefox ESR — official binary (always installed)"),
+            Pkg("www-client/google-chrome", "Google Chrome — official binary (always installed)"),
         ),
     ),
     (
         "editors",
-        "Editors & IDEs",
+        "Text editors",
         _pkgs(
+            # Sublime + Pulsar near the top so they are reachable without paging past a long list.
+            Pkg("app-editors/sublime-text", "Sublime Text — proprietary"),
+            Pkg(
+                "flatpak-app/dev.pulsar_edit.Pulsar",
+                "Pulsar — Atom successor (Flatpak; Atom itself is discontinued)",
+            ),
             Pkg("app-editors/neovim", "Neovim"),
             Pkg("app-editors/vim", "Vim"),
+            Pkg("app-editors/gvim", "gVim — Vim with a GUI"),
             Pkg("app-editors/emacs", "GNU Emacs"),
             Pkg("app-editors/nano", "nano"),
-            Pkg("dev-util/geany", "Geany"),
+            Pkg("app-editors/helix", "Helix — modal editor"),
+            Pkg("app-editors/kakoune", "Kakoune"),
+            Pkg("app-editors/micro", "micro — friendly terminal editor"),
             Pkg("app-editors/kate", "Kate"),
             Pkg("app-editors/gedit", "gedit"),
-            Pkg("app-editors/kile", "Kile"),
+            Pkg("app-editors/gnome-text-editor", "GNOME Text Editor"),
+            Pkg("app-editors/featherpad", "FeatherPad"),
+            Pkg("app-editors/mousepad", "Mousepad"),
+            Pkg("app-editors/kile", "Kile — LaTeX"),
+            Pkg("app-editors/ghostwriter", "ghostwriter — Markdown"),
+            Pkg("app-editors/logseq-desktop-bin", "Logseq — open-source knowledge base (binary)"),
+        ),
+    ),
+    (
+        "ides",
+        "IDEs (2026)",
+        _pkgs(
+            Pkg("app-editors/vscode", "Visual Studio Code — Microsoft binary"),
+            Pkg("app-editors/vscodium", "VSCodium — open-source VS Code builds"),
+            Pkg("app-editors/zed", "Zed — high-performance GUI editor"),
         ),
     ),
     (
@@ -913,9 +1125,9 @@ class DotfileChoice:
     packages: tuple[str, ...] = ()
 
 
-# At most five choices per compositor, installer default included.
-# Star counts checked on GitHub, 2026-10-25. Paths are the compositor
-# config only (not waybar, the shell, or the upstream install script).
+# Exactly two choices per compositor: installer default plus the top-rated
+# GitHub config. Star counts checked on GitHub, 2026-10-25. Paths are the
+# compositor config only (not waybar, the shell, or the upstream install script).
 WM_DOTFILES: dict[str, tuple[DotfileChoice, ...]] = {
     "gui-wm/hyprland": (
         DotfileChoice("installer", "Installer default — keymap and a short Hyprland config"),
@@ -936,67 +1148,11 @@ WM_DOTFILES: dict[str, tuple[DotfileChoice, ...]] = {
                 "x11-terms/alacritty",
                 "kde-apps/dolphin",
                 "xfce-base/thunar",
-                "www-client/firefox-bin",
+                "www-client/firefox-bin:esr",
                 "app-shells/fish",
                 "media-fonts/jetbrains-mono",
                 "sys-process/btop",
                 "app-misc/jq",
-            ),
-        ),
-        DotfileChoice(
-            "hyde",
-            "HyDE-Project/HyDE",
-            "HyDE-Project/HyDE",
-            "master",
-            "Configs/.config/hypr",
-            ".config/hypr",
-            packages=(
-                "gui-apps/waybar",
-                "x11-misc/rofi",
-                "x11-misc/dunst",
-                "x11-terms/kitty",
-                "app-shells/fish",
-                "app-shells/starship",
-                "gui-apps/swaylock",
-                "kde-apps/dolphin",
-            ),
-        ),
-        DotfileChoice(
-            "ml4w",
-            "mylinuxforwork/dotfiles — ML4W",
-            "mylinuxforwork/dotfiles",
-            "main",
-            "dotfiles/.config/hypr",
-            ".config/hypr",
-            packages=(
-                "gui-apps/waybar",
-                "x11-misc/rofi",
-                "x11-terms/kitty",
-                "app-shells/fish",
-                "sys-process/btop",
-            ),
-        ),
-        DotfileChoice(
-            "caelestia",
-            "caelestia-dots/caelestia",
-            "caelestia-dots/caelestia",
-            "main",
-            "hypr",
-            ".config/hypr",
-            packages=(
-                "gui-apps/foot",
-                "app-shells/fish",
-                "sys-apps/eza",
-                "sys-process/btop",
-                "xfce-base/thunar",
-                "app-shells/starship",
-                "www-client/firefox-bin",
-                "x11-themes/papirus-icon-theme",
-                "media-fonts/jetbrains-mono",
-                "sys-apps/bat",
-                "sys-apps/ripgrep",
-                "app-misc/jq",
-                "gnome-base/gnome-keyring",
             ),
         ),
     ),
@@ -1016,66 +1172,25 @@ WM_DOTFILES: dict[str, tuple[DotfileChoice, ...]] = {
                 "gui-apps/swaylock",
             ),
         ),
-        DotfileChoice(
-            "saatvik",
-            "saatvik333/niri-dotfiles",
-            "saatvik333/niri-dotfiles",
-            "main",
-            "niri",
-            ".config/niri",
-            "dir",
-            (
-                "gui-apps/waybar",
-                "x11-terms/alacritty",
-                "x11-terms/kitty",
-                "xfce-base/thunar",
-                "gnome-extra/polkit-gnome",
-            ),
-        ),
-        DotfileChoice(
-            "niri-land",
-            "kianblakley/niri-land",
-            "kianblakley/niri-land",
-            "main",
-            ".config/niri",
-            ".config/niri",
-            "dir",
-            (
-                "gui-apps/waybar",
-                "gui-apps/mako",
-                "x11-misc/rofi",
-                "x11-terms/kitty",
-                "gui-apps/swaylock",
-            ),
-        ),
-        DotfileChoice(
-            "niri-setup",
-            "acaibowlz/niri-setup",
-            "acaibowlz/niri-setup",
-            "main",
-            "niri",
-            ".config/niri",
-            "dir",
-            (
-                "gui-apps/waybar",
-                "x11-misc/dunst",
-                "gui-apps/swayidle",
-                "gui-apps/swaylock",
-                "x11-terms/alacritty",
-                "www-client/firefox-bin",
-                "gnome-base/nautilus",
-                "media-sound/playerctl",
-                "sys-fs/udiskie",
-                "gnome-extra/polkit-gnome",
-            ),
-        ),
     ),
 }
 
+# Hard cap so a longer WM_DOTFILES entry still only offers two options.
+_MAX_DOTFILE_CHOICES = 2
+
 
 def dotfile_choices(atom: str) -> list[DotfileChoice]:
-    """Up to five config choices for this compositor, or none."""
-    return list(WM_DOTFILES.get(atom, ()))[:5]
+    """Top two config choices for this compositor, or none."""
+    return list(WM_DOTFILES.get(atom, ()))[:_MAX_DOTFILE_CHOICES]
+
+
+def without_already_selected(
+    rows: list[tuple[str, str]], already: set[str]
+) -> list[tuple[str, str]]:
+    """Drop checklist rows whose atoms were chosen in an earlier step."""
+    if not already:
+        return list(rows)
+    return [(atom, desc) for atom, desc in rows if atom not in already]
 
 
 # Noctalia and DMS already provide the bar, launcher, and their own config.
@@ -1121,6 +1236,7 @@ def dotfile_package_atoms(shell: str, window_managers: list[str], wm_dotfiles: l
 
 def _known_packages() -> list[Pkg]:
     pkgs = list(WINDOW_MANAGERS) + list(WAYLAND_BASE) + list(WAYLAND_COMMON_UTILS)
+    pkgs.extend(KERNEL_OPTIONS)
     pkgs.extend(PLYMOUTH_THEME_PACKAGES.values())
     for group in list(WM_REQUIREMENTS.values()) + list(SHELL_PACKAGES.values()):
         pkgs.extend(group)
@@ -1135,8 +1251,12 @@ def atom_overlay(atom: str) -> str:
         return "guru"
     if atom.startswith("flatpak-app/"):
         return "gentoo"
+    if bare.startswith("sys-kernel/"):
+        ov = kernel_overlay(bare)
+        if ov != "gentoo":
+            return ov
     for pkg in _known_packages():
-        if pkg.atom == atom:
+        if pkg.atom == atom or pkg.atom == bare:
             return pkg.overlay
     for _, _, pkgs in CATEGORIES:
         for value, desc in pkgs:

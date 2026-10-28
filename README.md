@@ -13,12 +13,13 @@ The project is open for testing and bug reports. Try it in a virtual machine, or
 Oops-Installer runs in a terminal on an Ubuntu live USB and installs Gentoo onto a disk. The questions follow the AMD64 Handbook. A summary, including an estimated time, is shown before the disk is touched, and you re-type the disk path before partitioning. After that confirmation the installer tells you to step away, and a percent tracks emerge for the rest of the install.
 
 - **Disks.** GPT or BIOS, a full wipe or existing partitions, LUKS, LVM, RAID1, Btrfs, ZFS, and swap. A weekly `fstrim` is offered for an SSD. Dual boot is not set up.
-- **Base system.** OpenRC or systemd, a stage3, Portage profile and USE flags, and a kernel (including `gentoo-kernel-bin`). Binary packages are offered so a desktop install does not have to compile everything.
+- **Base system.** OpenRC or systemd, a stage3 (base tarball only — no bootable kernel), Portage profile and USE flags, and a separate kernel choice (`gentoo-kernel-bin`, `gentoo-kernel`, **Gentoo LTS** via stable `sys-kernel/gentoo-sources`, plain `gentoo-sources`, or CachyOS via the `CachyOS-kernels` overlay). There is no Ubuntu LTS ebuild and no fake `*-lts` package — Gentoo’s LTS path is stable `gentoo-sources`. Binary packages are offered so a desktop install does not have to compile everything.
 - **Hardware.** The live system is probed for CPU level, input devices, Wi-Fi, Bluetooth, and the GPU. NVIDIA can use nouveau or the proprietary driver. `CPU_FLAGS_X86` is written in the chroot with `cpuid2cpuflags`.
 - **Boot.** GRUB, systemd-boot, EFI stub, and Limine, plus Plymouth themes. The EFI System Partition stays at `/efi`.
-- **Session.** Wayland compositors (Hyprland, Niri, Sway, Wayfire, labwc, and others), plus dwm and i3. Noctalia Shell and DMS are optional. With Noctalia and a login manager, the greeter is noctalia-greeter. The installed system boots to that login screen, with the username ready and the chosen window managers as sessions. A text-console choice stays a shell.
-- **Dotfiles.** Hyprland and Niri each offer the installer config or one of four GitHub configs. The chosen config is downloaded from the latest commit on its branch during the install, and the Gentoo packages that config starts are emerged. Noctalia and DMS skip this, because those shells bring their own session. Upstream install scripts are not run.
-- **Apps.** PipeWire, suckless tools, and a handbook-sized list of common programs. `nano` is always installed. You can type any extra Portage atom.
+- **Session.** Popular Wayland compositors (Hyprland, Sway, SwayFX, Niri, River, Wayfire, labwc, dwl, MangoWM, miracle-wm, Qtile, Gamescope, Weston), plus dwm and i3. Noctalia Shell and DMS are optional. Proprietary multimedia codecs are offered only after an explicit license accept. Editors include Sublime Text, Helix, and Pulsar (Atom’s successor, Flatpak). IDEs include VS Code, VSCodium, and Zed. With Noctalia and a login manager, the greeter is noctalia-greeter.
+- **Dotfiles.** Hyprland and Niri each offer two choices: the installer config or the top-rated GitHub config. The chosen config is downloaded from the latest commit on its branch during the install, and the Gentoo packages that config starts are emerged. Noctalia and DMS skip this, because those shells bring their own session. Upstream install scripts are not run.
+- **Apps.** Google Chrome and Firefox ESR (`www-client/firefox-bin:esr`) are always installed; other browsers are optional. Flatpak is suggested for most desktop apps. PipeWire, suckless tools, and a handbook-sized list of common programs. `nano` is always installed. You can type any extra Portage atom.
+- **Login.** Wayland compositors and shells always boot to greetd (gtkgreet or noctalia-greeter). The install fails closed if the greeter, session `.desktop` files, or enablement would be missing.
 - **Again.** Answers save to YAML or JSON. `--resume` continues an interrupted install. Passwords are asked again unless you saved them on purpose.
 
 The wizard is ordered like the [Gentoo AMD64 Handbook](https://wiki.gentoo.org/wiki/Handbook:AMD64) (linked from the [Gentoo wiki main page](https://wiki.gentoo.org/wiki/Main_Page)):
@@ -56,8 +57,12 @@ Boot Ubuntu live, open a terminal:
 ```bash
 sudo apt-get update
 sudo apt-get install -y python3 git
-git clone <this-repo> 
-cd gentoo-live-installer
+git clone <this-repo>
+cd gentoo-live-installer   # or Oops-Installer
+# Use the PR branch (main still shows the old “Ubuntu XFCE” banner / rev 44):
+git fetch origin
+git checkout cursor/installer-ux-package-picker-cd99
+# Banner must say “Ubuntu Boot Image” and rev ≥ 51
 sudo python3 install.py
 ```
 

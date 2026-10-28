@@ -33,7 +33,7 @@ SECRET_FIELDS = (
 
 @dataclass
 class InstallConfig:
-    # --- Handbook ch. 2: live host (Ubuntu XFCE instead of the Gentoo ISO) ---
+    # --- Handbook ch. 2: live host (Ubuntu Boot Image instead of the Gentoo ISO) ---
     architecture: str = "amd64"
     dry_run: bool = False  # Print commands only; never wipe disks.
     resume: bool = False  # Skip phases already listed in state_file.
@@ -59,6 +59,10 @@ class InstallConfig:
     firmware: str = "uefi"  # uefi | bios — drives ESP vs BIOS-boot partition
     uefi_bits: int = 64  # 64, 32 (IA32/mixed mode), or 0 when firmware is BIOS
     wipe_disk: bool = True
+    # disk = whole target; partitions = wipe_partitions only; none = leave data.
+    wipe_mode: str = "disk"  # disk | partitions | none
+    # When wipe_mode == "partitions", wipe these block devices with wipefs before install.
+    wipe_partitions: list[str] = field(default_factory=list)
     # handbook = ESP/boot + swap + root (wiki default scheme)
     layout: str = "handbook"  # handbook, btrfs-subvols, lvm, lvm-luks, zfs, existing, mdraid1
     filesystem: str = "ext4"  # ext4, xfs, btrfs, f2fs, jfs, zfs
@@ -93,7 +97,10 @@ class InstallConfig:
     binpkg_respect_use: bool = False
     use_flags: str = "dist-kernel"
     extra_use: list[str] = field(default_factory=list)
-    accept_license: str = "*"
+    # Default stays free-only-ish; proprietary codecs expand this after explicit accept.
+    accept_license: str = "@FREE @BINARY-REDISTRIBUTABLE"
+    # Set only after the wizard's accept/decline license prompt for proprietary codecs.
+    nonfree_codecs: bool = False
     video_cards: str = "auto"  # auto = lspci heuristic in detect.detect_gpu()
     input_devices: str = "libinput"  # libinput, plus wacom when a tablet is present
     lto: bool = False
@@ -102,7 +109,9 @@ class InstallConfig:
     gentoo_mirrors: str = ""  # Empty → mirrorselect speed test, then distfiles.gentoo.org
 
     # --- Handbook ch. 7: kernel ---
-    kernel: str = "gentoo-kernel-bin"  # dist-kernel binary is fastest on a live USB; alternatives: gentoo-kernel, gentoo-sources
+    # Short package name under sys-kernel/ (gentoo-kernel-bin, cachyos-kernel, …).
+    # Stage3 never bundles a bootable kernel; chapter 7 always asks for this.
+    kernel: str = "gentoo-kernel-bin"
     linux_firmware: bool = True
     sof_firmware: bool = False
     intel_microcode: bool = False

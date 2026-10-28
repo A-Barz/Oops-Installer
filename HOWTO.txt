@@ -7,7 +7,7 @@ select. There is no undo.
 What this is
 ------------
 This program installs Gentoo Linux onto a hard disk or SSD. You boot an
-Ubuntu XFCE live USB (or similar Debian-like live system), open a terminal,
+Ubuntu Boot Image live USB (or similar Debian-like live system), open a terminal,
 and answer a colourful question wizard. After you confirm the disk path, it
 partitions the disk, downloads a Gentoo stage3 tarball, and installs the
 system.
@@ -25,10 +25,11 @@ Use this if you want a guided Gentoo install with optional LUKS, LVM, RAID1,
 Btrfs, ZFS, several bootloaders, Plymouth, Wayland compositors (Hyprland,
 Sway, Wayfire, labwc, dwl, Qtile), suckless tools, and popular apps. Noctalia
 and DMS are optional shells. Hyprland and Niri can use the installer's own
-config or one of four popular GitHub configs. That choice is skipped when
-Noctalia or DMS is the shell. A GitHub config is downloaded during the
-install from the latest commit on its branch, and the Gentoo packages that
-config starts are installed too. The project's install script is not run.
+config or the top-rated GitHub config for that compositor. That choice is
+skipped when Noctalia or DMS is the shell. A GitHub config is downloaded
+during the install from the latest commit on its branch, and the Gentoo
+packages that config starts are installed too. The project's install script
+is not run.
 
 Do not use this as your first Linux install on a machine that holds unique
 data unless you have backups and have already practised in a virtual machine.
@@ -36,7 +37,7 @@ data unless you have backups and have already practised in a virtual machine.
 What you need
 -------------
   * A PC you can reboot (or a VM)
-  * Ubuntu XFCE live USB/ISO, or another live system with apt and Python 3.10+
+  * Ubuntu Boot Image live USB/ISO, or another live system with apt and Python 3.10+
   * Working internet (wired or Wi-Fi) to fetch stage3 and packages
   * Root / sudo
   * A target disk you are willing to erase, unless you choose "existing
@@ -123,8 +124,10 @@ disk until the review at the end.
   3. Network      Live DHCP, Wi-Fi, or static IP so stage3 can download
   4. Disks        Target disk, wipe, layout, filesystem, swap, LUKS
   5. Stage3       OpenRC or systemd, desktop / hardened / musl
+                  (stage tarball only — no kernel image; pick the kernel in step 7)
   6. Base         Profile, sync method, binhost, USE flags
-  7. Kernel       gentoo-kernel-bin (fastest), sources, firmware, dracut
+  7. Kernel       gentoo-kernel-bin (fastest), gentoo-kernel, gentoo-sources,
+                  CachyOS binary/source via CachyOS-kernels, firmware, dracut
   8. System       Hostname, locale, timezone, root and user passwords
   9. Tools        NetworkManager / dhcpcd / netifrc, sshd, cron, CUPS
  10. Bootloader   GRUB (handbook default) and optional extras, Plymouth
@@ -176,7 +179,7 @@ remaining. apt, wget, and emerge output keeps scrolling above that line.
 For a first install, prefer:
 
   * Official binhost (binary packages) when the wizard offers it
-  * sys-kernel/gentoo-kernel-bin rather than compiling gentoo-sources
+  * sys-kernel/gentoo-kernel-bin (or cachyos-kernel-bin) rather than compiling sources
 
 A log is appended at:
 

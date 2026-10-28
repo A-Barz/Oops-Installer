@@ -66,6 +66,8 @@ def queue_saved_software(cfg: InstallConfig) -> None:
     cfg.selected_packages = kept
     needed = [pkg.atom for pkg in catalog.packages_for_selection(managers, cfg.shell, cfg.pipewire)]
     needed += catalog.dotfile_package_atoms(cfg.shell, managers, cfg.wm_dotfiles)
+    if getattr(cfg, "nonfree_codecs", False):
+        needed += catalog.nonfree_codec_atoms()
     cfg.extra_packages = list(dict.fromkeys(managers + needed + kept))
     cfg.overlays = [name for name in cfg.overlays if name != "guru"]
     cfg.overlays = catalog.overlays_required_by(cfg.extra_packages, cfg.overlays)
@@ -157,6 +159,7 @@ def warn_if_ntfs_present() -> None:
 
 def run_wizard(cfg: InstallConfig) -> InstallConfig:
     """Drive every chapter in handbook order, then the pre-wipe review."""
+    # Opening thanks is printed with the banner (install.py main) before this runs.
     ui.info("This installer follows the Gentoo AMD64 Handbook chapter by chapter.")
     ui.info(HANDBOOK)
     ui.warn("It can wipe the selected disk. Back up first. Prefer testing in a VM.")
@@ -185,7 +188,7 @@ def run_wizard(cfg: InstallConfig) -> InstallConfig:
 def _about(cfg: InstallConfig) -> None:
     """Handbook: About — dry-run, resume, mountpoint."""
     ui.chapter("1", "About the installation", f"{HANDBOOK}/Installation/About")
-    ui.info("A live Ubuntu XFCE session is used as the host instead of the Gentoo minimal ISO.")
+    ui.info("A live Ubuntu Boot Image session is used as the host instead of the Gentoo minimal ISO.")
     ui.info("After you answer every chapter, a summary is shown before any disk is touched.")
     cfg.dry_run = ui.ask_yes_no("Dry-run only (print commands, do not change disks)?", False)
     if getattr(cfg, "_resume_decided", False):
@@ -199,7 +202,7 @@ def _about(cfg: InstallConfig) -> None:
 
 
 def _media(cfg: InstallConfig) -> None:
-    """Handbook: Media — we treat Ubuntu XFCE live as the installation medium."""
+    """Handbook: Media — we treat Ubuntu Boot Image live as the installation medium."""
     ui.chapter("2", "Choosing the right installation medium (Ubuntu live host)", f"{HANDBOOK}/Installation/Media")
     if detect.is_linux():
         ui.ok(f"Linux host detected ({detect.nproc()} CPUs, ~{detect.mem_gib()} GiB RAM)")
@@ -300,7 +303,66 @@ def _disks(cfg: InstallConfig) -> None:
     _warn_small_disk(cfg)
     _note_ssd_trim(cfg)
 
-    cfg.wipe_disk = ui.ask_yes_no("Wipe this disk and create a new partition table?", True)
+    cfg.wipe_mode = ui.menu(
+        "What should be wiped before install?",
+        [
+            ("disk", "Entire disk — new partition table (recommended)"),
+            ("partitions", "Selected partitions only (pick one, several, or all) — then install"),
+            ("none", "Nothing — keep data; use existing partitions as-is"),
+        ],
+        "disk" if cfg.wipe_disk else ("partitions" if getattr(cfg, "wipe_partitions", None) else "none"),
+    )
+    cfg.wipe_partitions = []
+    if cfg.wipe_mode == "disk":
+        cfg.wipe_disk = True
+        ui.info(f"The whole disk {cfg.target_disk} will be wiped and repartitioned.")
+    elif cfg.wipe_mode == "partitions":
+        cfg.wipe_disk = False
+        disk = cfg.target_disk.rstrip("/")
+        part_rows: list[tuple[str, str]] = []
+        for p in detect.list_partitions():
+            path = str(p.get("path") or "")
+            if not path.startswith("/dev/"):
+                continue
+            parent = str(p.get("disk") or "") or (detect.parent_block_device(path) or "")
+            if parent != disk and not path.startswith(disk + "p") and not (
+                path.startswith(disk) and path != disk and not disk[-1:].isdigit()
+            ):
+                continue
+            fs = p.get("fstype") or "unknown"
+            size = p.get("size") or "?"
+            label = p.get("label") or p.get("parttypename") or ""
+            tag = f"{size}  {fs}"
+            if label:
+                tag += f"  {label}"
+            part_rows.append((path, tag))
+        if not part_rows:
+            ui.warn(
+                "No partitions listed on that disk. Type paths to wipe "
+                "(space-separated), or choose entire-disk wipe instead."
+            )
+            typed = ui.prompt("Partition paths to wipe (empty = none)", "")
+            cfg.wipe_partitions = typed.split() if typed.strip() else []
+        else:
+            ui.info(
+                "Space toggles each partition. Select all wipes every listed "
+                "partition on this disk. Enter continues."
+            )
+            cfg.wipe_partitions = ui.paged_checklist(
+                f"Partitions to wipe on {disk}",
+                part_rows,
+                selected=[],
+                page_size=14,
+                select_all=True,
+            )
+            if not cfg.wipe_partitions:
+                ui.warn("No partitions selected — nothing will be wiped before install.")
+        if cfg.wipe_partitions:
+            ui.ok("Will wipe: " + ", ".join(cfg.wipe_partitions))
+    else:
+        cfg.wipe_disk = False
+        ui.info("No wipe. You must point the installer at partitions that already exist.")
+
     if cfg.firmware == "uefi":
         cfg.partition_table = "gpt"
         ui.info("UEFI selected — GPT will be used (handbook).")
@@ -311,6 +373,7 @@ def _disks(cfg: InstallConfig) -> None:
             "mbr",
         )
 
+    layout_default = "existing" if cfg.wipe_mode in {"partitions", "none"} else "handbook"
     cfg.layout = ui.menu(
         "Disk layout (merged from oddlama, GForge, l0rdg3x, handbook)",
         [
@@ -320,9 +383,9 @@ def _disks(cfg: InstallConfig) -> None:
             ("lvm-luks", "LVM-on-LUKS (ESP unencrypted)"),
             ("mdraid1", "Software RAID1 of two disks, then handbook layout"),
             ("zfs", "ZFS root pool (needs zfsutils-linux on Ubuntu)"),
-            ("existing", "Use partitions you already created"),
+            ("existing", "Use partitions you already created (or wiped above)"),
         ],
-        "handbook",
+        layout_default,
     )
     if cfg.layout == "mdraid1":
         others = [c for c in choices if c[0] != cfg.target_disk]
@@ -330,7 +393,10 @@ def _disks(cfg: InstallConfig) -> None:
             cfg.extra_raid_disk = ui.menu("Second RAID1 disk", others, others[0][0])
         else:
             cfg.extra_raid_disk = ui.prompt("Second RAID1 disk", "/dev/sdb")
-    if cfg.layout == "existing":
+    if cfg.layout == "existing" or cfg.wipe_mode in {"partitions", "none"}:
+        if cfg.layout != "existing" and cfg.wipe_mode != "disk":
+            ui.info("Selected-partition / no-wipe installs use your existing partition layout.")
+            cfg.layout = "existing"
         cfg.wipe_disk = False
         cfg.existing_esp = ui.prompt("ESP / boot partition", cfg.existing_esp or "/dev/sda1")
         cfg.existing_root = ui.prompt("Root partition (or LUKS container)", cfg.existing_root or "/dev/sda3")
@@ -405,6 +471,11 @@ def _disks(cfg: InstallConfig) -> None:
 def _stage(cfg: InstallConfig) -> None:
     """Handbook: Stage file — stage1/2/3, OpenRC/systemd, desktop vs hardened/musl."""
     ui.chapter("5", "Installing the Gentoo installation files", f"{HANDBOOK}/Installation/Stage")
+    ui.info(
+        "The stage tarball is the base system archive (stage1 / stage2 / stage3). "
+        "It is not a kernel. Stage3 does not include a bootable kernel image — "
+        "you choose which kernel package to emerge in chapter 7."
+    )
     cfg.stage_level = ui.menu(
         "Stage tarball (handbook default is stage3)",
         [
@@ -430,6 +501,8 @@ def _stage(cfg: InstallConfig) -> None:
             "If the stage file or emerge returns HTTP 404, the installer checks the next Gentoo mirror and retries."
         )
         cfg.install_type = "server"
+    else:
+        ui.info("Kernel package selection comes later (chapter 7), after the base-system questions.")
     cfg.init_system = ui.menu(
         "Init system",
         [
@@ -528,6 +601,7 @@ def _base(cfg: InstallConfig) -> None:
         ui.info(f"{flag}: {detect.hardware_note(flag)}")
     ui.info("USE flags control optional features inside packages (audio, GUI toolkits, networking).")
     ui.info("The flag name is the value written to make.conf. A detected device is shown beside alsa, wifi, and bluetooth.")
+    ui.info("Pre-ticked flags match this machine and the init/desktop choices you already made.")
     extra = ui.checklist(
         "Global USE flags (handbook ch. 6) — Space toggles, Enter continues",
         _use_rows(),
@@ -538,6 +612,12 @@ def _base(cfg: InstallConfig) -> None:
         extra = list(dict.fromkeys(extra + typed.split()))
     cfg.extra_use = extra
     cfg.use_flags = " ".join(extra)
+    # Always show the applied set — testers could not see which flags were chosen.
+    if cfg.extra_use:
+        ui.ok("USE flags that will be written to make.conf:")
+        ui.info("  " + " ".join(cfg.extra_use))
+    else:
+        ui.warn("No global USE flags were selected.")
     cfg.lto = ui.ask_yes_no("Enable LTO in CFLAGS (experimental, slower compiles)?", False)
     cfg.hardened_flags = cfg.stage_variant == "hardened" or ui.ask_yes_no("Add hardened CFLAGS / USE (pie ssp)?", False)
     ui.info(
@@ -614,15 +694,32 @@ def _default_use(cfg: InstallConfig) -> list[str]:
 def _kernel(cfg: InstallConfig) -> None:
     """Handbook: Kernel — dist-kernel vs source, firmware, dracut, UKI."""
     ui.chapter("7", "Configuring the Linux kernel", f"{HANDBOOK}/Installation/Kernel")
-    cfg.kernel = ui.menu(
-        "Kernel (handbook: distribution kernel recommended)",
-        [
-            ("gentoo-kernel-bin", "Binary dist-kernel — fastest, matches binhost"),
-            ("gentoo-kernel", "Source dist-kernel — compiled on this machine"),
-            ("gentoo-sources", "gentoo-sources (manual config; dist-kernel helpers still used if possible)"),
-        ],
-        "gentoo-kernel-bin",
+    ui.info(
+        "Stage3 left the root filesystem without a bootable kernel. "
+        "Pick the Portage package that will be emerged into /boot (and onto /efi for some loaders)."
     )
+    ui.info(
+        "CachyOS options enable the CachyOS-kernels overlay. "
+        "There is no Ubuntu LTS ebuild and no separate gentoo-*-lts package in Portage. "
+        "Gentoo’s LTS path is stable sys-kernel/gentoo-sources (Gentoo stabilizes upstream longterm)."
+    )
+    known = {name for name, _desc in catalog.kernel_menu_choices()}
+    preferred = cfg.kernel if cfg.kernel in known else "gentoo-kernel-bin"
+    cfg.kernel = ui.menu(
+        "Kernel package (always asked for stage3 — not bundled in the stage tarball)",
+        catalog.kernel_menu_choices(),
+        preferred,
+    )
+    if catalog.kernel_uses_stable_lts(cfg.kernel):
+        ui.info(
+            "Gentoo LTS selected: emerging sys-kernel/gentoo-sources with Gentoo stable keywords "
+            f"({catalog.kernel_atom(cfg.kernel)}). Testing (~arch) will not be applied to that package."
+        )
+    if catalog.kernel_overlay(cfg.kernel) != "gentoo":
+        ui.info(
+            f"{cfg.kernel} comes from the {catalog.kernel_overlay(cfg.kernel)} overlay, "
+            "which will be enabled before emerge."
+        )
     cfg.linux_firmware = ui.ask_yes_no("Install linux-firmware?", True)
     if not cfg.linux_firmware:
         if detect.is_virtual_machine():
@@ -860,7 +957,8 @@ def _wm_dotfiles(cfg: InstallConfig) -> None:
         cfg.wm_dotfiles = []
         return
     ui.info(
-        "Window manager dotfiles. Each compositor has at most five choices. "
+        "Window manager dotfiles. Each compositor has two choices: the installer default "
+        "and the top-rated GitHub config. "
         "A GitHub choice is downloaded during the install from the latest commit on that project's branch. "
         "The compositor config is copied, and the Gentoo packages that config starts are installed. "
         "The project's install script is not run."
@@ -879,18 +977,13 @@ def _wm_dotfiles(cfg: InstallConfig) -> None:
             default = "installer"
         picked = ui.menu(f"{title} dotfiles", [(choice.id, choice.label) for choice in choices], default)
         kept.append(f"{atom}={picked}")
-        if picked == "hyde":
-            ui.warn(
-                "HyDE's hyprland.lua stops unless ~/.local/share/hypr/hyde.lua exists. "
-                "This installer copies the Hyprland config only, not HyDE's install script, so that file will be missing."
-            )
     cfg.wm_dotfiles = kept
     packages = catalog.dotfile_package_atoms(cfg.shell, cfg.window_managers, kept)
     if packages:
         ui.info("Gentoo packages from the chosen configs will be installed: " + ", ".join(packages))
         ui.info(
-            "Quickshell, fuzzel, cliphist, swaync, wlogout, brightnessctl, "
-            "and the Caelestia shell are not in the Gentoo tree this installer uses, so they are not emerged."
+            "Quickshell, fuzzel, cliphist, swaync, wlogout, and brightnessctl "
+            "are not in the Gentoo tree this installer uses, so they are not emerged."
         )
 
 
@@ -899,17 +992,32 @@ def _finalize(cfg: InstallConfig) -> None:
     ui.chapter("11", "Wayland session", f"{HANDBOOK}/Installation/Finalizing")
     cfg.desktop = "none"
     cfg.kde_games = False
-    cfg.browser = "none"
+    # Mandatory pair: Chrome + Firefox ESR (firefox-bin:esr). See catalog.REQUIRED_BROWSERS.
+    cfg.browser = "chrome+firefox-esr"
     ui.info("Each compositor installs its own required packages (portal, wallpaper, lock, terminal).")
     ui.info("Utilities that work on every compositor are a separate list in the next chapter.")
+    ui.info(
+        "Popular Wayland compositors (Hyprland, Sway, SwayFX, Niri, River, Wayfire, labwc, "
+        "dwl, MangoWM, miracle-wm, Qtile, Gamescope, Weston) plus dwm and i3."
+    )
     cfg.window_managers = ui.paged_checklist(
         "Wayland compositors, dwl, dwm, and i3",
         catalog.wm_choices(),
         selected=[atom for atom in cfg.window_managers if atom in {p.atom for p in catalog.WINDOW_MANAGERS}],
-        page_size=12,
+        page_size=14,
     )
+    guru_wms = [
+        atom
+        for atom in cfg.window_managers
+        if catalog.atom_overlay(atom) == "guru"
+    ]
+    if guru_wms:
+        ui.info(
+            "GURU overlay compositors selected: "
+            + ", ".join(guru_wms)
+            + ". That overlay is enabled only because you chose them."
+        )
     if "gui-wm/niri" in cfg.window_managers:
-        ui.info("Niri comes from the GURU overlay. That overlay is enabled only because Niri was selected.")
         ui.info(
             "Niri gets the GNOME portal, GNOME Keyring, and foot. "
             "Waybar, Wofi, Mako, swaybg, swayidle, and swaylock are in the next chapter."
@@ -924,52 +1032,123 @@ def _finalize(cfg: InstallConfig) -> None:
     _wm_dotfiles(cfg)
     graphical = bool(cfg.window_managers) or cfg.shell != "none"
     cfg.pipewire = ui.ask_yes_no("Install PipeWire audio?", graphical)
-    if catalog.wayland_selected(cfg.window_managers) or cfg.shell != "none":
-        greet = (
-            "greetd + noctalia-greeter — Wayland login screen"
-            if cfg.shell == "noctalia"
-            else "greetd + gtkgreet — Wayland login screen"
-        )
-        cfg.display_manager = ui.menu(
-            "Login",
-            [
-                ("greetd", greet),
-                ("none", "Text console — start the compositor yourself"),
-            ],
-            "greetd",
-        )
-    else:
-        cfg.display_manager = "none"
-        if cfg.window_managers:
-            ui.info("dwm and i3 start from the text console with startx.")
+    _ask_nonfree_codecs(cfg)
     if cfg.shell != "none" and not catalog.wayland_selected(cfg.window_managers):
         ui.info("Noctalia and DMS run on a Wayland compositor. labwc will be installed with the shell.")
-        cfg.window_managers.append("gui-wm/labwc")
-    if cfg.display_manager == "greetd":
+        if "gui-wm/labwc" not in cfg.window_managers:
+            cfg.window_managers.append("gui-wm/labwc")
+    # Wayland / shell installs must boot to a greeter. Offering "none" failed that goal.
+    if catalog.needs_login_greeter(cfg.window_managers, cfg.shell):
+        cfg.display_manager = "greetd"
         who = cfg.username or "your user"
-        screen = "Noctalia's login screen" if cfg.shell == "noctalia" else "that login screen"
+        screen = "Noctalia's login screen" if cfg.shell == "noctalia" else "greetd + gtkgreet"
         ui.info(
             f"The installed system boots to {screen}. "
             f"Sign in as {who}. The compositors you chose are the sessions."
         )
+        ui.info("A text console remains on tty2 if you need one.")
+    else:
+        cfg.display_manager = "none"
+        if cfg.window_managers:
+            ui.info("dwm and i3 start from the text console with startx.")
     ui.info("The next chapter is suckless tools and popular apps. There is no desktop list.")
 
 
+def _ask_nonfree_codecs(cfg: InstallConfig) -> None:
+    """Offer proprietary codecs only after an explicit license acceptance."""
+    print()
+    ui.info("—— Proprietary / non-free multimedia codecs (optional license step) ——")
+    ui.info(
+        "H.264/AAC and related GStreamer/FFmpeg pieces are optional. "
+        "They are not installed unless you accept their licenses here."
+    )
+    ui.info("Packages if accepted: " + ", ".join(catalog.nonfree_codec_atoms()))
+    if not ui.ask_yes_no(
+        "Install proprietary / non-free multimedia codecs? (requires license accept next)",
+        False,
+    ):
+        cfg.nonfree_codecs = False
+        ui.info("Proprietary codecs skipped.")
+        return
+    ui.warn(
+        "These packages include patented and proprietary codecs (including Fraunhofer FDK AAC). "
+        "By continuing you confirm you accept those licenses and that using them is legal "
+        "where you live."
+    )
+    if ui.ask_yes_no(
+        "I accept the licenses for proprietary multimedia codecs and want them installed.",
+        False,
+    ):
+        cfg.nonfree_codecs = True
+        tokens = (cfg.accept_license or "").split()
+        for lic in catalog.NONFREE_CODEC_LICENSES:
+            if lic not in tokens:
+                tokens.append(lic)
+        if "*" not in tokens:
+            # Allow other proprietary deps those ebuilds may pull.
+            tokens.append("*")
+        cfg.accept_license = " ".join(tokens)
+        ui.ok("Proprietary codecs will be emerged after you confirm the disk.")
+    else:
+        cfg.nonfree_codecs = False
+        ui.info("Proprietary codecs were declined and will not be installed.")
+
+
+def _packages_locked_from_earlier_steps(cfg: InstallConfig) -> set[str]:
+    """Atoms already chosen before the optional package lists (WMs, deps, dotfiles)."""
+    locked = set(cfg.window_managers or [])
+    locked.update(
+        pkg.atom
+        for pkg in catalog.packages_for_selection(cfg.window_managers, cfg.shell, cfg.pipewire)
+    )
+    locked.update(catalog.dotfile_package_atoms(cfg.shell, cfg.window_managers, cfg.wm_dotfiles))
+    if getattr(cfg, "nonfree_codecs", False):
+        locked.update(catalog.nonfree_codec_atoms())
+    if catalog.needs_login_greeter(cfg.window_managers, cfg.shell) or cfg.display_manager == "greetd":
+        locked.add("gui-libs/greetd")
+        if cfg.shell == "noctalia":
+            locked.add(catalog.NOCTALIA_GREETER.atom)
+        else:
+            locked.add("gui-apps/gtkgreet")
+            locked.add("gui-wm/labwc")
+        # Entire greetd stack — do not ask again in display-managers.
+        locked.update({"gui-apps/tuigreet", "x11-misc/lightdm", "x11-misc/sddm", "x11-misc/slim"})
+    locked.update(catalog.required_browser_atoms())
+    # Bare firefox-bin / chrome aliases also stay hidden if a list still has them.
+    locked.update({"www-client/firefox-bin", "www-client/google-chrome", "www-client/firefox"})
+    return locked
+
+
 def _packages(cfg: InstallConfig) -> None:
-    """Suckless tools, shared Wayland utilities, and popular apps."""
+    """Suckless tools, shared Wayland utilities, and popular apps.
+
+    Categories advance linearly with Enter = continue (no category menu /
+    “apply” / Back loop that broke package selection).
+    """
     ui.chapter(
         "12",
         "Suckless tools and popular apps",
         "https://packages.gentoo.org/",
     )
-    ui.info("Compositor requirements are already queued. This list is optional apps.")
-    ui.info("GURU packages are not in these lists. Noctalia and DMS were chosen in the previous chapter.")
-    ui.info("Search with /text  ·  n/p pages  ·  toggle numbers  ·  0 when a list is finished.")
+    ui.info("Compositor requirements are already queued. This chapter is optional apps.")
+    ui.info(
+        "Browsers: only Firefox ESR and Google Chrome — both are always installed "
+        "(no other browsers in that list)."
+    )
+    ui.info(
+        "Flatpak is suggested for most desktop apps (Flathub). Tick sys-apps/flatpak or a "
+        "flatpak-app/* row (Pulsar, etc.), or install from Flathub after first boot."
+    )
+    ui.info(
+        "Packages already chosen earlier (compositors, greetd, deps, browsers, dotfiles) "
+        "are hidden so you are not asked twice."
+    )
+    ui.info("Each category: Space toggles, Enter continues to the next category.")
     ui.info("The top row, Select all, ticks every package in that section.")
 
     if ui.ask_yes_no("Enable extra Portage overlays (eselect repository)?", True):
         cfg.overlays = ui.paged_checklist(
-            "Overlays from overlays.gentoo.org / eselect repository",
+            "Overlays from overlays.gentoo.org / eselect repository — Enter continues",
             catalog.overlay_choices(),
             selected=cfg.overlays,
             page_size=14,
@@ -978,48 +1157,64 @@ def _packages(cfg: InstallConfig) -> None:
         if more.strip():
             cfg.overlays = list(dict.fromkeys(cfg.overlays + more.split()))
 
-    picked: list[str] = list(cfg.selected_packages)
+    locked = _packages_locked_from_earlier_steps(cfg)
+    picked: list[str] = [atom for atom in cfg.selected_packages if atom not in locked]
     niri_rows = catalog.niri_app_rows() if "gui-wm/niri" in cfg.window_managers else []
     if niri_rows and not getattr(cfg, "_software_loaded", False):
         for atom in catalog.niri_preselected(cfg.shell):
+            if atom not in picked and atom not in locked:
+                picked.append(atom)
+
+    # Browsers step: show the mandatory pair only (no checklist of extras).
+    ui.info("—— Browsers (mandatory pair; nothing else in this list) ——")
+    for atom in catalog.required_browser_atoms():
+        ui.ok(f"  {atom}")
+        if atom not in picked:
+            picked.append(atom)
+
+    # Linear category walk. Enter finishes one list and continues to the next.
+    skip = {
+        "window-managers",
+        "desktop-environments",
+        "wayland-utils",
+        "browsers",  # handled above — Firefox ESR + Chrome only
+        "display-managers",  # greetd (or none) already decided in chapter 11
+    }
+    steps: list[tuple[str, str, list[tuple[str, str]]]] = []
+    if niri_rows:
+        steps.append(("niri-apps", "Niri apps", niri_rows))
+        if cfg.shell == "none":
+            ui.info("Niri apps are preselected when you open that list. Untick any you do not want.")
+    for key, title, pkgs in catalog.CATEGORIES:
+        if key in skip:
+            continue
+        steps.append((key, title, pkgs))
+
+    claimed: set[str] = set()
+    for index, (key, title, packages) in enumerate(steps, start=1):
+        hide = set(locked) | claimed
+        visible = catalog.without_already_selected(packages, hide)
+        ui.info(f"Category {index}/{len(steps)}: {title}")
+        if not visible:
+            ui.info(f"{title}: every package here was already chosen earlier — continuing.")
+            continue
+        if key == "editors":
+            ui.info("Editors include Sublime Text and Pulsar (Atom’s Flatpak successor) near the top.")
+        selected = ui.paged_checklist(
+            f"{title} — Enter continues to the next category",
+            visible,
+            selected=picked,
+            page_size=14,
+            select_all=True,
+        )
+        visible_atoms = {atom for atom, _ in visible}
+        for atom in selected:
             if atom not in picked:
                 picked.append(atom)
-    if niri_rows:
-        if cfg.shell == "none" and not getattr(cfg, "_software_loaded", False):
-            ui.info("Niri apps are preselected. Untick any you do not want, including with Select all.")
-        elif cfg.shell == "none":
-            ui.info("Niri apps from the saved profile stay ticked. Untick any you do not want.")
-        else:
-            ui.info("The shell covers the bar and launcher. Niri apps are listed if you still want them.")
-    if ui.ask_yes_no("Browse suckless tools, shared Wayland utilities, and popular apps?", True):
-        hidden = {"window-managers", "desktop-environments", "wayland-utils"}
-        cats = [(key, title) for key, title, _ in catalog.CATEGORIES if key not in hidden]
-        if niri_rows:
-            cats.insert(0, ("niri-apps", "Niri"))
-        cats.append(("done", "Done with categories"))
-        # Open on the Niri list once, so the preselected rows are visible.
-        # After that, Enter lands on Done instead of reopening the same list.
-        menu_default = "niri-apps" if niri_rows else "done"
-        while True:
-            choice = ui.menu("Package category", cats, menu_default)
-            menu_default = "done"
-            if choice == "done":
-                break
-            if choice == "niri-apps":
-                packages = niri_rows
-                title = "Niri"
-            else:
-                packages = next(pkgs for key, _title, pkgs in catalog.CATEGORIES if key == choice)
-                title = next(title for key, title, _ in catalog.CATEGORIES if key == choice)
-            selected = ui.paged_checklist(
-                title, packages, selected=picked, page_size=14, select_all=True
-            )
-            for atom in selected:
-                if atom not in picked:
-                    picked.append(atom)
-            for atom in list(picked):
-                if atom in {a for a, _ in packages} and atom not in selected:
-                    picked.remove(atom)
+        for atom in list(picked):
+            if atom in visible_atoms and atom not in selected:
+                picked.remove(atom)
+        claimed.update(visible_atoms)
 
     extra = ui.prompt("Additional emerge atoms (space-separated, e.g. app-misc/jq media-gfx/feh)", "")
     if extra.strip():
@@ -1051,6 +1246,18 @@ def _packages(cfg: InstallConfig) -> None:
     cfg.selected_packages = picked
     needed = [pkg.atom for pkg in catalog.packages_for_selection(cfg.window_managers, cfg.shell, cfg.pipewire)]
     needed += catalog.dotfile_package_atoms(cfg.shell, cfg.window_managers, cfg.wm_dotfiles)
+    if cfg.nonfree_codecs:
+        needed += catalog.nonfree_codec_atoms()
+    # Mandatory browsers need ACCEPT_LICENSE beyond @FREE (Chrome is proprietary).
+    cfg.browser = "chrome+firefox-esr"
+    for atom in catalog.required_browser_atoms():
+        if atom not in picked:
+            picked.append(atom)
+    tokens = (cfg.accept_license or "").split()
+    if "*" not in tokens:
+        tokens.append("*")
+        cfg.accept_license = " ".join(tokens)
+        ui.info("ACCEPT_LICENSE was expanded so Google Chrome and other proprietary apps can emerge.")
     # extra_packages is the emerge set: catalogue picks + WMs + compositor requirements.
     cfg.extra_packages = list(dict.fromkeys(cfg.window_managers + needed + picked))
     cfg.overlays = [name for name in cfg.overlays if name != "guru"]
@@ -1058,8 +1265,12 @@ def _packages(cfg: InstallConfig) -> None:
     if cfg.window_managers or any("wayland" in a or "gui-wm/" in a for a in cfg.extra_packages):
         if "wayland" not in cfg.extra_use:
             cfg.extra_use.append("wayland")
+            if "wayland" not in (cfg.use_flags or "").split():
+                cfg.use_flags = (cfg.use_flags + " wayland").strip()
     if cfg.overlays:
         ui.ok("Overlays that will be enabled: " + ", ".join(cfg.overlays))
+    if cfg.extra_use:
+        ui.ok("USE flags for make.conf: " + " ".join(cfg.extra_use))
     ui.ok(f"{len(cfg.extra_packages)} package atoms queued for emerge")
 
 
@@ -1075,20 +1286,13 @@ def _plymouth_review(cfg: InstallConfig) -> str:
 
 
 def _login_manager_label(cfg: InstallConfig) -> str:
-    name = catalog.resolved_display_manager(
-        cfg.display_manager,
-        cfg.desktop,
-        cfg.extra_packages + cfg.window_managers + cfg.selected_packages,
-    )
+    atoms = cfg.extra_packages + cfg.window_managers + cfg.selected_packages
+    name = catalog.resolved_display_manager(cfg.display_manager, cfg.desktop, atoms)
     if name == "none":
         return "text console"
     if name == "greetd" and cfg.shell == "noctalia":
         name = "noctalia-greeter"
-    sessions = catalog.login_sessions(
-        cfg.desktop,
-        cfg.extra_packages + cfg.window_managers + cfg.selected_packages,
-        cfg.shell,
-    )
+    sessions = catalog.ensure_login_sessions(cfg.desktop, atoms, cfg.shell)
     who = cfg.username or "root"
     if sessions:
         label = "session" if len(sessions) == 1 else "sessions"
@@ -1137,6 +1341,9 @@ def _wipe_devices(cfg: InstallConfig) -> list[str]:
     """Disks and partitions this commit will destroy. Empty on resume."""
     if cfg.resume:
         return []
+    if getattr(cfg, "wipe_partitions", None):
+        # Explicit partition wipe list wins for the confirmation banner.
+        return list(dict.fromkeys(cfg.wipe_partitions))
     if cfg.layout == "existing":
         named = [cfg.existing_esp, cfg.existing_boot, cfg.existing_root, cfg.existing_swap]
         return [path for path in named if path]
@@ -1233,14 +1440,25 @@ def _review(cfg: InstallConfig) -> None:
     rows = [
         ("Firmware", cfg.firmware),
         ("Disk", cfg.target_disk),
-        ("Wipe disk", str(cfg.wipe_disk)),
+        (
+            "Wipe",
+            (
+                f"entire disk ({cfg.target_disk})"
+                if cfg.wipe_disk
+                else (
+                    "partitions: " + ", ".join(cfg.wipe_partitions)
+                    if getattr(cfg, "wipe_partitions", None)
+                    else "none"
+                )
+            ),
+        ),
+        ("USE flags", " ".join(cfg.extra_use) or cfg.use_flags or "(none)"),
         ("Layout", cfg.layout),
         ("Filesystem", cfg.filesystem),
         ("LUKS", str(cfg.luks) + (" + encrypted swap" if cfg.encrypted_swap else "")),
         ("Swap", f"{cfg.swap_mode} {cfg.swap_size_gib}G"),
         ("Init", cfg.init_system),
         ("Stage", f"{cfg.stage_level}/{cfg.install_type}/{cfg.stage_variant}"),
-        ("USE", " ".join(cfg.extra_use) or cfg.use_flags or "dist-kernel"),
         (
             "Hardware",
             "alsa "
@@ -1264,6 +1482,8 @@ def _review(cfg: InstallConfig) -> None:
         ("Compositors", ", ".join(cfg.window_managers) or "none"),
         ("Dotfiles", _dotfile_review(cfg)),
         ("Shell", cfg.shell or "none"),
+        ("Browsers", "Chrome + Firefox ESR (mandatory)"),
+        ("Non-free codecs", "yes (license accepted)" if cfg.nonfree_codecs else "no"),
         ("ZRAM", "yes" if cfg.zram else "no"),
         (
             "Login manager",

@@ -1,4 +1,4 @@
-"""Execute the handbook installation from an Ubuntu XFCE live host.
+"""Execute the handbook installation from an Ubuntu Boot Image live host.
 
 Two environments:
 
@@ -75,7 +75,7 @@ def execute(cfg: InstallConfig) -> None:
     """Run host phases in handbook order. Requires root on Linux unless dry-run."""
     if not cfg.dry_run:
         if not detect.is_linux():
-            raise SystemExit("Execution requires a Linux live environment (Ubuntu XFCE live).")
+            raise SystemExit("Execution requires a Linux live environment (Ubuntu Boot Image live).")
         if not detect.is_root():
             raise SystemExit("Re-run as root: sudo python3 install.py")
 
@@ -346,7 +346,7 @@ def _linux_root_type(cfg: InstallConfig) -> str:
 def _release_disk_mounts(runner: Runner, disk: str) -> None:
     """Unmount live-desktop automounts of this disk so mkfs and mount can use it.
 
-    Ubuntu XFCE mounts a Windows volume as soon as it sees one. Leaving that
+    Ubuntu Boot Image mounts a Windows volume as soon as it sees one. Leaving that
     mount up makes the later Gentoo mount look at a busy or half-wiped NTFS.
     """
     if not disk or not disk.startswith("/dev/"):
@@ -641,6 +641,14 @@ def phase_disks(cfg: InstallConfig, runner: Runner) -> None:
         ui.info("Resume: not wiping or formatting; ensuring the target is mounted.")
         _ensure_target_mounted(cfg, runner)
         return
+    # Selected-partition wipe (one, several, or all listed) before using existing layout.
+    wipe_parts = [p for p in (getattr(cfg, "wipe_partitions", None) or []) if p]
+    if wipe_parts and cfg.layout == "existing":
+        _unmount_target(cfg, runner)
+        for part in wipe_parts:
+            ui.danger(f"Wiping partition {part}")
+            runner.shell(f"wipefs -af {shlex.quote(part)} || true")
+        runner.shell("udevadm settle || true")
     if cfg.wipe_disk and cfg.layout != "existing":
         _unmount_target(cfg, runner)
         ui.danger(f"Zapping partition tables on {disk}")
@@ -1442,6 +1450,11 @@ def _write_make_conf(cfg: InstallConfig, root: str) -> None:
         kw_dir = portage / "package.accept_keywords"
         kw_dir.mkdir(parents=True, exist_ok=True)
         _write_text(kw_dir / "installer", keywords, keep_existing=False)
+    unmask = _unmask_text(cfg)
+    if unmask.strip():
+        um_dir = portage / "package.unmask"
+        um_dir.mkdir(parents=True, exist_ok=True)
+        _write_text(um_dir / "installer", unmask, keep_existing=False)
 
 
 def _safe_timezone(raw: str) -> str:
@@ -1819,6 +1832,40 @@ def _final_tool_checks(cfg: InstallConfig, loaders: list[str]) -> str:
     lines.append(f"if {joined}; then boot_ok=1; else echo '>> no selected bootloader was installed' >&2; fi")
     lines.append('if [ "$kernel_ok" -eq 0 ]; then echo ">> no kernel image was installed" >&2; missing=1; fi')
     lines.append('if [ "$boot_ok" -eq 0 ]; then missing=1; fi')
+    # Greeter presence is fatal when a greeter was requested — same as kernel/bootloader.
+    greeter_fatal: list[tuple[str, str]] = []
+    dm = _resolved_dm(cfg)
+    if dm == "greetd":
+        if openrc:
+            greeter_fatal.append(
+                ("[ -e /etc/init.d/greetd ] || command -v greetd >/dev/null 2>&1", "greetd")
+            )
+            greeter_fatal.append(("[ -e /etc/runlevels/default/greetd ]", "greetd in default runlevel"))
+            greeter_fatal.append(
+                (
+                    "[ -e /etc/runlevels/boot/elogind ] || [ -e /etc/runlevels/default/elogind ]",
+                    "elogind",
+                )
+            )
+        else:
+            greeter_fatal.append(
+                (
+                    _systemd_unit_test("greetd") + " || command -v greetd >/dev/null 2>&1",
+                    "greetd",
+                )
+            )
+        greeter_fatal.append(("[ -s /etc/greetd/config.toml ]", "greetd config.toml"))
+        greeter_fatal.append(
+            (
+                "find /usr/share/wayland-sessions /usr/share/xsessions "
+                "-name '*.desktop' 2>/dev/null | grep -q .",
+                "session .desktop",
+            )
+        )
+    for test, label in greeter_fatal:
+        lines.append(
+            f'if ! {{ {test}; }}; then echo ">> greeter check failed: {label}" >&2; missing=1; fi'
+        )
     lines.append('if [ "$missing" -ne 0 ]; then echo ">> chroot configuration incomplete" >&2; exit 1; fi')
     return "\n".join(lines) + "\n"
 
@@ -2338,6 +2385,113 @@ def _resolved_dm(cfg: InstallConfig) -> str:
     return catalog.resolved_display_manager(cfg.display_manager, cfg.desktop, _graphical_atoms(cfg))
 
 
+def ensure_boot_to_greeter(cfg: InstallConfig) -> None:
+    """Mutate cfg so Wayland/shell installs always enable greetd with a session WM.
+
+    Called before chroot script generation and by greeter assertion tests. A
+    TTY-only boot after choosing a Wayland compositor is a project failure.
+    """
+    wms = list(cfg.window_managers or [])
+    shell = getattr(cfg, "shell", "") or "none"
+    if shell != "none" and not catalog.wayland_selected(wms):
+        if catalog.FALLBACK_WAYLAND_WM not in wms:
+            wms.append(catalog.FALLBACK_WAYLAND_WM)
+        cfg.window_managers = wms
+    if catalog.needs_login_greeter(cfg.window_managers, shell, _graphical_atoms(cfg)):
+        cfg.display_manager = "greetd"
+        sessions = catalog.login_sessions(
+            cfg.desktop, _graphical_atoms(cfg), shell
+        )
+        if not sessions and catalog.FALLBACK_WAYLAND_WM not in (cfg.window_managers or []):
+            cfg.window_managers = list(cfg.window_managers or []) + [catalog.FALLBACK_WAYLAND_WM]
+    # Chrome is mandatory; Portage rejects it under a free-only ACCEPT_LICENSE.
+    tokens = (cfg.accept_license or "").split()
+    if "*" not in tokens:
+        tokens.append("*")
+        cfg.accept_license = " ".join(tokens)
+    if not (cfg.browser or "").strip() or cfg.browser == "none":
+        cfg.browser = "chrome+firefox-esr"
+
+
+def greeter_boot_failures(cfg: InstallConfig) -> list[str]:
+    """Return reasons this config would not reboot to a usable login greeter.
+
+    Empty list means the post-install path looks sound for: reboot → greeter →
+    session. Does not prove GPU drivers or real hardware seat access.
+    """
+    ensure_boot_to_greeter(cfg)
+    failures: list[str] = []
+    dm = _resolved_dm(cfg)
+    shell = getattr(cfg, "shell", "") or "none"
+    needs = catalog.needs_login_greeter(cfg.window_managers, shell, _graphical_atoms(cfg))
+    if needs and dm == "none":
+        failures.append("Wayland/shell selected but display manager resolved to none")
+    if dm == "none":
+        return failures
+    sessions = _login_sessions_for(cfg)
+    if not sessions:
+        failures.append("no session .desktop would be written for the greeter")
+    tools = {atom for atom, _test in _display_manager_tools(cfg)}
+    if dm == "greetd":
+        if "gui-libs/greetd" not in tools:
+            failures.append("greetd package missing from display-manager tools")
+        if _greetd_uses_noctalia(cfg):
+            if catalog.NOCTALIA_GREETER.atom not in tools:
+                failures.append("noctalia-greeter missing while Noctalia shell is selected")
+        elif _greetd_uses_tuigreet(cfg):
+            if "gui-apps/tuigreet" not in tools:
+                failures.append("tuigreet selected but not in display-manager tools")
+        else:
+            if "gui-apps/gtkgreet" not in tools:
+                failures.append("gtkgreet missing for greetd greeter")
+            if "gui-wm/labwc" not in tools:
+                failures.append("labwc missing (required to host gtkgreet)")
+        if cfg.init_system == "openrc":
+            if "sys-auth/elogind" not in tools:
+                failures.append("elogind missing (OpenRC greeter needs a seat manager)")
+            if "sys-apps/dbus" not in tools:
+                failures.append("dbus missing (OpenRC greeter needs dbus)")
+        script = _display_manager_script(cfg)
+        if "login manager:" not in script and ">> login manager:" not in script:
+            failures.append("display-manager script is empty")
+        if dm == "greetd" and "config.toml" not in script:
+            failures.append("greetd config.toml would not be written")
+        if dm == "greetd" and not _greetd_uses_noctalia(cfg) and not _greetd_uses_tuigreet(cfg):
+            if "/etc/greetd/environments" not in script:
+                failures.append("greetd environments file would not be written")
+            else:
+                # Heredoc is: cat > /etc/greetd/environments << 'EOF'\ncmds...\nEOF
+                marker = "cat > /etc/greetd/environments << 'EOF'"
+                if marker not in script:
+                    failures.append("greetd environments heredoc missing")
+                else:
+                    body = script.split(marker, 1)[1].split("\nEOF", 1)[0]
+                    commands = [line.strip() for line in body.splitlines() if line.strip()]
+                    if not commands:
+                        failures.append("greetd environments file would be empty (no sessions)")
+                    for _title, command, _kind in sessions:
+                        if command not in commands:
+                            failures.append(f"session {command!r} missing from greetd environments")
+        if dm not in _enabled_dm_services(cfg):
+            failures.append(f"{dm} would not be enabled as a boot service")
+        if cfg.init_system != "openrc":
+            if "default.target" not in script and "graphical.target" not in script:
+                failures.append("systemd graphical boot target would not be set")
+    queued = set(_desktop_packages(cfg)) | set(_atoms_to_unmask(cfg))
+    for atom in catalog.required_browser_atoms():
+        if atom not in queued:
+            failures.append(f"mandatory browser {atom} is not queued for emerge")
+    return failures
+
+
+def _enabled_dm_services(cfg: InstallConfig) -> set[str]:
+    """Display-manager service names that render_chroot_script would enable."""
+    dm = _resolved_dm(cfg)
+    if dm in {"none", "auto", ""}:
+        return set()
+    return {dm}
+
+
 def _greetd_uses_noctalia(cfg: InstallConfig) -> bool:
     """Noctalia Shell brings its own greetd greeter."""
     if getattr(cfg, "shell", "") == "noctalia":
@@ -2413,7 +2567,7 @@ def _login_username(cfg: InstallConfig) -> str:
 
 
 def _login_sessions_for(cfg: InstallConfig) -> list[tuple[str, str, str]]:
-    return catalog.login_sessions(
+    return catalog.ensure_login_sessions(
         cfg.desktop, _graphical_atoms(cfg), getattr(cfg, "shell", "") or ""
     )
 
@@ -2441,14 +2595,22 @@ def _display_manager_script(cfg: InstallConfig) -> str:
     The password is still required. The greeter is given the username and the
     window managers so the first boot is that screen, not a text shell.
     """
+    ensure_boot_to_greeter(cfg)
     dm = _resolved_dm(cfg)
     if dm == "none":
         return ""
     sessions = _login_sessions_for(cfg)
+    if dm == "greetd" and not sessions:
+        # Should be unreachable after ensure_login_sessions; keep a hard stop.
+        sessions = [catalog.FALLBACK_WAYLAND_SESSION]
     user = _login_username(cfg)
     lines = [f'echo ">> login manager: {dm}"']
     for atom, test in _display_manager_tools(cfg):
         lines.append(_emerge_checked_call(atom, test))
+    # When gtkgreet needs a session host and labwc was only a fallback, emerge it.
+    if dm == "greetd" and not _greetd_uses_noctalia(cfg) and not _greetd_uses_tuigreet(cfg):
+        if not any(atom == "gui-wm/labwc" for atom, _ in _display_manager_tools(cfg)):
+            lines.append(_emerge_checked_call("gui-wm/labwc", ("command", "-v", "labwc")))
     lines.append("mkdir -p /usr/share/wayland-sessions /usr/share/xsessions")
     for title, command, kind in sessions:
         folder = "/usr/share/wayland-sessions" if kind == "wayland" else "/usr/share/xsessions"
@@ -2568,6 +2730,67 @@ def _display_manager_script(cfg: InstallConfig) -> str:
             ]
         )
     lines.extend(_login_manager_boot_lines(cfg, dm))
+    # Hard assertions the chroot script can fail on before claiming success.
+    if dm == "greetd":
+        lines.extend(
+            [
+                'echo ">> verify greeter can present a login"',
+                "greeter_ok=1",
+                "if ! command -v greetd >/dev/null 2>&1 && ! [ -e /etc/init.d/greetd ] "
+                "&& ! [ -e /usr/lib/systemd/system/greetd.service ] "
+                "&& ! [ -e /lib/systemd/system/greetd.service ]; then",
+                '  echo ">> greeter package missing: greetd" >&2',
+                "  greeter_ok=0",
+                "fi",
+                "if ! [ -s /etc/greetd/config.toml ]; then",
+                '  echo ">> greeter config missing: /etc/greetd/config.toml" >&2',
+                "  greeter_ok=0",
+                "fi",
+                "if ! grep -q 'default_session' /etc/greetd/config.toml 2>/dev/null; then",
+                '  echo ">> greeter config has no default_session" >&2',
+                "  greeter_ok=0",
+                "fi",
+            ]
+        )
+        if not _greetd_uses_noctalia(cfg) and not _greetd_uses_tuigreet(cfg):
+            lines.extend(
+                [
+                    "if ! [ -s /etc/greetd/environments ]; then",
+                    '  echo ">> greetd environments empty — greeter would show no sessions" >&2',
+                    "  greeter_ok=0",
+                    "fi",
+                    "if ! command -v gtkgreet >/dev/null 2>&1; then",
+                    '  echo ">> greeter frontend missing: gtkgreet" >&2',
+                    "  greeter_ok=0",
+                    "fi",
+                    "if ! command -v labwc >/dev/null 2>&1; then",
+                    '  echo ">> greeter compositor missing: labwc" >&2',
+                    "  greeter_ok=0",
+                    "fi",
+                ]
+            )
+        elif _greetd_uses_noctalia(cfg):
+            lines.extend(
+                [
+                    "if ! command -v noctalia-greeter-session >/dev/null 2>&1; then",
+                    '  echo ">> greeter frontend missing: noctalia-greeter-session" >&2',
+                    "  greeter_ok=0",
+                    "fi",
+                ]
+            )
+        lines.extend(
+            [
+                "if ! find /usr/share/wayland-sessions /usr/share/xsessions "
+                "-name '*.desktop' 2>/dev/null | grep -q .; then",
+                '  echo ">> no session .desktop files for the greeter" >&2',
+                "  greeter_ok=0",
+                "fi",
+                'if [ "$greeter_ok" -ne 1 ]; then',
+                '  echo ">> boot-to-greeter checks failed" >&2',
+                "  exit 1",
+                "fi",
+            ]
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -2780,39 +3003,88 @@ def _package_use_text(cfg: InstallConfig) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _keyword_text(cfg: InstallConfig) -> str:
-    """Unmask packages the wizard offers that are still ~arch."""
-    if cfg.testing_keywords:
-        return ""
-    keyword = "~amd64" if cfg.architecture == "amd64" else "~arm64"
-    lines = []
-    if cfg.plymouth and cfg.plymouth_openrc_plugin and cfg.init_system == "openrc":
-        # plymouth-openrc-plugin is keyworded ~arch. Leaving it masked aborts the
-        # whole emerge calculation, so NetworkManager and chrony never install.
-        lines.append(f"sys-boot/plymouth-openrc-plugin {keyword}")
-    dm = catalog.resolved_display_manager(
-        cfg.display_manager,
-        cfg.desktop,
-        _graphical_atoms(cfg),
+def _bare_atom(atom: str) -> str:
+    """category/package (slot kept) without ::overlay or a version operator."""
+    bare = (atom or "").split("::", 1)[0].strip()
+    while bare and bare[0] in "=><!*~":
+        bare = bare[1:]
+    return bare
+
+
+def _atoms_to_unmask(cfg: InstallConfig) -> list[str]:
+    """Every Portage atom this install plans to emerge (for keywords / unmask)."""
+    loaders = selected_bootloaders(cfg)
+    atoms: list[str] = [catalog.kernel_atom(cfg.kernel), "sys-kernel/gentoo-kernel"]
+    atoms.extend(
+        pkg.atom for pkg in catalog.packages_for_selection(cfg.window_managers, cfg.shell, cfg.pipewire)
     )
-    if dm == "greetd":
-        lines.append(f"gui-libs/greetd {keyword}")
-        if _greetd_uses_noctalia(cfg):
-            lines.append(f"gui-apps/noctalia-greeter {keyword}")
-        else:
-            lines.append(f"gui-apps/gtkgreet {keyword}")
-            if _greetd_uses_tuigreet(cfg):
-                lines.append(f"gui-apps/tuigreet {keyword}")
-    shell_atoms = catalog.shell_atoms(getattr(cfg, "shell", ""))
-    for atom in shell_atoms:
+    atoms.extend(_graphical_atoms(cfg))
+    atoms.extend(atom for atom, _test in _required_tools(cfg, loaders))
+    atoms.extend(atom for atom, _test in _display_manager_tools(cfg))
+    atoms.extend(_support_atoms(cfg))
+    if cfg.linux_firmware:
+        atoms.append("sys-kernel/linux-firmware")
+    if cfg.sof_firmware:
+        atoms.append("sys-firmware/sof-firmware")
+    if cfg.intel_microcode:
+        atoms.append("sys-firmware/intel-microcode")
+    atoms.extend(
+        pkg.atom
+        for pkg in catalog.plymouth_packages_for(
+            _chosen_plymouth_themes(cfg),
+            cfg.plymouth_openrc_plugin and cfg.init_system == "openrc",
+        )
+    )
+    if getattr(cfg, "nonfree_codecs", False):
+        atoms.extend(catalog.nonfree_codec_atoms())
+    atoms.extend(catalog.required_browser_atoms())
+    atoms.extend(_desktop_packages(cfg))
+    out: list[str] = []
+    seen: set[str] = set()
+    for atom in atoms:
+        bare = _bare_atom(atom)
+        if not bare or bare.startswith("flatpak-app/") or bare in seen:
+            continue
+        seen.add(bare)
+        out.append(bare)
+    return out
+
+
+def _keyword_text(cfg: InstallConfig) -> str:
+    """Accept ~arch for every package the installer will emerge.
+
+    Skipping this leaves ~amd64/~arm64 packages masked and abort the emerge
+    calculation (NetworkManager, chrony, overlay kernels, …). When the user
+    already accepted testing keywords globally, nothing extra is needed here
+    except the Gentoo LTS sources pin (stable keywords only).
+    """
+    arch = "amd64" if cfg.architecture == "amd64" else "arm64"
+    keyword = f"~{arch}"
+    lines: list[str] = []
+    # Real LTS path: sys-kernel/gentoo-sources at Gentoo stable. Negate ~arch so
+    # a global */* ~arch line cannot pull a testing series for that package.
+    if catalog.kernel_uses_stable_lts(cfg.kernel):
+        lines.append(f"sys-kernel/gentoo-sources -~{arch}")
+    if cfg.testing_keywords:
+        return ("\n".join(lines) + "\n") if lines else ""
+    skip_lts = set()
+    if catalog.kernel_uses_stable_lts(cfg.kernel):
+        skip_lts.add("sys-kernel/gentoo-sources")
+    for atom in _atoms_to_unmask(cfg):
+        if atom in skip_lts:
+            continue
         lines.append(f"{atom} {keyword}")
-    queued = set(_graphical_atoms(cfg))
-    for atom in catalog.TESTING_ATOMS:
-        if atom in queued:
-            lines.append(f"{atom} {keyword}")
     if not lines:
         return ""
     return "\n".join(lines) + "\n"
+
+
+def _unmask_text(cfg: InstallConfig) -> str:
+    """package.unmask entries so a package.mask line cannot block emerge."""
+    atoms = _atoms_to_unmask(cfg)
+    if not atoms:
+        return ""
+    return "\n".join(atoms) + "\n"
 
 
 def _dracut_conf_text(cfg: InstallConfig) -> str:
@@ -2857,6 +3129,7 @@ def render_chroot_script(cfg: InstallConfig, devices: dict[str, str]) -> str:
 
     Keep this as bash, not Python: the chroot only has the stage3 toolchain.
     """
+    ensure_boot_to_greeter(cfg)
     loaders = selected_bootloaders(cfg)
     binrepo = ""
     if cfg.binhost and cfg.architecture == "amd64":
@@ -2906,7 +3179,9 @@ mkdir -p /etc/dracut.conf.d
 echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
 """
     netifrc_iface = _netifrc_iface(cfg)
-    pkgs_kernel = cfg.kernel
+    pkgs_kernel = (cfg.kernel or "gentoo-kernel-bin").split("::", 1)[0]
+    if "/" in pkgs_kernel:
+        pkgs_kernel = pkgs_kernel.rsplit("/", 1)[-1]
     extra_fw = []
     if cfg.linux_firmware:
         extra_fw.append("sys-kernel/linux-firmware")
@@ -3002,6 +3277,7 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
     ]
     if blocked:
         ui.warn("Not installing GURU packages: " + ", ".join(blocked))
+    codec_atoms = catalog.nonfree_codec_atoms() if getattr(cfg, "nonfree_codecs", False) else []
     late_atoms = [
         atom
         for atom in dict.fromkeys(
@@ -3012,6 +3288,7 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
             + _window_managers(cfg)
             + dm_atoms
             + catalog.dotfile_package_atoms(cfg.shell, cfg.window_managers, cfg.wm_dotfiles)
+            + codec_atoms
         )
         if atom
         and _atom_allowed(cfg, atom)
@@ -3021,10 +3298,10 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
     ]
     fetch_atoms_extra = list(dict.fromkeys(required_atoms + missed + extra_fw + theme_pkgs + late_atoms))
     all_extra = " ".join(fetch_atoms_extra)
-    kernel_atom = f"sys-kernel/{pkgs_kernel}"
+    kernel_atom = catalog.kernel_atom(pkgs_kernel)
     # gentoo-kernel is the source dist-kernel. Fetch it even when the selected
-    # kernel is a binpkg or gentoo-sources, so a SIGILL or a sources-only tree
-    # can still produce /boot/vmlinuz.
+    # kernel is a binpkg, overlay kernel, or gentoo-sources, so a SIGILL or a
+    # sources-only tree can still produce /boot/vmlinuz.
     fetch_atoms = [kernel_atom]
     if kernel_atom != "sys-kernel/gentoo-kernel":
         fetch_atoms.insert(0, "sys-kernel/gentoo-kernel")
@@ -3083,6 +3360,7 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
     final_checks = _final_tool_checks(cfg, loaders)
     package_use = _package_use_text(cfg).strip()
     accept_keywords = _keyword_text(cfg).strip()
+    unmask_atoms = _unmask_text(cfg).strip()
     dracut_conf = _dracut_conf_text(cfg).strip() if cfg.initramfs == "dracut" else ""
     locale_safe = _safe_token(cfg.locale, "en_US.UTF-8")
     keymap_safe = _safe_token(cfg.keymap, "us")
@@ -3092,6 +3370,26 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
 {accept_keywords}
 EOF
 """
+    unmask_block = ""
+    if unmask_atoms:
+        unmask_block = f"""mkdir -p /etc/portage/package.unmask
+cat > /etc/portage/package.unmask/installer << 'EOF'
+{unmask_atoms}
+EOF
+"""
+    codec_license_block = ""
+    if getattr(cfg, "nonfree_codecs", False):
+        license_lines = [
+            f"{atom} {' '.join(catalog.NONFREE_CODEC_LICENSES)}"
+            for atom in catalog.nonfree_codec_atoms()
+        ]
+        codec_license_block = (
+            "mkdir -p /etc/portage/package.license\n"
+            "cat > /etc/portage/package.license/codecs << 'EOF'\n"
+            + "\n".join(license_lines)
+            + "\nEOF\n"
+            'echo ">> proprietary codec licenses accepted by the user"\n'
+        )
     dracut_block = ""
     if dracut_conf:
         dracut_block = f"""mkdir -p /etc/dracut.conf.d /etc/conf.d
@@ -3301,12 +3599,13 @@ export DEBUGINFOD_CERT_PATH="${{DEBUGINFOD_CERT_PATH:-}}"
 export DEBUGINFOD_IMA_CERT_PATH="${{DEBUGINFOD_IMA_CERT_PATH:-}}"
 echo "=== gentoo-live-installer chroot rev {CHROOT_SCRIPT_REV} ==="
 {resume_prelude}
-mkdir -p /etc/portage/package.use /etc/portage/package.accept_keywords /etc/portage/package.license /etc/portage/profile
-echo ">> USE flags and dracut configuration"
+mkdir -p /etc/portage/package.use /etc/portage/package.accept_keywords /etc/portage/package.unmask /etc/portage/package.license /etc/portage/profile
+echo ">> USE flags, keywords, unmask, and dracut configuration"
 cat > /etc/portage/package.use/installer << 'EOF'
 {package_use}
 EOF
 {keyword_block}
+{unmask_block}
 {dracut_block}
 cat > /root/.bashrc << 'BASHRC'
 unset FEATURES
@@ -3319,6 +3618,13 @@ echo ">> binhost / installkernel"
 {installkernel_conf}
 {dracut_luks}
 echo 'sys-kernel/linux-firmware @BINARY-REDISTRIBUTABLE' > /etc/portage/package.license/firmware || true
+# Mandatory Chrome + other proprietary Portage apps (ACCEPT_LICENSE also set in make.conf).
+cat > /etc/portage/package.license/apps << 'EOF'
+www-client/google-chrome google-chrome
+app-editors/sublime-text *
+app-editors/vscode *
+EOF
+{codec_license_block}
 {keywords}
 
 echo ">> sync Portage tree"
@@ -3449,16 +3755,20 @@ def _overlay_script(cfg: InstallConfig) -> str:
     overlay_names = [name for name in cfg.overlays if name != "guru"]
     if catalog.shell_atoms(getattr(cfg, "shell", "") or ""):
         overlay_names.append("guru")
+    kernel_ov = catalog.kernel_overlay(cfg.kernel)
+    if kernel_ov != "gentoo":
+        overlay_names.append(kernel_ov)
     queued = [
         atom
         for atom in dict.fromkeys(
-            cfg.extra_packages
+            [catalog.kernel_atom(cfg.kernel)]
+            + cfg.extra_packages
             + _window_managers(cfg)
             + cfg.selected_packages
             + _support_atoms(cfg)
             + [atom for atom, _test in _display_manager_tools(cfg)]
         )
-        if atom and _atom_allowed(cfg, atom)
+        if atom and (_atom_allowed(cfg, atom) or atom.startswith("sys-kernel/"))
     ]
     overlays = catalog.overlays_required_by(queued, overlay_names)
     if not overlays:
@@ -3466,7 +3776,7 @@ def _overlay_script(cfg: InstallConfig) -> str:
     arch_kw = "~amd64" if cfg.architecture == "amd64" else "~arm64"
     lines = [
         "emerge --ask=n --noreplace app-eselect/eselect-repository dev-vcs/git || true",
-        "mkdir -p /etc/portage/package.accept_keywords",
+        "mkdir -p /etc/portage/package.accept_keywords /etc/portage/package.unmask",
     ]
     for ov in overlays:
         qov = shlex.quote(ov)
@@ -3477,6 +3787,7 @@ def _overlay_script(cfg: InstallConfig) -> str:
         lines.append(
             f"append_once /etc/portage/package.accept_keywords/overlays '*/*::{ov} {arch_kw}'"
         )
+        lines.append(f"append_once /etc/portage/package.unmask/overlays '*/*::{ov}'")
     return "\n".join(lines) + "\n"
 
 
@@ -3999,17 +4310,16 @@ def _user_session_script(cfg: InstallConfig) -> str:
 
 
 def _desktop_packages(cfg: InstallConfig) -> list[str]:
-    """Browsers and Flatpak from the profile. Desktop metas are not installed."""
-    pkgs: list[str] = []
+    """Mandatory browsers, PipeWire, and Flatpak. Desktop metas are not installed."""
+    pkgs: list[str] = list(catalog.required_browser_atoms())
+    # Legacy saved profiles that only asked for one browser still get the pair.
+    if cfg.browser == "firefox":
+        pkgs.append("www-client/firefox")
     if cfg.pipewire:
         pkgs.extend(["media-video/pipewire", "media-video/wireplumber"])
-    if cfg.browser == "firefox-bin":
-        pkgs.append("www-client/firefox-bin")
-    elif cfg.browser == "firefox":
-        pkgs.append("www-client/firefox")
     if cfg.flatpak:
         pkgs.append("sys-apps/flatpak")
-    return pkgs
+    return list(dict.fromkeys(pkgs))
 
 
 def _crypttab(cfg: InstallConfig, devices: dict[str, str]) -> str:
