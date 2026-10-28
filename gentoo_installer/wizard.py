@@ -281,13 +281,14 @@ def _network(cfg: InstallConfig) -> None:
     _ask_dns(cfg)
     cfg.ntp = ui.ask_yes_no(
         "Synchronise clock before downloading stage3? "
-        "(uses Ubuntu ntc when installed; needed for stage3 GPG checks)",
+        "(uses Ubuntu ntpsec when installed; needed for stage3 GPG checks)",
         True,
     )
     if cfg.ntp:
         ui.info(
-            "If sync tools are missing on the live USB, install Ubuntu package ntc: "
-            "sudo apt-get install -y ntc"
+            "If sync tools are missing on the live USB, install Ubuntu package ntpsec "
+            "(it must replace chrony): sudo apt-get remove -y chrony; "
+            "sudo apt-get install -y ntpsec"
         )
 
 

@@ -67,7 +67,8 @@ HOST_PACKAGES = [
     "pciutils",
     "iw",
     "wpasupplicant",
-    # Ubuntu Boot Image clock sync. Prefer the ntc package; ntpdate is a fallback.
+    # Ubuntu Boot Image clock sync. Prefer ntpsec (must replace chrony — they conflict).
+    "ntpsec",
     "ntc",
     "ntpdate",
 ]
@@ -75,8 +76,8 @@ HOST_PACKAGES = [
 # Shown when live-host NTP tools are missing or sync fails (stage3 GPG needs a sane clock).
 NTP_NTC_HINT = (
     "NTP sync tools were not found (or clock sync failed) on this Ubuntu Boot Image host. "
-    "Install the Ubuntu package ntc for time sync, then re-run the installer: "
-    "sudo apt-get install -y ntc"
+    "Install Ubuntu package ntpsec for time sync — it must replace chrony (remove chrony first): "
+    "sudo apt-get remove -y chrony; sudo apt-get install -y ntpsec"
 )
 
 
@@ -212,7 +213,7 @@ def _host_ntp_tools_present() -> bool:
     """True when the live host has at least one usable clock-sync command."""
     return any(
         shutil.which(name)
-        for name in ("ntc", "ntpdate", "chronyd", "timedatectl")
+        for name in ("ntc", "ntpdate", "ntpdig", "ntpd", "timedatectl")
     )
 
 
@@ -226,17 +227,18 @@ def sync_live_clock(cfg: InstallConfig, runner: Runner) -> bool:
     if not cfg.ntp:
         return True
     if cfg.dry_run:
-        ui.info("Dry-run: would synchronise the live clock (ntc / ntpdate / timedatectl).")
+        ui.info("Dry-run: would synchronise the live clock (ntpsec / ntc / ntpdate / timedatectl).")
         return True
     if not _host_ntp_tools_present():
         ui.warn("ntp update was not found on this live host.")
         ui.warn(NTP_NTC_HINT)
         return False
-    # Prefer ntc (Ubuntu package for this installer's host sync), then classic tools.
+    # Prefer ntpsec tools (replaces chrony), then ntc / ntpdate / timedatectl.
     script = (
-        "if command -v ntc >/dev/null 2>&1; then ntc; "
+        "if command -v ntpdig >/dev/null 2>&1; then ntpdig -s pool.ntp.org; "
+        "elif command -v ntc >/dev/null 2>&1; then ntc; "
         "elif command -v ntpdate >/dev/null 2>&1; then ntpdate -u pool.ntp.org; "
-        "elif command -v chronyd >/dev/null 2>&1; then chronyd -q 'server pool.ntp.org iburst'; "
+        "elif command -v ntpd >/dev/null 2>&1; then ntpd -gq; "
         "elif command -v timedatectl >/dev/null 2>&1; then timedatectl set-ntp true; "
         "else exit 127; fi"
     )
@@ -3566,7 +3568,62 @@ if ! locale -a 2>/dev/null | grep -qiE "^$(echo "$LANG" | tr '[:upper:]' '[:lowe
   fi
 fi
 echo ">> installer locale for Portage: $LANG"
-eselect locale set "$LANG" 2>/dev/null || eselect locale set "$(echo "$LANG" | cut -d. -f1)" 2>/dev/null || true
+"""
+
+
+def _news_read_script() -> str:
+    """Handbook: after tree sync, before profile — list/read Gentoo news items.
+
+    Unattended: mark unread items read so Portage stops nagging. Soft on empty
+    news; fail closed only if ``eselect`` itself is missing (stage3 always has it).
+    """
+    return """
+echo ">> eselect news (Handbook: after sync, before profile)"
+if ! command -v eselect >/dev/null 2>&1; then
+  echo ">> eselect missing after Portage sync — cannot continue" >&2
+  exit 1
+fi
+eselect news list || true
+# Prefer unread-only; fall back to reading all. Never block the install on news content.
+eselect news read new >/dev/null 2>&1 || eselect news read >/dev/null 2>&1 || true
+"""
+
+
+def _locale_eselect_script(cfg: InstallConfig) -> str:
+    """Handbook: eselect locale after profile (system-wide LANG via env.d).
+
+    Early ``_locale_prep_script`` already ran locale-gen and exported LANG for
+    Portage; this persists the choice through eselect and refuses bare C/POSIX.
+    """
+    utf8 = _installer_utf8_locale(cfg)
+    q = shlex.quote(utf8)
+    short = shlex.quote(utf8.split(".")[0])
+    if cfg.stage_variant == "musl":
+        return f"""
+echo ">> musl: skip glibc eselect locale; keep UTF-8 env ({utf8})"
+export LANG={q}
+export LC_ALL={q}
+case "$LANG" in
+  C|POSIX|"") echo ">> installer LANG must be UTF-8, got: '$LANG'" >&2; exit 1 ;;
+esac
+"""
+    return f"""
+echo ">> eselect locale (Handbook: after profile)"
+export LANG={q}
+export LC_ALL={q}
+if ! eselect locale set {q} && ! eselect locale set {short}; then
+  echo ">> eselect locale set failed for {utf8}; checking env.d / LANG" >&2
+  if [ -f /etc/env.d/02locale ] && grep -q 'LANG=.*UTF' /etc/env.d/02locale 2>/dev/null; then
+    echo ">> host env.d/02locale already has a UTF-8 LANG; continuing"
+  else
+    echo ">> no UTF-8 locale configured via eselect or env.d" >&2
+    exit 1
+  fi
+fi
+case "$LANG" in
+  C|POSIX|"") echo ">> installer LANG must be UTF-8 before emerge, got: '$LANG'" >&2; exit 1 ;;
+esac
+echo ">> system locale: $(eselect locale show 2>/dev/null | tr '\\n' ' ' | sed 's/  */ /g')"
 """
 
 
@@ -3849,9 +3906,20 @@ EOF
         else ""
     )
     # git sync-type needs `git` on PATH — `_ensure_git_script` runs before this.
+    # Fail closed: with ``set +eu`` a bare failing sync would otherwise continue.
     sync = {
-        "webrsync": "retry404 emerge-webrsync || retry404 emerge --sync",
-        "rsync": "emerge --sync",
+        "webrsync": """
+retry404 emerge-webrsync || retry404 emerge --sync || {
+  echo ">> Portage tree sync failed (webrsync/emerge --sync)" >&2
+  exit 1
+}
+""",
+        "rsync": """
+emerge --sync || {
+  echo ">> Portage tree sync failed (emerge --sync / rsync)" >&2
+  exit 1
+}
+""",
         "git": """
 if ! command -v git >/dev/null 2>&1; then
   echo ">> git missing before Portage tree sync (sync_method=git)" >&2
@@ -3865,11 +3933,16 @@ sync-type = git
 sync-uri = https://github.com/gentoo-mirror/gentoo.git
 auto-sync = yes
 EOF
-emerge --sync
+emerge --sync || {
+  echo ">> Portage tree sync failed (sync_method=git)" >&2
+  exit 1
+}
 """,
     }[cfg.sync_method]
     git_prep = _ensure_git_script(cfg)
     locale_prep = _locale_prep_script(cfg)
+    news_block = _news_read_script()
+    locale_eselect = _locale_eselect_script(cfg)
 
     fstab = _fstab(cfg, devices)
     crypttab = _crypttab(cfg, devices)
@@ -4352,6 +4425,12 @@ EOF
 echo ">> sync Portage tree"
 {sync}
 unset FEATURES
+# Handbook:AMD64/Installation/Base — after sync: news → profile, then repositories,
+# then system locale via eselect. Profile must precede overlay enables and @world.
+{news_block}
+unset FEATURES
+{_profile_set_script(cfg)}
+unset FEATURES
 {bootstrap}
 echo ">> emerge Portage"
 emerge --ask=n --oneshot --verbose $NR sys-apps/portage || true
@@ -4359,7 +4438,8 @@ unset FEATURES
 {overlay_block}
 emerge --ask=n --oneshot --verbose $NR sys-apps/portage || true
 unset FEATURES
-{_profile_set_script(cfg)}
+{locale_eselect}
+unset FEATURES
 {mirrorselect_block}
 echo ">> emerge @world"
 emerge --verbose --update --deep --newuse --keep-going $NR @world
@@ -4526,9 +4606,10 @@ fi
 def _overlay_script(cfg: InstallConfig) -> str:
     """Chroot: keyword+unmask helpers → emerge them → enable/sync each overlay → */*::ov.
 
-    Gentoo handbook/wiki: package.accept_keywords and package.unmask (including
-    */*::overlay) must exist before emerge. Applies to every overlay this install
-    enables (guru, CachyOS-kernels, hyproverlay, …), not only the helper atoms.
+    Runs *after* Handbook profile set. Wiki eselect/repository: mkdir repos.conf,
+    emerge app-eselect/eselect-repository, then ``eselect repository enable`` and
+    ``emaint sync``. package.accept_keywords / package.unmask (including
+    */*::overlay) must exist before later emerge of overlay packages.
     """
     overlays = _required_overlays(cfg)
     if not overlays:
@@ -4538,7 +4619,9 @@ def _overlay_script(cfg: InstallConfig) -> str:
     repo_kw = _overlay_repo_keyword_text(cfg, overlays).rstrip("\n")
     repo_um = _overlay_repo_unmask_text(cfg, overlays).rstrip("\n")
     lines = [
-        "mkdir -p /etc/portage/package.accept_keywords /etc/portage/package.unmask",
+        "echo \">> eselect repository (overlays; after profile)\"",
+        # Wiki: REPOS_CONF directory must exist before the module works.
+        "mkdir -p /etc/portage/repos.conf /etc/portage/package.accept_keywords /etc/portage/package.unmask",
         "cat > /etc/portage/package.accept_keywords/overlay-helpers << 'EOF'",
         helper_kw,
         "EOF",
@@ -4552,6 +4635,8 @@ def _overlay_script(cfg: InstallConfig) -> str:
         'echo ">> git missing — cannot enable/sync overlays" >&2; exit 1; fi',
         "emerge --ask=n --noreplace app-eselect/eselect-repository || { "
         'echo ">> eselect-repository required for overlays" >&2; exit 1; }',
+        "if ! command -v eselect >/dev/null 2>&1; then "
+        'echo ">> eselect missing — cannot enable overlays" >&2; exit 1; fi',
     ]
     for ov in overlays:
         qov = shlex.quote(ov)
@@ -4559,6 +4644,10 @@ def _overlay_script(cfg: InstallConfig) -> str:
         lines.append(
             f"eselect repository enable {qov} || {{ "
             f'echo ">> failed to enable overlay {ov}" >&2; exit 1; }}'
+        )
+        lines.append(
+            f"eselect repository list -i 2>/dev/null | grep -E '{re.escape(ov)}' >/dev/null || {{ "
+            f'echo ">> overlay {ov} not listed as installed after enable" >&2; exit 1; }}'
         )
         lines.append("unset FEATURES")
         lines.append(
