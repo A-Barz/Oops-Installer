@@ -39,7 +39,7 @@ The wizard is ordered like the [Gentoo AMD64 Handbook](https://wiki.gentoo.org/w
 
 GitHub installer research and the merged feature set: [RESEARCH.md](RESEARCH.md).
 
-In chapter 12 you can search (`/text`), page (`n`/`p`), and toggle packages. Overlays such as `hyproverlay`, `wayland-desktop`, and `steam-overlay` are enabled with `eselect repository` when a chosen package needs them. The GURU overlay is enabled only when you choose Noctalia or DMS. You can also type any extra `category/package` atom for emerge.
+In chapter 12 you can search (`/text`), page (`n`/`p`), and toggle packages. Overlays such as `hyproverlay` and `wayland-desktop` are enabled with `eselect repository` when a chosen package needs them. The GURU overlay is enabled only when you choose Noctalia or DMS. You can also type any extra `category/package` atom for emerge.
 
 ## Requirements
 

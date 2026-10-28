@@ -1219,6 +1219,7 @@ def _packages(cfg: InstallConfig) -> None:
         "wayland-utils",
         "browsers",  # handled above — Firefox ESR + Chrome only
         "display-managers",  # greetd (or none) already decided in chapter 11
+        "games",  # games category removed from package selection
     }
     steps: list[tuple[str, str, list[tuple[str, str]]]] = []
     if niri_rows:
