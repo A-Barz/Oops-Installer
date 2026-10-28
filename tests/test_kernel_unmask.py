@@ -72,6 +72,10 @@ class KernelChoiceTests(unittest.TestCase):
         self.assertIn("CachyOS-kernels", script)
         self.assertIn("eselect repository enable", script)
         self.assertIn("package.unmask/overlays", script)
+        self.assertIn("package.accept_keywords/overlay-helpers", script)
+        emerge = script.find("emerge --ask=n --noreplace app-eselect/eselect-repository")
+        self.assertGreaterEqual(emerge, 0)
+        self.assertLess(script.find("package.accept_keywords/overlay-helpers"), emerge)
 
 
 class UnmaskBeforeEmergeTests(unittest.TestCase):

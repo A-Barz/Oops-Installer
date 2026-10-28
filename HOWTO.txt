@@ -121,7 +121,10 @@ disk until the review at the end.
 
   1. About        Dry-run, resume, mountpoint (default /mnt/gentoo)
   2. Medium       Architecture (amd64 / arm64), UEFI vs BIOS, host tools
-  3. Network      Live DHCP, Wi-Fi, or static IP so stage3 can download
+  3. Network      Live DHCP, Wi-Fi, or static IP so stage3 can download.
+                  Optional clock sync before stage3 (GPG). If NTP tools are
+                  missing on the Ubuntu Boot Image host, install package ntc:
+                    sudo apt-get install -y ntc
   4. Disks        Target disk, wipe, layout, filesystem, swap, LUKS
   5. Stage3       OpenRC or systemd, desktop / hardened / musl
                   (stage tarball only — no kernel image; pick the kernel in step 7)

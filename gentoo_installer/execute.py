@@ -67,8 +67,17 @@ HOST_PACKAGES = [
     "pciutils",
     "iw",
     "wpasupplicant",
+    # Ubuntu Boot Image clock sync. Prefer the ntc package; ntpdate is a fallback.
+    "ntc",
     "ntpdate",
 ]
+
+# Shown when live-host NTP tools are missing or sync fails (stage3 GPG needs a sane clock).
+NTP_NTC_HINT = (
+    "NTP sync tools were not found (or clock sync failed) on this Ubuntu Boot Image host. "
+    "Install the Ubuntu package ntc for time sync, then re-run the installer: "
+    "sudo apt-get install -y ntc"
+)
 
 
 def execute(cfg: InstallConfig) -> None:
@@ -199,6 +208,50 @@ def phase_host(cfg: InstallConfig, runner: Runner) -> None:
     ui.ok("Host tools ready")
 
 
+def _host_ntp_tools_present() -> bool:
+    """True when the live host has at least one usable clock-sync command."""
+    return any(
+        shutil.which(name)
+        for name in ("ntc", "ntpdate", "chronyd", "timedatectl")
+    )
+
+
+def sync_live_clock(cfg: InstallConfig, runner: Runner) -> bool:
+    """Synchronise the Ubuntu Boot Image clock before stage3 / GPG.
+
+    Prefers the Ubuntu ``ntc`` package. When tools are missing or every sync
+    attempt fails, warn with :data:`NTP_NTC_HINT` so the user can install ntc.
+    Returns True when sync looked successful (or was skipped / dry-run).
+    """
+    if not cfg.ntp:
+        return True
+    if cfg.dry_run:
+        ui.info("Dry-run: would synchronise the live clock (ntc / ntpdate / timedatectl).")
+        return True
+    if not _host_ntp_tools_present():
+        ui.warn("ntp update was not found on this live host.")
+        ui.warn(NTP_NTC_HINT)
+        return False
+    # Prefer ntc (Ubuntu package for this installer's host sync), then classic tools.
+    script = (
+        "if command -v ntc >/dev/null 2>&1; then ntc; "
+        "elif command -v ntpdate >/dev/null 2>&1; then ntpdate -u pool.ntp.org; "
+        "elif command -v chronyd >/dev/null 2>&1; then chronyd -q 'server pool.ntp.org iburst'; "
+        "elif command -v timedatectl >/dev/null 2>&1; then timedatectl set-ntp true; "
+        "else exit 127; fi"
+    )
+    proc = runner.shell(script, check=False)
+    if proc.returncode == 0:
+        ui.ok("Live clock synchronised.")
+        return True
+    if proc.returncode == 127 or not _host_ntp_tools_present():
+        ui.warn("ntp update was not found on this live host.")
+    else:
+        ui.warn("Live clock synchronisation failed.")
+    ui.warn(NTP_NTC_HINT)
+    return False
+
+
 def phase_network(cfg: InstallConfig, runner: Runner) -> None:
     """Bring up live Wi-Fi/static IP and NTP so distfiles.gentoo.org works."""
     if cfg.network_mode == "wifi":
@@ -228,8 +281,7 @@ def phase_network(cfg: InstallConfig, runner: Runner) -> None:
             runner.shell(f"ip route add default via {shlex.quote(cfg.static_gateway)} || true")
         if not cfg.dry_run:
             Path("/etc/resolv.conf").write_text(f"nameserver {cfg.static_dns}\n", encoding="utf-8")
-    if cfg.ntp:
-        runner.shell("ntpdate -u pool.ntp.org || timedatectl set-ntp true || true")
+    sync_live_clock(cfg, runner)
     if not cfg.dry_run and not detect.has_network():
         ui.warn("Network still looks down. Stage3 download may fail.")
 
@@ -331,6 +383,55 @@ def _linux_root_type(cfg: InstallConfig) -> str:
     return "8304"
 
 
+# Bare `partprobe` (no disk arg) walks every block device, including the live
+# USB's casper device-mapper overlays. Those often hang on
+# "device-mapper: reload ioctl … failed" — so we never probe the whole system.
+PARTPROBE_TIMEOUT_SEC = 15
+
+
+def _partprobe_disk(runner: Runner, disk: str) -> None:
+    """Reread partition table for one target disk only, with a hard timeout.
+
+    Skips the Ubuntu Boot Image medium. On ioctl / dm failure, logs and
+    continues — udev + waiting for /dev nodes is enough for the next steps.
+    """
+    if not disk or not disk.startswith("/dev/"):
+        return
+    if detect.is_live_installer_disk(disk):
+        ui.warn(
+            f"Skipping partprobe on live installer medium {disk} "
+            "(avoids USB device-mapper reload ioctl hangs)."
+        )
+        return
+    q = shlex.quote(disk)
+    t = int(PARTPROBE_TIMEOUT_SEC)
+    ui.info(f"partprobe {disk} (timeout {t}s; target disk only)")
+    # Prefer timeout(1); fall back to a short blockdev reread. Never call
+    # partprobe with no arguments — that scans the live USB dm stack too.
+    runner.shell(
+        "\n".join(
+            [
+                "if command -v timeout >/dev/null 2>&1; then",
+                f"  timeout {t} partprobe {q} 2>/dev/null || "
+                f"timeout {t} blockdev --rereadpt {q} 2>/dev/null || "
+                f'echo ">> partprobe {disk} timed out or failed '
+                f'(device-mapper ioctl); continuing without hang" >&2',
+                "else",
+                f"  partprobe {q} 2>/dev/null || blockdev --rereadpt {q} 2>/dev/null || "
+                f'echo ">> partprobe {disk} failed; continuing" >&2',
+                "fi",
+                # Bound udev wait so a busy live USB cannot stall here either.
+                "if command -v timeout >/dev/null 2>&1; then",
+                "  timeout 10 udevadm settle --timeout=8 2>/dev/null || true",
+                "else",
+                "  udevadm settle --timeout=8 2>/dev/null || udevadm settle || true",
+                "fi",
+            ]
+        ),
+        check=False,
+    )
+
+
 def _release_disk_mounts(runner: Runner, disk: str) -> None:
     """Unmount live-desktop automounts of this disk so mkfs and mount can use it.
 
@@ -338,6 +439,9 @@ def _release_disk_mounts(runner: Runner, disk: str) -> None:
     mount up makes the later Gentoo mount look at a busy or half-wiped NTFS.
     """
     if not disk or not disk.startswith("/dev/"):
+        return
+    if detect.is_live_installer_disk(disk):
+        ui.warn(f"Not releasing mounts on live installer medium {disk}")
         return
     q = shlex.quote(disk)
     runner.shell(
@@ -348,7 +452,11 @@ def _release_disk_mounts(runner: Runner, disk: str) -> None:
                 '    umount "$mnt" || umount -l "$mnt" || true',
                 "  done",
                 "done",
-                "udevadm settle || true",
+                "if command -v timeout >/dev/null 2>&1; then",
+                "  timeout 10 udevadm settle --timeout=8 2>/dev/null || true",
+                "else",
+                "  udevadm settle --timeout=8 2>/dev/null || udevadm settle || true",
+                "fi",
             ]
         )
     )
@@ -660,8 +768,9 @@ def phase_disks(cfg: InstallConfig, runner: Runner) -> None:
             _sgdisk_gpt(cfg, runner, disk)
         else:
             _parted_mbr(cfg, runner, disk)
-        runner.shell("partprobe || true")
-        runner.shell("udevadm settle || true")
+        _partprobe_disk(runner, disk)
+        if cfg.layout == "mdraid1" and cfg.extra_raid_disk:
+            _partprobe_disk(runner, cfg.extra_raid_disk)
         runner.shell("sleep 1 || true")
         _release_disk_mounts(runner, disk)
 
@@ -1440,6 +1549,9 @@ def _write_make_conf(cfg: InstallConfig, root: str) -> None:
         um_dir = portage / "package.unmask"
         um_dir.mkdir(parents=True, exist_ok=True)
         _write_text(um_dir / "installer", unmask, keep_existing=False)
+    # Overlay helpers + */*::overlay before chroot emerges eselect-repository/git
+    # or any overlay package (handbook accept_keywords / package.unmask).
+    _write_overlay_portage_files(cfg, root)
 
 
 def _safe_timezone(raw: str) -> str:
@@ -3169,6 +3281,91 @@ def _service_stack_atoms(cfg: InstallConfig) -> list[str]:
     return atoms
 
 
+# Emerged before any eselect-repository enable/sync. Must be keyworded+unmasked first.
+OVERLAY_HELPER_ATOMS: tuple[str, ...] = (
+    "app-eselect/eselect-repository",
+    "dev-vcs/git",
+)
+
+
+def _required_overlays(cfg: InstallConfig) -> list[str]:
+    """Overlays this install will enable (guru, CachyOS-kernels, hyproverlay, …)."""
+    overlay_names = [name for name in cfg.overlays if name != "guru"]
+    if catalog.shell_atoms(getattr(cfg, "shell", "") or ""):
+        overlay_names.append("guru")
+    kernel_ov = catalog.kernel_overlay(cfg.kernel)
+    if kernel_ov != "gentoo":
+        overlay_names.append(kernel_ov)
+    queued = [
+        atom
+        for atom in dict.fromkeys(
+            [catalog.kernel_atom(cfg.kernel)]
+            + list(cfg.extra_packages or [])
+            + _window_managers(cfg)
+            + list(cfg.selected_packages or [])
+            + _support_atoms(cfg)
+            + [atom for atom, _test in _display_manager_tools(cfg)]
+        )
+        if atom and (_atom_allowed(cfg, atom) or str(atom).startswith("sys-kernel/"))
+    ]
+    return catalog.overlays_required_by(queued, overlay_names)
+
+
+def _arch_testing_keyword(cfg: InstallConfig) -> str:
+    return "~amd64" if cfg.architecture == "amd64" else "~arm64"
+
+
+def _overlay_helper_keyword_text(cfg: InstallConfig) -> str:
+    """accept_keywords lines for eselect-repository / git (always explicit ~arch)."""
+    kw = _arch_testing_keyword(cfg)
+    return "\n".join(f"{atom} {kw}" for atom in OVERLAY_HELPER_ATOMS) + "\n"
+
+
+def _overlay_helper_unmask_text() -> str:
+    return "\n".join(OVERLAY_HELPER_ATOMS) + "\n"
+
+
+def _overlay_repo_keyword_text(cfg: InstallConfig, overlays: list[str] | None = None) -> str:
+    """Handbook: */*::overlay ~arch for every overlay this install enables."""
+    ovs = overlays if overlays is not None else _required_overlays(cfg)
+    if not ovs:
+        return ""
+    kw = _arch_testing_keyword(cfg)
+    return "\n".join(f"*/*::{ov} {kw}" for ov in ovs) + "\n"
+
+
+def _overlay_repo_unmask_text(cfg: InstallConfig, overlays: list[str] | None = None) -> str:
+    """package.unmask */*::overlay so a package.mask cannot block overlay atoms."""
+    ovs = overlays if overlays is not None else _required_overlays(cfg)
+    if not ovs:
+        return ""
+    return "\n".join(f"*/*::{ov}" for ov in ovs) + "\n"
+
+
+def _write_overlay_portage_files(cfg: InstallConfig, root: str) -> None:
+    """Host-side: keywords + unmask for overlay helpers and every required overlay.
+
+    Written into the mounted Gentoo root *before* chroot so the first
+    eselect-repository/git emerge and later ::overlay packages are not masked.
+    """
+    overlays = _required_overlays(cfg)
+    if not overlays:
+        return
+    portage = Path(root) / "etc" / "portage"
+    kw_dir = portage / "package.accept_keywords"
+    um_dir = portage / "package.unmask"
+    kw_dir.mkdir(parents=True, exist_ok=True)
+    um_dir.mkdir(parents=True, exist_ok=True)
+    _write_text(kw_dir / "overlay-helpers", _overlay_helper_keyword_text(cfg), keep_existing=False)
+    _write_text(um_dir / "overlay-helpers", _overlay_helper_unmask_text(), keep_existing=False)
+    repo_kw = _overlay_repo_keyword_text(cfg, overlays)
+    repo_um = _overlay_repo_unmask_text(cfg, overlays)
+    if repo_kw.strip():
+        _write_text(kw_dir / "overlays", repo_kw, keep_existing=False)
+    if repo_um.strip():
+        _write_text(um_dir / "overlays", repo_um, keep_existing=False)
+
+
 def _chroot_helper_atoms(cfg: InstallConfig) -> list[str]:
     """Tooling the chroot script emerges outside the desktop package lists."""
     atoms = [
@@ -3178,25 +3375,8 @@ def _chroot_helper_atoms(cfg: InstallConfig) -> list[str]:
     if not (cfg.gentoo_mirrors or "").strip():
         atoms.append("app-portage/mirrorselect")
     # Overlays (guru for niri, hyproverlay, CachyOS, shells) need these first.
-    queued = [
-        catalog.kernel_atom(cfg.kernel),
-        *cfg.extra_packages,
-        *_window_managers(cfg),
-        *cfg.selected_packages,
-        *_support_atoms(cfg),
-        *(atom for atom, _test in _display_manager_tools(cfg)),
-    ]
-    overlay_names = [name for name in cfg.overlays if name != "guru"]
-    if catalog.shell_atoms(getattr(cfg, "shell", "") or ""):
-        overlay_names.append("guru")
-    kernel_ov = catalog.kernel_overlay(cfg.kernel)
-    if kernel_ov != "gentoo":
-        overlay_names.append(kernel_ov)
-    if catalog.overlays_required_by(
-        [a for a in queued if a and (_atom_allowed(cfg, a) or str(a).startswith("sys-kernel/"))],
-        overlay_names,
-    ):
-        atoms.extend(["app-eselect/eselect-repository", "dev-vcs/git"])
+    if _required_overlays(cfg):
+        atoms.extend(OVERLAY_HELPER_ATOMS)
     # Remote dotfile fetch uses curl from the chroot.
     for atom in cfg.window_managers or []:
         choices = catalog.dotfile_choices(atom)
@@ -4040,38 +4220,34 @@ fi
 
 
 def _overlay_script(cfg: InstallConfig) -> str:
-    """Chroot snippet: eselect-repository enable + sync + ~arch keywords per overlay."""
-    overlay_names = [name for name in cfg.overlays if name != "guru"]
-    if catalog.shell_atoms(getattr(cfg, "shell", "") or ""):
-        overlay_names.append("guru")
-    kernel_ov = catalog.kernel_overlay(cfg.kernel)
-    if kernel_ov != "gentoo":
-        overlay_names.append(kernel_ov)
-    queued = [
-        atom
-        for atom in dict.fromkeys(
-            [catalog.kernel_atom(cfg.kernel)]
-            + cfg.extra_packages
-            + _window_managers(cfg)
-            + cfg.selected_packages
-            + _support_atoms(cfg)
-            + [atom for atom, _test in _display_manager_tools(cfg)]
-        )
-        if atom and (_atom_allowed(cfg, atom) or atom.startswith("sys-kernel/"))
-    ]
-    overlays = catalog.overlays_required_by(queued, overlay_names)
+    """Chroot: keyword+unmask helpers → emerge them → enable/sync each overlay → */*::ov.
+
+    Gentoo handbook/wiki: package.accept_keywords and package.unmask (including
+    */*::overlay) must exist before emerge. Applies to every overlay this install
+    enables (guru, CachyOS-kernels, hyproverlay, …), not only the helper atoms.
+    """
+    overlays = _required_overlays(cfg)
     if not overlays:
         return ""
-    arch_kw = "~amd64" if cfg.architecture == "amd64" else "~arm64"
+    helper_atoms = " ".join(OVERLAY_HELPER_ATOMS)
+    helper_kw = _overlay_helper_keyword_text(cfg).rstrip("\n")
+    helper_um = _overlay_helper_unmask_text().rstrip("\n")
+    repo_kw = _overlay_repo_keyword_text(cfg, overlays).rstrip("\n")
+    repo_um = _overlay_repo_unmask_text(cfg, overlays).rstrip("\n")
     lines = [
-        "emerge --ask=n --noreplace app-eselect/eselect-repository dev-vcs/git || { "
-        'echo ">> eselect-repository/git required for overlays" >&2; exit 1; }',
         "mkdir -p /etc/portage/package.accept_keywords /etc/portage/package.unmask",
+        "cat > /etc/portage/package.accept_keywords/overlay-helpers << 'EOF'",
+        helper_kw,
+        "EOF",
+        "cat > /etc/portage/package.unmask/overlay-helpers << 'EOF'",
+        helper_um,
+        "EOF",
+        f"emerge --ask=n --noreplace {helper_atoms} || {{ "
+        'echo ">> eselect-repository/git required for overlays" >&2; exit 1; }',
     ]
     for ov in overlays:
         qov = shlex.quote(ov)
         lines.append("unset FEATURES")
-        # Required overlays (guru for niri, hyproverlay for Hyprland, …) must sync.
         lines.append(
             f"eselect repository enable {qov} || {{ "
             f'echo ">> failed to enable overlay {ov}" >&2; exit 1; }}'
@@ -4081,10 +4257,18 @@ def _overlay_script(cfg: InstallConfig) -> str:
             f"emaint sync --repo {qov} || {{ "
             f'echo ">> failed to sync overlay {ov}" >&2; exit 1; }}'
         )
-        lines.append(
-            f"append_once /etc/portage/package.accept_keywords/overlays '*/*::{ov} {arch_kw}'"
-        )
-        lines.append(f"append_once /etc/portage/package.unmask/overlays '*/*::{ov}'")
+    # After every selected overlay is enabled+synced, keyword/unmask */*::name
+    # before any later emerge of packages from those overlays.
+    lines.extend(
+        [
+            "cat > /etc/portage/package.accept_keywords/overlays << 'EOF'",
+            repo_kw,
+            "EOF",
+            "cat > /etc/portage/package.unmask/overlays << 'EOF'",
+            repo_um,
+            "EOF",
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 

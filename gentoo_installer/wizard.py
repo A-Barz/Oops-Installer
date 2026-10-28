@@ -279,7 +279,16 @@ def _network(cfg: InstallConfig) -> None:
         cfg.static_ip = ui.prompt("CIDR address (e.g. 192.168.1.50/24)", cfg.static_ip)
         cfg.static_gateway = ui.prompt("Gateway", cfg.static_gateway)
         cfg.static_dns = ui.prompt("DNS", cfg.static_dns)
-    cfg.ntp = ui.ask_yes_no("Synchronise clock (ntpdate/chrony) before downloading stage3?", True)
+    cfg.ntp = ui.ask_yes_no(
+        "Synchronise clock before downloading stage3? "
+        "(uses Ubuntu ntc when installed; needed for stage3 GPG checks)",
+        True,
+    )
+    if cfg.ntp:
+        ui.info(
+            "If sync tools are missing on the live USB, install Ubuntu package ntc: "
+            "sudo apt-get install -y ntc"
+        )
 
 
 def _disks(cfg: InstallConfig) -> None:
@@ -1210,6 +1219,7 @@ def _packages(cfg: InstallConfig) -> None:
         "wayland-utils",
         "browsers",  # handled above — Firefox ESR + Chrome only
         "display-managers",  # greetd (or none) already decided in chapter 11
+        "games",  # games category removed from package selection
     }
     steps: list[tuple[str, str, list[tuple[str, str]]]] = []
     if niri_rows:
@@ -1545,6 +1555,8 @@ def _confirm_disk(cfg: InstallConfig) -> None:
     typed = ui.prompt(f"Type the disk path to confirm ({cfg.target_disk})", "")
     if typed != cfg.target_disk:
         raise SystemExit("Disk confirmation did not match. Aborting.")
+    # Immediate, hard-to-miss nap banner — do not wait for execute() to start.
+    ui.install_wait_notice()
 
 
 def _choose_iface(title: str, prefer_wireless: bool | None, default: str = "") -> str:

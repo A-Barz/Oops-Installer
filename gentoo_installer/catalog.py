@@ -668,12 +668,11 @@ BOOTLOADERS = [
     ("lilo", "LILO — legacy BIOS (discouraged)"),
 ]
 
-# First page of the overlay checklist — the ones WM/Steam/science users actually need.
+# First page of the overlay checklist — the ones WM/science users actually need.
 FEATURED_OVERLAYS: list[tuple[str, str]] = [
     ("wayland-desktop", "Wayland compositors and tools not yet in ::gentoo"),
     ("hyproverlay", "Hyprland and Hypr* utilities"),
     ("CachyOS-kernels", "CachyOS dist-kernel and sources (cachyos-kernel / -bin)"),
-    ("steam-overlay", "Steam client and Steam-based games"),
     ("gentoo-zh", "Packages useful for Chinese-speaking users"),
     ("science", "Experimental scientific packages"),
     ("kde", "KDE team testing overlay"),
@@ -1067,18 +1066,6 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
             Pkg("media-fonts/fontawesome", "Font Awesome"),
             Pkg("media-fonts/terminus-font", "Terminus"),
             Pkg("media-fonts/unifont", "Unifont"),
-        ),
-    ),
-    (
-        "games",
-        "Games & Steam",
-        _pkgs(
-            Pkg("games-util/steam-launcher", "Steam", "steam-overlay"),
-            Pkg("games-util/gamemode", "GameMode"),
-            Pkg("games-puzzle/gnome-tetravex", "GNOME Tetravex"),
-            Pkg("kde-apps/kpat", "KPatience"),
-            Pkg("kde-apps/kmines", "KMines"),
-            Pkg("kde-apps/kbounce", "KBounce"),
         ),
     ),
     (

@@ -69,6 +69,22 @@ def paint(text: str, *codes: str) -> str:
     return "".join(codes) + text + C.RESET
 
 
+# Overlay name "guru" / "GURU" — Gentoo purple whenever the installer prints it.
+_GURU_WORD = re.compile(r"(?<![A-Za-z0-9_])([Gg][Uu][Rr][Uu])(?![A-Za-z0-9_])")
+
+
+def highlight_guru(text: str, *, after: str = "") -> str:
+    """Paint the GURU overlay name in Gentoo purple (#54487A).
+
+    `after` is re-applied after each match so a surrounding colour (e.g. yellow
+    warn text) continues for the rest of the line.
+    """
+    if not text or not _enabled() or "guru" not in text.lower():
+        return text
+    repl = f"{C.BOLD}{C.PURPLE}\\1{C.RESET}{after}"
+    return _GURU_WORD.sub(repl, text)
+
+
 def width() -> int:
     return max(60, shutil.get_terminal_size((100, 24)).columns)
 
@@ -158,35 +174,49 @@ def chapter(number: str, title: str, handbook_url: str) -> None:
 
 
 def info(msg: str) -> None:
-    print(paint("  ℹ  ", C.PURPLE) + msg)
+    print(paint("  ℹ  ", C.PURPLE) + highlight_guru(msg))
 
 
 def ok(msg: str) -> None:
-    print(paint("  ✓  ", C.GREEN, C.BOLD) + msg)
+    print(paint("  ✓  ", C.GREEN, C.BOLD) + highlight_guru(msg))
 
 
 def warn(msg: str) -> None:
-    print(paint("  !  ", C.YELLOW, C.BOLD) + paint(msg, C.YELLOW))
+    print(paint("  !  ", C.YELLOW, C.BOLD) + highlight_guru(paint(msg, C.YELLOW), after=C.YELLOW))
 
 
 def error(msg: str) -> None:
-    print(paint("  ✗  ", C.RED, C.BOLD) + paint(msg, C.RED))
+    print(paint("  ✗  ", C.RED, C.BOLD) + highlight_guru(paint(msg, C.RED), after=C.RED))
 
 
 def step(msg: str) -> None:
     """One host command about to run (used by runner.Runner)."""
-    print(paint("  »  ", C.PURPLE, C.BOLD) + msg)
+    print(paint("  »  ", C.PURPLE, C.BOLD) + highlight_guru(msg))
 
 
+# Shown right after the user re-types the target disk (must be impossible to miss).
+INSTALL_WAIT_TITLE = "Take a nice relaxing nap"
 INSTALL_WAIT_NOTICE = (
-    "This install takes a long time. Go take a long nap or step away — "
+    "Dream about the source compiling in the clouds — "
     "there is no progress bar or percent. Come back after the estimate."
 )
 
 
 def install_wait_notice() -> None:
-    """Shown only after the target disk path has been confirmed."""
-    info(INSTALL_WAIT_NOTICE)
+    """Friendly nap banner after disk confirmation (and again as execute starts).
+
+    Uses a full-width rule + bold title so it stays visible; a plain info() line
+    was easy to miss once host/chroot output started scrolling.
+    """
+    w = width()
+    rule = "═" * w
+    print()
+    print(paint(rule, C.BOLD, C.PURPLE))
+    print(paint(f"  {INSTALL_WAIT_TITLE}", C.BOLD, C.GREEN))
+    print(paint(f"  {INSTALL_WAIT_NOTICE}", C.BOLD, C.PURPLE))
+    print(paint(rule, C.BOLD, C.PURPLE))
+    print()
+    sys.stdout.flush()
 
 
 def congratulate() -> None:
@@ -413,7 +443,11 @@ def _menu_fallback(title: str, choices: Sequence[tuple[str, str]], default: str 
     keys = [value for value, _ in choices]
     for i, (value, desc) in enumerate(choices, start=1):
         mark = paint("●", C.GREEN) if default == value else paint("○", C.DIM)
-        print(f"    {mark} {paint(str(i), C.BOLD, C.GREEN)}. {paint(value, C.WHITE)}  {paint(desc, C.DIM)}")
+        print(
+            f"    {mark} {paint(str(i), C.BOLD, C.GREEN)}. "
+            f"{highlight_guru(paint(value, C.WHITE), after=C.WHITE)}  "
+            f"{highlight_guru(paint(desc, C.DIM), after=C.DIM)}"
+        )
     default_idx = str(keys.index(default) + 1) if default in keys else ""
     while True:
         raw = prompt("Enter number", default_idx)
@@ -458,8 +492,13 @@ def menu(title: str, choices: Sequence[tuple[str, str]], default: str | None = N
                 cursor = abs_i == index
                 mark = paint("▸", C.BOLD, C.GREEN) if cursor else " "
                 shown = _clip(desc or value)
-                label = paint(shown, C.BOLD, C.GREEN) if cursor else paint(shown, C.WHITE)
-                extra = paint(f"({value})", C.DIM, C.PURPLE) if desc else ""
+                label_codes = (C.BOLD, C.GREEN) if cursor else (C.WHITE,)
+                label = highlight_guru(paint(shown, *label_codes), after="".join(label_codes))
+                extra = (
+                    highlight_guru(paint(f"({value})", C.DIM, C.PURPLE), after=C.DIM + C.PURPLE)
+                    if desc
+                    else ""
+                )
                 prefix = paint("  > ", C.BOLD, C.GREEN) if cursor else "    "
                 lines.append(f"{prefix}{mark} {label}  {extra}".rstrip())
             _erase_lines(drawn)
@@ -569,10 +608,14 @@ def paged_checklist(
                 prefix = paint("  > ", C.BOLD, C.GREEN) if i == cursor else "    "
                 # The flag or package atom is the value. It stays at the left,
                 # in a light colour, so a dark theme does not hide it.
-                flag = paint(value.ljust(flag_w), C.BOLD, C.GREEN if on or i == cursor else C.WHITE)
+                flag_codes = (C.BOLD, C.GREEN if on or i == cursor else C.WHITE)
+                flag = highlight_guru(
+                    paint(value.ljust(flag_w), *flag_codes),
+                    after="".join(flag_codes),
+                )
                 room = max(16, width() - flag_w - 16)
                 shown = desc if len(desc) <= room else desc[: room - 1] + "…"
-                detail = paint(shown, C.WHITE) if shown else ""
+                detail = highlight_guru(paint(shown, C.WHITE), after=C.WHITE) if shown else ""
                 lines.append(f"{prefix}{mark} {box} {flag}  {detail}".rstrip())
             _erase_lines(drawn)
             print("\n".join(lines))
@@ -663,7 +706,8 @@ def _paged_checklist_fallback(
             mark = paint("[x]", C.GREEN, C.BOLD) if value in current else paint("[ ]", C.DIM)
             print(
                 f"    {mark} {paint(str(i), C.GREEN)}. "
-                f"{paint(value, C.BOLD, C.WHITE)}  {paint(desc, C.WHITE)}"
+                f"{highlight_guru(paint(value, C.BOLD, C.WHITE), after=C.BOLD + C.WHITE)}  "
+                f"{highlight_guru(paint(desc, C.WHITE), after=C.WHITE)}"
             )
         raw = prompt("Package command", "0")
         if raw in {"", "0", "d", "done"}:
@@ -731,6 +775,10 @@ def summary_table(rows: Sequence[tuple[str, str]]) -> None:
         for index, part in enumerate(parts):
             label = key if index == 0 else ""
             line = f" {label.ljust(label_w)} {part}"
-            print(paint("  │", C.PURPLE) + paint(line[:inner].ljust(inner), C.GREEN) + paint("│", C.PURPLE))
+            cell = highlight_guru(
+                paint(line[:inner].ljust(inner), C.GREEN),
+                after=C.GREEN,
+            )
+            print(paint("  │", C.PURPLE) + cell + paint("│", C.PURPLE))
     print(paint("  └" + "─" * (w - 6) + "┘", C.PURPLE))
     print()

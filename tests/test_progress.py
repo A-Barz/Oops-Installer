@@ -129,12 +129,31 @@ class NoLiveProgressUiTests(unittest.TestCase):
         self.assertFalse(hasattr(ui, "progress_bar"))
         self.assertFalse(hasattr(ui, "progress_percent"))
 
-    def test_wait_notice_is_long_nap_not_percent(self) -> None:
+    def test_wait_notice_is_relaxing_nap_and_clouds_not_percent(self) -> None:
+        title = ui.INSTALL_WAIT_TITLE.lower()
         notice = ui.INSTALL_WAIT_NOTICE.lower()
-        self.assertIn("nap", notice)
+        self.assertIn("nice relaxing nap", title)
+        self.assertIn("dream", notice)
+        self.assertIn("clouds", notice)
+        self.assertIn("source", notice)
         self.assertIn("no progress", notice)
         self.assertNotIn("%", notice)
         self.assertNotIn("jobs", notice)
+
+    def test_install_wait_notice_prints_visible_banner(self) -> None:
+        import io
+        import os
+        from contextlib import redirect_stdout
+
+        os.environ["FORCE_COLOR"] = "1"
+        os.environ.pop("NO_COLOR", None)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            ui.install_wait_notice()
+        out = buf.getvalue()
+        self.assertIn(ui.INSTALL_WAIT_TITLE, out)
+        self.assertIn("clouds", out)
+        self.assertIn("═", out)
 
 
 if __name__ == "__main__":
