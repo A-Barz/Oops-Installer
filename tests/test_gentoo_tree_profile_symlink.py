@@ -56,11 +56,23 @@ class MakeProfileSymlinkTests(unittest.TestCase):
         self.assertIn("/var/db/repos/gentoo/profiles", script)
         self.assertIn("exit 1", script)
 
+    def test_clears_non_symlink_make_profile_before_eselect(self) -> None:
+        script = _profile_set_script(_cfg())
+        clear = script.find("removing non-symlink /etc/portage/make.profile")
+        rm = script.find("rm -rf /etc/portage/make.profile")
+        eselect = script.find("eselect profile set")
+        self.assertGreaterEqual(clear, 0)
+        self.assertGreaterEqual(rm, 0)
+        self.assertLess(clear, eselect)
+        self.assertLess(rm, eselect)
+        self.assertIn("[ -e /etc/portage/make.profile ] && [ ! -L /etc/portage/make.profile ]", script)
+
     def test_chroot_fail_closed_mentions_both_repos_and_symlink(self) -> None:
         script = render_chroot_script(_cfg(sync_method="git"), {"root": "/dev/vda2", "esp": "/dev/vda1"})
         self.assertIn("/var/db/repos/gentoo missing after Portage tree sync", script)
         self.assertIn("[ -L /etc/portage/make.profile ]", script)
         self.assertIn("make.profile must be a symlink after eselect profile set", script)
+        self.assertIn("removing non-symlink /etc/portage/make.profile", script)
 
 
 if __name__ == "__main__":
