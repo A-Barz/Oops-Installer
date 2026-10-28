@@ -51,15 +51,12 @@ class NtpNtpsecHintTests(unittest.TestCase):
         self.assertIn("chrony", src)
         self.assertIn("apt-get install -y ntpsec", src)
 
-    def test_config_maps_old_chrony_key_to_ntpsec(self) -> None:
-        import tempfile
-        from pathlib import Path
-
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "old.yaml"
-            path.write_text("chrony: false\narchitecture: amd64\n", encoding="utf-8")
-            cfg = InstallConfig.load(path)
-        self.assertFalse(cfg.ntpsec)
+    def test_gentoo_still_offers_chrony_not_forced_ntpsec(self) -> None:
+        """ntpsec-over-chrony applies to the Ubuntu host only, not Gentoo emerge."""
+        cfg = InstallConfig()
+        self.assertTrue(hasattr(cfg, "chrony"))
+        self.assertFalse(hasattr(cfg, "ntpsec"))
+        self.assertTrue(cfg.chrony)
 
 
 class PartprobeLiveUsbTests(unittest.TestCase):

@@ -987,7 +987,7 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
             Pkg("net-vpn/wireguard-tools", "WireGuard tools"),
             Pkg("net-vpn/openvpn", "OpenVPN"),
             Pkg("net-misc/openssh", "OpenSSH"),
-            Pkg("net-misc/ntpsec", "ntpsec (replaces chrony)"),
+            Pkg("net-misc/chrony", "chrony"),
             Pkg("net-misc/wget", "wget"),
             Pkg("net-misc/curl", "curl"),
             Pkg("net-misc/rsync", "rsync"),

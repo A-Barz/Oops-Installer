@@ -2000,9 +2000,8 @@ def _required_tools(cfg: InstallConfig, loaders: list[str]) -> list[tuple[str, t
         add("sys-apps/systemd", "command", "-v", "networkctl")
     if cfg.sshd:
         add("net-misc/openssh", *_service_probe(openrc, "sshd"))
-    if cfg.ntpsec:
-        # OpenRC service is ``ntp`` (not chronyd / legacy ntpd).
-        add("net-misc/ntpsec", *_service_probe(openrc, "ntp"))
+    if cfg.chrony:
+        add("net-misc/chrony", *_service_probe(openrc, "chronyd"))
     if cfg.cups:
         add("net-print/cups", *_service_probe(openrc, "cupsd", "cups"))
     if openrc and cfg.syslog != "none":
@@ -2027,16 +2026,11 @@ def _required_tool_repairs(cfg: InstallConfig, loaders: list[str]) -> str:
     """Install boot and service packages one failure at a time, before the kernel.
 
     A masked theme or a Plymouth build error used to sit in the same emerge
-    as NetworkManager, ntpsec, rsyslog, cronie, and zram-init. Portage then
+    as NetworkManager, chrony, rsyslog, cronie, and zram-init. Portage then
     aborted the whole calculation and rc-update reported every service missing.
     """
     tools = _required_tools(cfg, loaders)
     lines = ["echo '>> install tools before dracut and OpenRC services'"]
-    if cfg.ntpsec:
-        # Portage blocks chrony ↔ ntpsec; chrony must be gone for ntpsec to emerge.
-        lines.append("echo '>> ntpsec replaces chrony — removing net-misc/chrony if present'")
-        lines.append("emerge --ask=n --deselect net-misc/chrony 2>/dev/null || true")
-        lines.append("emerge --ask=n --unmerge net-misc/chrony 2>/dev/null || true")
     if tools:
         atoms = " ".join(shlex.quote(atom) for atom, _test in tools)
         lines.append(
@@ -2083,9 +2077,9 @@ def _final_tool_checks(cfg: InstallConfig, loaders: list[str]) -> str:
                 "NetworkManager",
             )
         )
-    if cfg.ntpsec:
+    if cfg.chrony:
         checks.append(
-            ("[ -e /etc/init.d/ntp ]" if openrc else _systemd_unit_test("ntp"), "ntp")
+            ("[ -e /etc/init.d/chronyd ]" if openrc else _systemd_unit_test("chronyd"), "chronyd")
         )
     if openrc and cfg.syslog != "none":
         checks.append((f"[ -e /etc/init.d/{cfg.syslog} ]", cfg.syslog))
@@ -3452,8 +3446,8 @@ def _service_stack_atoms(cfg: InstallConfig) -> list[str]:
         atoms.append("net-misc/openssh")
     if cfg.cups:
         atoms.append("net-print/cups")
-    if cfg.ntpsec:
-        atoms.append("net-misc/ntpsec")
+    if cfg.chrony:
+        atoms.append("net-misc/chrony")
     if cfg.init_system == "openrc":
         if cfg.syslog != "none":
             atoms.append(f"app-admin/{cfg.syslog}")
@@ -3818,7 +3812,7 @@ def _keyword_text(cfg: InstallConfig) -> str:
     """Accept ~arch for every package the installer will emerge.
 
     Skipping this leaves ~amd64/~arm64 packages masked and abort the emerge
-    calculation (NetworkManager, ntpsec, overlay kernels, …). When the user
+    calculation (NetworkManager, chrony, overlay kernels, …). When the user
     already accepted testing keywords globally, nothing extra is needed here
     except the Gentoo LTS sources pin (stable keywords only).
     """
@@ -3991,8 +3985,8 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
         net_pkgs.append("net-misc/openssh")
     if cfg.cups:
         net_pkgs.append("net-print/cups")
-    if cfg.ntpsec:
-        net_pkgs.append("net-misc/ntpsec")
+    if cfg.chrony:
+        net_pkgs.append("net-misc/chrony")
     if cfg.init_system == "openrc":
         if cfg.syslog != "none":
             net_pkgs.append(f"app-admin/{cfg.syslog}")
@@ -4117,10 +4111,9 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
     if cfg.nftables:
         openrc_services.append("nftables")
         systemd_services.append("nftables")
-    if cfg.ntpsec:
-        # NTPsec OpenRC/systemd unit is ``ntp`` (replaces chronyd).
-        openrc_services.append("ntp")
-        systemd_services.append("ntp")
+    if cfg.chrony:
+        openrc_services.append("chronyd")
+        systemd_services.append("chronyd")
     if cfg.cups:
         openrc_services.append("cupsd")
         systemd_services.append("cups")

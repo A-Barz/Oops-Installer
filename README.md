@@ -29,7 +29,7 @@ Read **[HOWTO.txt](HOWTO.txt)** before a real install.
 - Wired or wireless internet
 - Root privileges
 - A target disk you can **wipe** (unless you choose existing partitions)
-- Optional but recommended for stage3 GPG: Ubuntu package **`ntpsec`** for live-host clock sync. It must **replace chrony** (the packages conflict): `sudo apt-get remove -y chrony; sudo apt-get install -y ntpsec`
+- Optional but recommended for stage3 GPG: on the **Ubuntu Boot Image host**, install apt package **`ntpsec`** for live clock sync. It must **replace host chrony** (those Ubuntu packages conflict): `sudo apt-get remove -y chrony; sudo apt-get install -y ntpsec`. (Gentoo still uses optional `net-misc/chrony` on the installed system.)
 
 ## Usage
 
@@ -174,7 +174,7 @@ There is no Ubuntu LTS ebuild and no fake `*-lts` package.
 | Networking stack | `networkmanager`, `dhcpcd`, `netifrc`; + `systemd-networkd` if systemd | NM on desktop |
 | Wireless tools / sshd / nftables | yes/no | Yes |
 | CUPS | yes/no | No |
-| ntpsec | yes/no — replaces chrony (do not install both) | Yes |
+| chrony | yes/no | Yes |
 | Syslog | `sysklogd`, `metalog`, `rsyslog`, `none` | `sysklogd` |
 | Cron | `cronie`, `fcron`, `none` | `cronie` |
 
@@ -316,7 +316,7 @@ Order and atoms match `catalog.CATEGORIES` (plus conditional Niri apps). There i
 
 ### Networking & remote access
 
-`net-misc/networkmanager`, `net-misc/dhcpcd`, `net-vpn/wireguard-tools`, `net-vpn/openvpn`, `net-misc/openssh`, `net-misc/ntpsec` (replaces chrony), `net-misc/wget`, `net-misc/curl`, `net-misc/rsync`, `net-ftp/filezilla`, `net-im/telegram-desktop-bin`, `net-im/signal-desktop-bin`, `net-analyzer/wireshark`, `net-firewall/ufw`, `net-firewall/nftables`
+`net-misc/networkmanager`, `net-misc/dhcpcd`, `net-vpn/wireguard-tools`, `net-vpn/openvpn`, `net-misc/openssh`, `net-misc/chrony`, `net-misc/wget`, `net-misc/curl`, `net-misc/rsync`, `net-ftp/filezilla`, `net-im/telegram-desktop-bin`, `net-im/signal-desktop-bin`, `net-analyzer/wireshark`, `net-firewall/ufw`, `net-firewall/nftables`
 
 ### Containers & virtualisation
 

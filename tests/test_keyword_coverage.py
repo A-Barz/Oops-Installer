@@ -35,7 +35,7 @@ def _typical_niri(**kwargs) -> InstallConfig:
     cfg.username = "ashley"
     cfg.network_stack = "networkmanager"
     cfg.wireless = True
-    cfg.ntpsec = True
+    cfg.chrony = True
     cfg.sshd = True
     cfg.zram = True
     cfg.nftables = True
