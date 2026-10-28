@@ -51,12 +51,19 @@ class GitBeforeSyncTests(unittest.TestCase):
         self.assertIn("package.accept_keywords/git", script)
         self.assertIn(f"{GIT_ATOM} ~amd64", script)
         self.assertIn("package.unmask/git", script)
-        self.assertIn(f"emerge --ask=n --noreplace {GIT_ATOM}", script)
+        self.assertIn(f"emerge --ask=n --verbose --noreplace {GIT_ATOM}", script)
+        self.assertIn("export LANG=en_US.UTF-8", script)
+        self.assertIn("export LC_ALL=en_US.UTF-8", script)
+        self.assertIn("emerge -pv", script)
+        self.assertIn("build.log", script)
         self.assertIn("command -v git", script)
-        self.assertIn("exit 1", script)
-        emerge = script.find(f"emerge --ask=n --noreplace {GIT_ATOM}")
+        self.assertIn("git_emerge_status", script)
+        emerge = script.find(f"emerge --ask=n --verbose --noreplace {GIT_ATOM}")
         check = script.find("command -v git")
         self.assertLess(emerge, check)
+        # Keyword/unmask before emerge.
+        self.assertLess(script.find("package.accept_keywords/git"), emerge)
+        self.assertLess(script.find("package.unmask/git"), emerge)
 
     def test_ensure_git_empty_when_not_needed(self) -> None:
         self.assertEqual(_ensure_git_script(_cfg(sync_method="rsync")), "")
@@ -64,7 +71,7 @@ class GitBeforeSyncTests(unittest.TestCase):
     def test_chroot_script_git_prep_before_tree_sync(self) -> None:
         cfg = _cfg(sync_method="git")
         script = render_chroot_script(cfg, {"root": "/dev/vda2", "esp": "/dev/vda1"})
-        prep = script.find("ensure dev-vcs/git before Portage git sync")
+        prep = script.find("ensure dev-vcs/git (before Portage git sync")
         tree = script.find("sync-type = git")
         sync_echo = script.find(">> sync Portage tree")
         self.assertGreaterEqual(prep, 0)
@@ -76,15 +83,17 @@ class GitBeforeSyncTests(unittest.TestCase):
 
     def test_overlay_script_emerges_git_before_eselect_enable(self) -> None:
         script = _overlay_script(_cfg(window_managers=["gui-wm/niri"]))
-        git_emerge = script.find(f"emerge --ask=n --noreplace {GIT_ATOM}")
-        git_check = script.find("git missing — cannot enable/sync overlays")
-        eselect = script.find("emerge --ask=n --noreplace app-eselect/eselect-repository")
+        git_emerge = script.find(f"emerge --ask=n --verbose --noreplace {GIT_ATOM}")
+        git_check = script.find("git missing after emerge")
+        eselect = script.find("emerge --ask=n --verbose --noreplace app-eselect/eselect-repository")
         enable = script.find("eselect repository enable")
         self.assertGreaterEqual(git_emerge, 0)
         self.assertGreaterEqual(eselect, 0)
         self.assertLess(git_emerge, git_check)
         self.assertLess(git_check, eselect)
         self.assertLess(eselect, enable)
+        self.assertIn("package.accept_keywords/git", script)
+        self.assertIn("export LANG=en_US.UTF-8", script)
 
     def test_chroot_helpers_include_git_for_git_sync(self) -> None:
         atoms = _chroot_helper_atoms(_cfg(sync_method="git"))
@@ -136,7 +145,7 @@ class LocaleBeforeSyncTests(unittest.TestCase):
         # Early header still uses C until locale-gen; Portage path must not.
         self.assertIn("export LANG=C", script)
         locale_echo = script.find("generate UTF-8 locales before emerge/sync")
-        git_echo = script.find("ensure dev-vcs/git before Portage git sync")
+        git_echo = script.find("ensure dev-vcs/git (before Portage git sync")
         sync_echo = script.find(">> sync Portage tree")
         self.assertGreaterEqual(locale_echo, 0)
         self.assertLess(locale_echo, git_echo)

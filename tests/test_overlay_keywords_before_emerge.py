@@ -69,7 +69,7 @@ class OverlayKeywordOrderTests(unittest.TestCase):
         self.assertTrue(script)
         helper_kw = script.find("package.accept_keywords/overlay-helpers")
         helper_um = script.find("package.unmask/overlay-helpers")
-        emerge = script.find("emerge --ask=n --noreplace app-eselect/eselect-repository")
+        emerge = script.find("emerge --ask=n --verbose --noreplace app-eselect/eselect-repository")
         self.assertGreaterEqual(helper_kw, 0)
         self.assertGreaterEqual(helper_um, 0)
         self.assertGreaterEqual(emerge, 0)
@@ -135,7 +135,7 @@ class OverlayKeywordOrderTests(unittest.TestCase):
             {"root": "/dev/vda2", "esp": "/dev/vda1"},
         )
         helper_kw = script.find("package.accept_keywords/overlay-helpers")
-        emerge = script.find("emerge --ask=n --noreplace app-eselect/eselect-repository")
+        emerge = script.find("emerge --ask=n --verbose --noreplace app-eselect/eselect-repository")
         self.assertGreaterEqual(helper_kw, 0)
         self.assertGreaterEqual(emerge, 0)
         self.assertLess(helper_kw, emerge)

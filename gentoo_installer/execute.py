@@ -1434,22 +1434,24 @@ def phase_chroot_mounts(cfg: InstallConfig, runner: Runner, root: str) -> None:
     runner.shell(f"cp /etc/resolv.conf {shlex.quote(root + '/etc/resolv.conf')} || true")
 
 
-def _chroot_env_argv(*command: str) -> list[str]:
-    """env -i + a command inside the Gentoo tree. Always LANG=C for the installer.
+def _chroot_env_argv(*command: str, locale: str = "C") -> list[str]:
+    """env -i + a command inside the Gentoo tree.
 
-    Exporting the user's locale (en_US.UTF-8) before locale-gen has filled
-    the archive makes localedef and later tools fail. Persist LANG in
-    /etc/env.d/02locale for the *booted* system instead.
+    Use bare ``C`` only for pre-locale-gen helpers (localedef needs a safe
+    locale). After ``_generate_locales``, pass a concrete UTF-8 locale so the
+    main chroot-install.sh / emerge path is not launched under ambiguous C —
+    Portage warns (and some emerges fail) when LANG/LC_ALL are bare C/POSIX.
     """
     term = os.environ.get("TERM") or "linux"
+    loc = (locale or "C").strip() or "C"
     return [
         "env",
         "-i",
         "HOME=/root",
         f"TERM={term}",
         "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
-        "LANG=C",
-        "LC_ALL=C",
+        f"LANG={loc}",
+        f"LC_ALL={loc}",
         *command,
     ]
 
@@ -1497,7 +1499,15 @@ def phase_chroot(
     cfg.save(str(Path(root) / "root" / "install-config.yaml"), include_secrets=False)
     # Handbook + wiki "Installation alternatives": LiveCDs leak a messy env.
     # Never bash --login / never source /etc/profile in the installer process.
-    chroot_argv = _chroot_env_argv("chroot", root, "/bin/bash", "/root/chroot-install.sh")
+    # Locales were just generated above — launch the install script under UTF-8,
+    # not bare C (that wrapper previously broke emerge of e.g. dev-vcs/git).
+    chroot_argv = _chroot_env_argv(
+        "chroot",
+        root,
+        "/bin/bash",
+        "/root/chroot-install.sh",
+        locale=_installer_utf8_locale(cfg),
+    )
     # Stream emerge output; no percent / sticky bar — the pre-install nap notice
     # is the UX for the long wait.
     runner.run_live(chroot_argv, lambda _line: None)
@@ -3485,14 +3495,26 @@ def _git_unmask_text() -> str:
     return f"{GIT_ATOM}\n"
 
 
-def _ensure_git_script(cfg: InstallConfig) -> str:
-    """Keyword/unmask + emerge git before any git-backed Portage sync. Fail closed."""
-    if not _needs_git_for_sync(cfg):
-        return ""
+def _emerge_git_block(cfg: InstallConfig, *, reason: str) -> str:
+    """Keyword/unmask + UTF-8 env + verbose emerge of git; surface Portage errors.
+
+    Always rewrites accept_keywords/unmask for git, asserts a concrete UTF-8
+    LANG/LC_ALL (never bare C from the installer wrapper), runs emerge --verbose,
+    and on failure prints exit status, ``emerge -pv``, and the newest build.log
+    tail so the real mask/dep/compile error is visible.
+    """
+    utf8 = shlex.quote(_installer_utf8_locale(cfg))
     kw = _git_keyword_text(cfg).rstrip("\n")
     um = _git_unmask_text().rstrip("\n")
     return f"""
-echo ">> ensure {GIT_ATOM} before Portage git sync / overlay enable"
+echo ">> ensure {GIT_ATOM} ({reason})"
+# Never emerge git under ambiguous LANG=C from the installer env wrapper.
+export LANG={utf8}
+export LC_ALL={utf8}
+case "$LANG" in
+  C|POSIX|"") echo ">> refuse emerge {GIT_ATOM} under bare LANG='$LANG'" >&2; exit 1 ;;
+esac
+echo ">> installer locale for {GIT_ATOM} emerge: $LANG"
 mkdir -p /etc/portage/package.accept_keywords /etc/portage/package.unmask
 cat > /etc/portage/package.accept_keywords/git << 'EOF'
 {kw}
@@ -3500,16 +3522,38 @@ EOF
 cat > /etc/portage/package.unmask/git << 'EOF'
 {um}
 EOF
-emerge --ask=n --noreplace {GIT_ATOM} || {{
-  echo ">> failed to emerge {GIT_ATOM} (required for git sync / eselect-repository overlays)" >&2
-  exit 1
-}}
+echo ">> accept_keywords/git:"; cat /etc/portage/package.accept_keywords/git
+echo ">> package.unmask/git:"; cat /etc/portage/package.unmask/git
+unset FEATURES
+emerge --ask=n --verbose --noreplace {GIT_ATOM}
+git_emerge_status=$?
+if [ "$git_emerge_status" -ne 0 ]; then
+  echo ">> emerge {GIT_ATOM} failed (exit $git_emerge_status) — Portage detail follows" >&2
+  echo ">> emerge -pv {GIT_ATOM}:" >&2
+  emerge -pv {GIT_ATOM} >&2 || true
+  echo ">> newest build.log (if any):" >&2
+  _git_blog=$(ls -1t /var/tmp/portage/dev-vcs/git-*/temp/build.log 2>/dev/null | head -n 1)
+  if [ -n "$_git_blog" ] && [ -f "$_git_blog" ]; then
+    echo ">> $_git_blog (last 80 lines)" >&2
+    tail -n 80 "$_git_blog" >&2 || true
+  else
+    echo ">> no /var/tmp/portage/dev-vcs/git-*/temp/build.log yet (often mask/keyword/dep resolution)" >&2
+  fi
+  exit "$git_emerge_status"
+fi
 if ! command -v git >/dev/null 2>&1; then
   echo ">> git missing after emerge — cannot sync Portage overlays or a git tree" >&2
   exit 1
 fi
 echo ">> git ready ($(command -v git))"
 """
+
+
+def _ensure_git_script(cfg: InstallConfig) -> str:
+    """Keyword/unmask + emerge git before any git-backed Portage sync. Fail closed."""
+    if not _needs_git_for_sync(cfg):
+        return ""
+    return _emerge_git_block(cfg, reason="before Portage git sync / overlay enable")
 
 
 def _installer_utf8_locale(cfg: InstallConfig) -> str:
@@ -4381,18 +4425,22 @@ emerge --ask=n --emptytree @system || true
 # gentoo-live-installer chroot script rev {CHROOT_SCRIPT_REV}
 # Locales, hostname, timezone, keymap, make.conf are written by the host.
 # This script must never `source /etc/profile` (debuginfod nounset + FEATURES).
-# Start with LANG=C only until locale-gen runs; then switch to a real UTF-8 locale
-# so Portage does not warn about an ambiguous C locale during sync/emerge.
+# Host launches this script with a UTF-8 locale after locale-gen. Keep a brief
+# C fallback only until locale_prep reasserts UTF-8 before any emerge/sync.
 set +eu
 unset FEATURES
 unset PORTAGE_FEATURES
 export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
-export LANG=C
-export LC_ALL=C
+# Prefer the wrapper locale when it is already UTF-8; else C until locale_prep.
+case "${{LANG:-C}}" in
+  C|POSIX|"") export LANG=C; export LC_ALL=C ;;
+  *) export LC_ALL="${{LC_ALL:-$LANG}}" ;;
+esac
 export DEBUGINFOD_URLS="${{DEBUGINFOD_URLS:-}}"
 export DEBUGINFOD_CERT_PATH="${{DEBUGINFOD_CERT_PATH:-}}"
 export DEBUGINFOD_IMA_CERT_PATH="${{DEBUGINFOD_IMA_CERT_PATH:-}}"
 echo "=== gentoo-live-installer chroot rev {CHROOT_SCRIPT_REV} ==="
+echo ">> chroot entry locale: LANG=${{LANG:-}} LC_ALL=${{LC_ALL:-}}"
 {resume_prelude}
 mkdir -p /etc/portage/package.use /etc/portage/package.accept_keywords /etc/portage/package.unmask /etc/portage/package.license /etc/portage/profile
 echo ">> USE flags, keywords, unmask, and dracut configuration"
@@ -4618,6 +4666,8 @@ def _overlay_script(cfg: InstallConfig) -> str:
     helper_um = _overlay_helper_unmask_text().rstrip("\n")
     repo_kw = _overlay_repo_keyword_text(cfg, overlays).rstrip("\n")
     repo_um = _overlay_repo_unmask_text(cfg, overlays).rstrip("\n")
+    # Git: same keyword/UTF-8/verbose/error-surface path as pre-sync ensure.
+    git_block = _emerge_git_block(cfg, reason="before overlay enable/sync").rstrip("\n")
     lines = [
         "echo \">> eselect repository (overlays; after profile)\"",
         # Wiki: REPOS_CONF directory must exist before the module works.
@@ -4628,13 +4678,10 @@ def _overlay_script(cfg: InstallConfig) -> str:
         "cat > /etc/portage/package.unmask/overlay-helpers << 'EOF'",
         helper_um,
         "EOF",
-        # Git first (may already be present from _ensure_git_script), then eselect-repository.
-        f"emerge --ask=n --noreplace {GIT_ATOM} || {{ "
-        f'echo ">> {GIT_ATOM} required before overlay enable/sync" >&2; exit 1; }}',
-        "if ! command -v git >/dev/null 2>&1; then "
-        'echo ">> git missing — cannot enable/sync overlays" >&2; exit 1; fi',
-        "emerge --ask=n --noreplace app-eselect/eselect-repository || { "
-        'echo ">> eselect-repository required for overlays" >&2; exit 1; }',
+        git_block,
+        "emerge --ask=n --verbose --noreplace app-eselect/eselect-repository || { "
+        'echo ">> eselect-repository required for overlays" >&2; '
+        "emerge -pv app-eselect/eselect-repository >&2 || true; exit 1; }",
         "if ! command -v eselect >/dev/null 2>&1; then "
         'echo ">> eselect missing — cannot enable overlays" >&2; exit 1; fi',
     ]
