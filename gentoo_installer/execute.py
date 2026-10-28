@@ -252,6 +252,33 @@ def sync_live_clock(cfg: InstallConfig, runner: Runner) -> bool:
     return False
 
 
+def _dns_nameservers(cfg: InstallConfig) -> list[str]:
+    """Nameservers from dns_servers / dns_provider / static_dns."""
+    servers = catalog.dns_servers_for(
+        getattr(cfg, "dns_provider", "") or "cloudflare",
+        getattr(cfg, "dns_servers", "") or "",
+    )
+    if not servers and (cfg.static_dns or "").strip():
+        servers = [cfg.static_dns.strip()]
+    return servers or list(catalog.DNS_PRESETS["cloudflare"])
+
+
+def _resolv_conf_text(cfg: InstallConfig) -> str:
+    lines = [
+        f"# Oops-Installer DNS ({getattr(cfg, 'dns_provider', 'cloudflare')})",
+        *[f"nameserver {ip}" for ip in _dns_nameservers(cfg)],
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _apply_live_dns(cfg: InstallConfig) -> None:
+    """Write /etc/resolv.conf on the Ubuntu live host from the wizard DNS pick."""
+    text = _resolv_conf_text(cfg)
+    Path("/etc/resolv.conf").write_text(text, encoding="utf-8")
+    ui.ok(f"Live DNS → {' '.join(_dns_nameservers(cfg))}")
+
+
 def phase_network(cfg: InstallConfig, runner: Runner) -> None:
     """Bring up live Wi-Fi/static IP and NTP so distfiles.gentoo.org works."""
     if cfg.network_mode == "wifi":
@@ -279,8 +306,9 @@ def phase_network(cfg: InstallConfig, runner: Runner) -> None:
         runner.shell(f"ip link set {shlex.quote(iface)} up")
         if cfg.static_gateway:
             runner.shell(f"ip route add default via {shlex.quote(cfg.static_gateway)} || true")
-        if not cfg.dry_run:
-            Path("/etc/resolv.conf").write_text(f"nameserver {cfg.static_dns}\n", encoding="utf-8")
+    # Apply chosen DNS on the live host (dhcp/wifi/static) so stage3 uses the same resolvers.
+    if cfg.network_mode != "skip" and not cfg.dry_run:
+        _apply_live_dns(cfg)
     sync_live_clock(cfg, runner)
     if not cfg.dry_run and not detect.has_network():
         ui.warn("Network still looks down. Stage3 download may fail.")
@@ -1758,7 +1786,43 @@ def _write_system_files(cfg: InstallConfig, root: str) -> None:
         shutil.rmtree(vc)
     if not vc.is_dir():
         _write_text(vc, f"KEYMAP={cfg.keymap}\n", keep_existing=keep)
-    ui.ok("Wrote hostname, timezone, keymap, locale.gen, and env.d/02locale")
+    _write_dns_config(cfg, rootp, keep_existing=keep)
+    ui.ok("Wrote hostname, timezone, keymap, locale.gen, env.d/02locale, and DNS")
+
+
+def _write_dns_config(cfg: InstallConfig, rootp: Path, *, keep_existing: bool) -> None:
+    """Persist wizard DNS on the installed Gentoo (resolv.conf + stack helpers)."""
+    etc = rootp / "etc"
+    servers = _dns_nameservers(cfg)
+    _write_text(etc / "resolv.conf", _resolv_conf_text(cfg), keep_existing=keep_existing)
+    # NetworkManager would rewrite resolv.conf from DHCP unless dns=none.
+    nm_dir = etc / "NetworkManager" / "conf.d"
+    nm_dir.mkdir(parents=True, exist_ok=True)
+    _write_text(
+        nm_dir / "90-oops-dns-none.conf",
+        "[main]\ndns=none\n",
+        keep_existing=keep_existing,
+    )
+    # dhcpcd static nameservers (used when network_stack is dhcpcd).
+    dhcpcd = etc / "dhcpcd.conf"
+    dns_line = "static domain_name_servers=" + " ".join(servers)
+    marker = "# oops-installer-dns"
+    body = ""
+    if dhcpcd.is_file():
+        body = dhcpcd.read_text(encoding="utf-8", errors="replace")
+    if marker not in body:
+        body = body.rstrip() + f"\n{marker}\n{dns_line}\n"
+        _write_text(dhcpcd, body if body.endswith("\n") else body + "\n", keep_existing=False)
+    # systemd-resolved drop-in when using systemd.
+    if cfg.init_system == "systemd":
+        resolved = etc / "systemd" / "resolved.conf.d"
+        resolved.mkdir(parents=True, exist_ok=True)
+        _write_text(
+            resolved / "oops-dns.conf",
+            "[Resolve]\nDNS=" + " ".join(servers) + "\n",
+            keep_existing=keep_existing,
+        )
+    ui.info(f"Installed DNS ({cfg.dns_provider}): {' '.join(servers)}")
 
 
 def _generate_locales(cfg: InstallConfig, runner: Runner, root: str) -> None:
@@ -3695,6 +3759,7 @@ mkdir -p /etc/dracut.conf.d
 echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
 """
     netifrc_iface = _netifrc_iface(cfg)
+    dns_servers_netifrc = " ".join(_dns_nameservers(cfg))
     pkgs_kernel = (cfg.kernel or "gentoo-kernel-bin").split("::", 1)[0]
     if "/" in pkgs_kernel:
         pkgs_kernel = pkgs_kernel.rsplit("/", 1)[-1]
@@ -4237,6 +4302,7 @@ fi
 
 if [ "{cfg.network_stack}" = "netifrc" ]; then
   echo 'config_{netifrc_iface}="dhcp"' > /etc/conf.d/net || true
+  echo 'dns_servers_{netifrc_iface}="{dns_servers_netifrc}"' >> /etc/conf.d/net || true
   ln -s /etc/init.d/net.lo /etc/init.d/net.{netifrc_iface} || true
   rc-update add net.{netifrc_iface} default || true
 fi

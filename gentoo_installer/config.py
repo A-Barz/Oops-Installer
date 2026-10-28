@@ -49,7 +49,12 @@ class InstallConfig:
     static_iface: str = ""  # Live NIC for static IP (never assume eth0).
     static_ip: str = ""
     static_gateway: str = ""
+    # First nameserver (kept for older profiles / static live path).
     static_dns: str = "1.1.1.1"
+    # cloudflare | google | opendns | custom — applied to live + installed Gentoo.
+    dns_provider: str = "cloudflare"
+    # Space-separated IPv4/IPv6 nameservers written to resolv.conf / NM / dhcpcd / netifrc.
+    dns_servers: str = "1.1.1.1 1.0.0.1"
     ntp: bool = True  # Stage3 GPG checks fail if the live clock is far off.
 
     # --- Handbook ch. 4: disks ---

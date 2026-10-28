@@ -21,6 +21,9 @@ encrypted_swap: false
 network_mode: dhcp
 static_iface: ""
 netifrc_iface: ""
+dns_provider: cloudflare
+dns_servers: 1.1.1.1 1.0.0.1
+static_dns: 1.1.1.1
 init_system: openrc
 install_type: desktop
 stage_level: stage3

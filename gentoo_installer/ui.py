@@ -185,6 +185,12 @@ def info(msg: str) -> None:
     print(paint("  ℹ  ", C.PURPLE) + highlight_guru(msg))
 
 
+def guru_note(msg: str) -> None:
+    """Short reason labeled guru in Gentoo purple (#54487A)."""
+    label = paint("guru", C.BOLD, C.PURPLE) if _enabled() else "guru"
+    print(f"  {label}: {paint(msg, C.PURPLE) if _enabled() else msg}")
+
+
 def ok(msg: str) -> None:
     print(paint("  ✓  ", C.GREEN, C.BOLD) + highlight_guru(msg))
 
