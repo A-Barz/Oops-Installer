@@ -28,7 +28,7 @@ https://wiki.gentoo.org/wiki/Handbook:AMD64
 - Profile, USE, binhost, git/rsync/webrsync, cpuid2cpuflags, optional LTO/hardened CFLAGS
 - Dist-kernel bin or source, firmware, microcode, dracut, optional UKI
 - GRUB, systemd-boot, rEFInd, EFI stub, Syslinux
-- NetworkManager/dhcpcd/netifrc, sshd, CUPS, chrony, syslog, cron, ZRAM, Plymouth
+- NetworkManager/dhcpcd/netifrc, sshd, CUPS, ntpsec (replaces chrony), syslog, cron, ZRAM, Plymouth
 - Users, sudo, hostname/timezone/locale/keymap
 - XFCE/Plasma/GNOME/MATE/Cinnamon/i3, browsers, Flatpak, extra packages
 - SELinux (hardened) and Secure Boot preparation flags

@@ -29,13 +29,14 @@ Read **[HOWTO.txt](HOWTO.txt)** before a real install.
 - Wired or wireless internet
 - Root privileges
 - A target disk you can **wipe** (unless you choose existing partitions)
-- Optional but recommended for stage3 GPG: Ubuntu package **`ntc`** for live-host clock sync (`sudo apt-get install -y ntc`)
+- Optional but recommended for stage3 GPG: Ubuntu package **`ntpsec`** for live-host clock sync. It must **replace chrony** (the packages conflict): `sudo apt-get remove -y chrony; sudo apt-get install -y ntpsec`
 
 ## Usage
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y python3 git ntc
+sudo apt-get remove -y chrony
+sudo apt-get install -y python3 git ntpsec
 git clone <this-repo>
 cd Oops-Installer   # or gentoo-live-installer
 sudo python3 install.py
@@ -88,7 +89,7 @@ Defaults are `InstallConfig` values unless noted. Conditional steps are marked.
 |-----|-----------------|---------|
 | Live network | `dhcp`, `wifi`, `static`, `skip` | `dhcp` if online else `wifi` |
 | Wi-Fi / static | iface, SSID/PSK or CIDR/gateway/DNS | DNS `1.1.1.1` |
-| Synchronise clock before stage3? | uses Ubuntu **`ntc`** when installed | Yes |
+| Synchronise clock before stage3? | uses Ubuntu **`ntpsec`** (must replace **chrony**) | Yes |
 
 ### 4 — Disks
 
@@ -173,7 +174,7 @@ There is no Ubuntu LTS ebuild and no fake `*-lts` package.
 | Networking stack | `networkmanager`, `dhcpcd`, `netifrc`; + `systemd-networkd` if systemd | NM on desktop |
 | Wireless tools / sshd / nftables | yes/no | Yes |
 | CUPS | yes/no | No |
-| chrony | yes/no | Yes |
+| ntpsec | yes/no — replaces chrony (do not install both) | Yes |
 | Syslog | `sysklogd`, `metalog`, `rsyslog`, `none` | `sysklogd` |
 | Cron | `cronie`, `fcron`, `none` | `cronie` |
 
@@ -315,7 +316,7 @@ Order and atoms match `catalog.CATEGORIES` (plus conditional Niri apps). There i
 
 ### Networking & remote access
 
-`net-misc/networkmanager`, `net-misc/dhcpcd`, `net-vpn/wireguard-tools`, `net-vpn/openvpn`, `net-misc/openssh`, `net-misc/chrony`, `net-misc/wget`, `net-misc/curl`, `net-misc/rsync`, `net-ftp/filezilla`, `net-im/telegram-desktop-bin`, `net-im/signal-desktop-bin`, `net-analyzer/wireshark`, `net-firewall/ufw`, `net-firewall/nftables`
+`net-misc/networkmanager`, `net-misc/dhcpcd`, `net-vpn/wireguard-tools`, `net-vpn/openvpn`, `net-misc/openssh`, `net-misc/ntpsec` (replaces chrony), `net-misc/wget`, `net-misc/curl`, `net-misc/rsync`, `net-ftp/filezilla`, `net-im/telegram-desktop-bin`, `net-im/signal-desktop-bin`, `net-analyzer/wireshark`, `net-firewall/ufw`, `net-firewall/nftables`
 
 ### Containers & virtualisation
 

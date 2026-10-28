@@ -281,13 +281,14 @@ def _network(cfg: InstallConfig) -> None:
     _ask_dns(cfg)
     cfg.ntp = ui.ask_yes_no(
         "Synchronise clock before downloading stage3? "
-        "(uses Ubuntu ntc when installed; needed for stage3 GPG checks)",
+        "(uses Ubuntu ntpsec when installed; needed for stage3 GPG checks)",
         True,
     )
     if cfg.ntp:
         ui.info(
-            "If sync tools are missing on the live USB, install Ubuntu package ntc: "
-            "sudo apt-get install -y ntc"
+            "If sync tools are missing on the live USB, install Ubuntu package ntpsec "
+            "(it must replace chrony): sudo apt-get remove -y chrony; "
+            "sudo apt-get install -y ntpsec"
         )
 
 
@@ -868,7 +869,7 @@ def _system(cfg: InstallConfig) -> None:
 
 
 def _tools(cfg: InstallConfig) -> None:
-    """Handbook: Tools — NM/dhcpcd, sshd, syslog, cron, CUPS, chrony."""
+    """Handbook: Tools — NM/dhcpcd, sshd, syslog, cron, CUPS, ntpsec."""
     ui.chapter("9", "Installing system tools", f"{HANDBOOK}/Installation/Tools")
     net_choices = [
         ("networkmanager", "NetworkManager — desktops/laptops"),
@@ -896,7 +897,10 @@ def _tools(cfg: InstallConfig) -> None:
     elif cfg.nftables:
         ui.info("The firewall drops new inbound connections. SSH is not opened.")
     cfg.cups = ui.ask_yes_no("Install CUPS printing?", False)
-    cfg.chrony = ui.ask_yes_no("Install chrony for NTP?", True)
+    cfg.ntpsec = ui.ask_yes_no(
+        "Install ntpsec for NTP? (replaces chrony — do not install both)",
+        True,
+    )
     cfg.syslog = ui.menu(
         "Syslog (OpenRC mainly; systemd uses journald)",
         [("sysklogd", "sysklogd"), ("metalog", "metalog"), ("rsyslog", "rsyslog"), ("none", "None")],

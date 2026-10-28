@@ -67,7 +67,8 @@ HOST_PACKAGES = [
     "pciutils",
     "iw",
     "wpasupplicant",
-    # Ubuntu Boot Image clock sync. Prefer the ntc package; ntpdate is a fallback.
+    # Ubuntu Boot Image clock sync. Prefer ntpsec (must replace chrony — they conflict).
+    "ntpsec",
     "ntc",
     "ntpdate",
 ]
@@ -75,8 +76,8 @@ HOST_PACKAGES = [
 # Shown when live-host NTP tools are missing or sync fails (stage3 GPG needs a sane clock).
 NTP_NTC_HINT = (
     "NTP sync tools were not found (or clock sync failed) on this Ubuntu Boot Image host. "
-    "Install the Ubuntu package ntc for time sync, then re-run the installer: "
-    "sudo apt-get install -y ntc"
+    "Install Ubuntu package ntpsec for time sync — it must replace chrony (remove chrony first): "
+    "sudo apt-get remove -y chrony; sudo apt-get install -y ntpsec"
 )
 
 
@@ -212,7 +213,7 @@ def _host_ntp_tools_present() -> bool:
     """True when the live host has at least one usable clock-sync command."""
     return any(
         shutil.which(name)
-        for name in ("ntc", "ntpdate", "chronyd", "timedatectl")
+        for name in ("ntc", "ntpdate", "ntpdig", "ntpd", "timedatectl")
     )
 
 
@@ -226,17 +227,18 @@ def sync_live_clock(cfg: InstallConfig, runner: Runner) -> bool:
     if not cfg.ntp:
         return True
     if cfg.dry_run:
-        ui.info("Dry-run: would synchronise the live clock (ntc / ntpdate / timedatectl).")
+        ui.info("Dry-run: would synchronise the live clock (ntpsec / ntc / ntpdate / timedatectl).")
         return True
     if not _host_ntp_tools_present():
         ui.warn("ntp update was not found on this live host.")
         ui.warn(NTP_NTC_HINT)
         return False
-    # Prefer ntc (Ubuntu package for this installer's host sync), then classic tools.
+    # Prefer ntpsec tools (replaces chrony), then ntc / ntpdate / timedatectl.
     script = (
-        "if command -v ntc >/dev/null 2>&1; then ntc; "
+        "if command -v ntpdig >/dev/null 2>&1; then ntpdig -s pool.ntp.org; "
+        "elif command -v ntc >/dev/null 2>&1; then ntc; "
         "elif command -v ntpdate >/dev/null 2>&1; then ntpdate -u pool.ntp.org; "
-        "elif command -v chronyd >/dev/null 2>&1; then chronyd -q 'server pool.ntp.org iburst'; "
+        "elif command -v ntpd >/dev/null 2>&1; then ntpd -gq; "
         "elif command -v timedatectl >/dev/null 2>&1; then timedatectl set-ntp true; "
         "else exit 127; fi"
     )
@@ -1998,8 +2000,9 @@ def _required_tools(cfg: InstallConfig, loaders: list[str]) -> list[tuple[str, t
         add("sys-apps/systemd", "command", "-v", "networkctl")
     if cfg.sshd:
         add("net-misc/openssh", *_service_probe(openrc, "sshd"))
-    if cfg.chrony:
-        add("net-misc/chrony", *_service_probe(openrc, "chronyd"))
+    if cfg.ntpsec:
+        # OpenRC service is ``ntp`` (not chronyd / legacy ntpd).
+        add("net-misc/ntpsec", *_service_probe(openrc, "ntp"))
     if cfg.cups:
         add("net-print/cups", *_service_probe(openrc, "cupsd", "cups"))
     if openrc and cfg.syslog != "none":
@@ -2024,11 +2027,16 @@ def _required_tool_repairs(cfg: InstallConfig, loaders: list[str]) -> str:
     """Install boot and service packages one failure at a time, before the kernel.
 
     A masked theme or a Plymouth build error used to sit in the same emerge
-    as NetworkManager, chrony, rsyslog, cronie, and zram-init. Portage then
+    as NetworkManager, ntpsec, rsyslog, cronie, and zram-init. Portage then
     aborted the whole calculation and rc-update reported every service missing.
     """
     tools = _required_tools(cfg, loaders)
     lines = ["echo '>> install tools before dracut and OpenRC services'"]
+    if cfg.ntpsec:
+        # Portage blocks chrony ↔ ntpsec; chrony must be gone for ntpsec to emerge.
+        lines.append("echo '>> ntpsec replaces chrony — removing net-misc/chrony if present'")
+        lines.append("emerge --ask=n --deselect net-misc/chrony 2>/dev/null || true")
+        lines.append("emerge --ask=n --unmerge net-misc/chrony 2>/dev/null || true")
     if tools:
         atoms = " ".join(shlex.quote(atom) for atom, _test in tools)
         lines.append(
@@ -2075,9 +2083,9 @@ def _final_tool_checks(cfg: InstallConfig, loaders: list[str]) -> str:
                 "NetworkManager",
             )
         )
-    if cfg.chrony:
+    if cfg.ntpsec:
         checks.append(
-            ("[ -e /etc/init.d/chronyd ]" if openrc else _systemd_unit_test("chronyd"), "chronyd")
+            ("[ -e /etc/init.d/ntp ]" if openrc else _systemd_unit_test("ntp"), "ntp")
         )
     if openrc and cfg.syslog != "none":
         checks.append((f"[ -e /etc/init.d/{cfg.syslog} ]", cfg.syslog))
@@ -3444,8 +3452,8 @@ def _service_stack_atoms(cfg: InstallConfig) -> list[str]:
         atoms.append("net-misc/openssh")
     if cfg.cups:
         atoms.append("net-print/cups")
-    if cfg.chrony:
-        atoms.append("net-misc/chrony")
+    if cfg.ntpsec:
+        atoms.append("net-misc/ntpsec")
     if cfg.init_system == "openrc":
         if cfg.syslog != "none":
             atoms.append(f"app-admin/{cfg.syslog}")
@@ -3810,7 +3818,7 @@ def _keyword_text(cfg: InstallConfig) -> str:
     """Accept ~arch for every package the installer will emerge.
 
     Skipping this leaves ~amd64/~arm64 packages masked and abort the emerge
-    calculation (NetworkManager, chrony, overlay kernels, …). When the user
+    calculation (NetworkManager, ntpsec, overlay kernels, …). When the user
     already accepted testing keywords globally, nothing extra is needed here
     except the Gentoo LTS sources pin (stable keywords only).
     """
@@ -3983,8 +3991,8 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
         net_pkgs.append("net-misc/openssh")
     if cfg.cups:
         net_pkgs.append("net-print/cups")
-    if cfg.chrony:
-        net_pkgs.append("net-misc/chrony")
+    if cfg.ntpsec:
+        net_pkgs.append("net-misc/ntpsec")
     if cfg.init_system == "openrc":
         if cfg.syslog != "none":
             net_pkgs.append(f"app-admin/{cfg.syslog}")
@@ -4109,9 +4117,10 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
     if cfg.nftables:
         openrc_services.append("nftables")
         systemd_services.append("nftables")
-    if cfg.chrony:
-        openrc_services.append("chronyd")
-        systemd_services.append("chronyd")
+    if cfg.ntpsec:
+        # NTPsec OpenRC/systemd unit is ``ntp`` (replaces chronyd).
+        openrc_services.append("ntp")
+        systemd_services.append("ntp")
     if cfg.cups:
         openrc_services.append("cupsd")
         systemd_services.append("cups")

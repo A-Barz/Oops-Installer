@@ -142,7 +142,8 @@ class InstallConfig:
     cups: bool = False
     syslog: str = "sysklogd"  # Ignored on systemd (journald)
     cron: str = "cronie"  # Ignored on systemd (timers)
-    chrony: bool = True
+    # net-misc/ntpsec for NTP. Replaces chrony (the two conflict; do not install both).
+    ntpsec: bool = True
     zram: bool = True
     nftables: bool = True  # Basic inbound filter; SSH is opened only when sshd is enabled.
     fstrim: bool = False  # Weekly trim when the target disk is non-rotational.
@@ -210,6 +211,9 @@ class InstallConfig:
         int_fields = {"esp_size_mib", "boot_size_mib", "swap_size_gib", "makeopts_jobs", "uefi_bits"}
         cleaned: dict[str, Any] = {}
         for k, v in data.items():
+            # Older profiles used chrony; ntpsec replaces it (packages conflict).
+            if k == "chrony" and "ntpsec" not in data:
+                k = "ntpsec"
             if k not in known:
                 continue
             if k in SECRET_FIELDS and v in {"***", None}:
