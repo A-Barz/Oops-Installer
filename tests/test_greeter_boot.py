@@ -126,8 +126,62 @@ class GreeterResolutionTests(unittest.TestCase):
         cfg = _base_cfg(window_managers=["gui-wm/niri"], display_manager="greetd")
         text = _final_tool_checks(cfg, ["grub"])
         self.assertIn("greeter check failed", text)
-        self.assertIn("greetd in default runlevel", text)
+        self.assertIn("display-manager in default runlevel", text)
+        self.assertIn("DISPLAYMANAGER=greetd", text)
+        self.assertIn("greetd system user", text)
+        self.assertIn("gtkgreet", text)
+        self.assertIn("labwc", text)
         self.assertIn("session .desktop", text)
+
+    def test_niri_openrc_queues_guru_gtkgreet_labwc_and_greetd_user(self) -> None:
+        from gentoo_installer.execute import (
+            _atoms_to_unmask,
+            _display_manager_tools,
+            _overlay_script,
+            render_chroot_script,
+        )
+
+        cfg = _base_cfg(
+            window_managers=["gui-wm/niri"],
+            display_manager="greetd",
+            init_system="openrc",
+            profile="default/linux/amd64/23.0/desktop",
+        )
+        tools = {atom for atom, _ in _display_manager_tools(cfg)}
+        self.assertIn("gui-libs/greetd", tools)
+        self.assertIn("gui-apps/gtkgreet", tools)
+        self.assertIn("gui-wm/labwc", tools)
+        self.assertIn("acct-user/greetd", tools)
+        self.assertIn("acct-group/greetd", tools)
+        self.assertIn("gui-libs/display-manager-init", tools)
+        unmask = _atoms_to_unmask(cfg)
+        self.assertIn("gui-apps/gtkgreet", unmask)
+        self.assertIn("gui-wm/labwc", unmask)
+        self.assertIn("gui-libs/greetd", unmask)
+        overlay = _overlay_script(cfg)
+        self.assertIn("guru", overlay)
+        self.assertIn("exit 1", overlay)
+        script = render_chroot_script(cfg, {"root": "/dev/vda2", "esp": "/dev/vda1"})
+        self.assertIn("valid Portage profile could not be set", script)
+        self.assertIn("ensure greetd system user", script)
+        self.assertIn("DISPLAYMANAGER=\"greetd\"", script)
+        self.assertIn("required package missing after emerge: gui-apps/gtkgreet", script)
+        self.assertIn("rc-update add display-manager", script)
+        self.assertNotIn("rc-update add greetd", script)
+        self.assertEqual(greeter_boot_failures(cfg), [])
+
+    def test_systemd_greetd_still_enables_greetd_unit(self) -> None:
+        cfg = _base_cfg(
+            window_managers=["gui-wm/sway"],
+            display_manager="greetd",
+            init_system="systemd",
+        )
+        script = _display_manager_script(cfg)
+        self.assertIn("graphical.target", script)
+        text = _final_tool_checks(cfg, ["grub"])
+        self.assertIn("greetd systemd unit", text)
+        self.assertNotIn("display-manager in default runlevel", text)
+        self.assertEqual(greeter_boot_failures(cfg), [])
 
 
 class RandomComboGreeterTests(unittest.TestCase):

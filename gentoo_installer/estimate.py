@@ -2,7 +2,7 @@
 
 The number is a planning figure for a typical home link and a desktop-stage
 binhost. Source builds and a few heavy packages stretch it. It is not a promise.
-The install percent uses the same minute split.
+Shown before the install starts; there is no live percent bar during emerge.
 """
 
 from __future__ import annotations
@@ -160,12 +160,11 @@ def _scale_base(cfg: InstallConfig, raw: int) -> int:
 
 @dataclass(frozen=True)
 class ProgressPlan:
-    """Minute slices shared by the spoken estimate and the install percent.
+    """Minute slices that add up to the spoken pre-install estimate.
 
     `atoms` includes the kernel. `alongside` is shell, compositor, and
-    Plymouth time that has no Portage counter of its own; the bar credits
-    it in proportion to the atoms, so the chroot's last line has no leftover
-    slice to jump.
+    Plymouth time folded into the total. Kept as named slices so the estimate
+    stays explainable; nothing here drives a live progress UI.
     """
 
     early: int
@@ -183,12 +182,7 @@ class ProgressPlan:
 
 
 def progress_plan(cfg: InstallConfig) -> ProgressPlan:
-    """Split one install into early, @world, and later-package minutes.
-
-    Later packages use the same per-atom minutes as the spoken estimate.
-    The percent credits each of those packages from that emerge's own
-    finished/total counter.
-    """
+    """Split one install into early, @world, and later-package minutes."""
     early_raw = _early_raw_minutes(cfg)
     kernel_raw = _kernel_raw_minutes(cfg)
     plymouth_raw = 12 if cfg.plymouth else 0

@@ -378,7 +378,10 @@ def _disks(cfg: InstallConfig) -> None:
         "Disk layout (merged from oddlama, GForge, l0rdg3x, handbook)",
         [
             ("handbook", "Handbook default: ESP/boot + swap + root"),
-            ("btrfs-subvols", "GPT + Btrfs subvolumes @ @home @log @cache @tmp @swap"),
+            (
+                "btrfs-subvols",
+                "GPT + Btrfs subvolumes (@ @home @log @cache @tmp + @swap mount for a swapfile)",
+            ),
             ("lvm", "LVM: ESP + PV with root and optional swap LVs"),
             ("lvm-luks", "LVM-on-LUKS (ESP unencrypted)"),
             ("mdraid1", "Software RAID1 of two disks, then handbook layout"),
@@ -419,21 +422,49 @@ def _disks(cfg: InstallConfig) -> None:
             "ext4" if cfg.layout != "btrfs-subvols" else "btrfs",
         )
 
-    cfg.swap_mode = ui.menu(
-        "Swap",
-        [
-            ("partition", "Dedicated swap partition (handbook)"),
-            ("file", "Swap file on the root filesystem"),
-            ("zram", "ZRAM only"),
-            ("both", "Swap partition/file + ZRAM"),
-            ("none", "No swap"),
-        ],
-        "partition",
-    )
+    # btrfs-subvols creates @swap (nodatacow, mounted at /swap) but does not
+    # enable swap by itself — the user still picks file / partition / zram / none.
+    if cfg.layout == "btrfs-subvols":
+        ui.info(
+            "Btrfs @swap is only a nodatacow subvolume at /swap for a swap *file*. "
+            "It is not swap yet. Pick how (or whether) this install uses swap/ZRAM."
+        )
+        cfg.swap_mode = ui.menu(
+            "Swap (independent of Btrfs subvolumes)",
+            [
+                ("file", "Swap file on @swap (/swap/swapfile) — matches this layout"),
+                ("partition", "Dedicated swap partition (extra GPT partition)"),
+                ("zram", "ZRAM only (compressed RAM; no disk swap)"),
+                ("both", "Swap file on @swap + ZRAM"),
+                ("none", "No swap and no ZRAM"),
+            ],
+            "file",
+        )
+    else:
+        cfg.swap_mode = ui.menu(
+            "Swap",
+            [
+                ("partition", "Dedicated swap partition (handbook)"),
+                ("file", "Swap file on the root filesystem"),
+                ("zram", "ZRAM only"),
+                ("both", "Swap partition/file + ZRAM"),
+                ("none", "No swap"),
+            ],
+            "partition",
+        )
     if cfg.swap_mode in {"partition", "file", "both"}:
         suggested = max(2, min(8, detect.mem_gib()))
         cfg.swap_size_gib = int(ui.prompt("Swap size in GiB", str(suggested)))
-    cfg.zram = cfg.swap_mode in {"zram", "both"} or ui.ask_yes_no("Also configure ZRAM?", cfg.swap_mode != "none")
+    if cfg.swap_mode in {"zram", "both"}:
+        cfg.zram = True
+    elif cfg.swap_mode == "none":
+        cfg.zram = False
+    else:
+        # partition / file — ZRAM is an optional extra, not implied by disk layout.
+        cfg.zram = ui.ask_yes_no(
+            "Also configure ZRAM (compressed RAM swap, independent of disk swap)?",
+            False if cfg.layout == "btrfs-subvols" else cfg.swap_mode != "none",
+        )
 
     ui.info("Set the console keymap before any passphrase. A LUKS passphrase is typed in this layout.")
     cfg.keymap = ui.prompt("Console keymap (e.g. us, uk, de, fr)", cfg.keymap or "us")

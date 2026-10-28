@@ -117,11 +117,11 @@ class Runner:
         return proc
 
     def run_live(self, argv: Sequence[str], on_line, check: bool = True) -> subprocess.CompletedProcess:
-        """Run a command on a pseudo-terminal and pass each output line to on_line.
+        """Run a command on a pseudo-terminal and stream output live.
 
-        Emerge only line-buffers when stdout is a TTY. A pipe would hold the
-        "Jobs: N of M" lines until the buffer filled, so the percent would
-        sit still and then jump. If a pty is not available, fall back to run().
+        Emerge only line-buffers when stdout is a TTY. A pipe would hold output
+        until the buffer filled. If a pty is not available, fall back to run().
+        on_line is optional bookkeeping; there is no percent / sticky progress UI.
         """
         pretty = " ".join(argv)
         ui.step(pretty)
@@ -131,7 +131,7 @@ class Runner:
         try:
             return self._run_pty(list(argv), on_line, check)
         except (ImportError, _PtyUnavailable) as exc:
-            ui.warn(f"No pseudo-terminal ({exc}); the install percent will not follow emerge.")
+            ui.warn(f"No pseudo-terminal ({exc}); streaming emerge via a pipe fallback.")
             return self.run(argv, check=check)
 
     def _portage_env(self, extra: dict | None = None) -> dict:
