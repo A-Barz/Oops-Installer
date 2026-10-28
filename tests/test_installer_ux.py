@@ -59,6 +59,13 @@ class AlreadySelectedPackageTests(unittest.TestCase):
         locked = _packages_locked_from_earlier_steps(cfg)
         self.assertIn("gui-libs/greetd", locked)
         self.assertIn("gui-apps/gtkgreet", locked)
+        self.assertIn("gui-wm/labwc", locked)
+        # Display-manager category must not re-offer greeter stack.
+        dm_rows = next(pkgs for key, _t, pkgs in catalog.CATEGORIES if key == "display-managers")
+        visible = catalog.without_already_selected(dm_rows, locked)
+        visible_atoms = {atom for atom, _ in visible}
+        self.assertNotIn("gui-libs/greetd", visible_atoms)
+        self.assertNotIn("gui-apps/gtkgreet", visible_atoms)
 
     def test_overlapping_category_rows_can_be_hidden_after_claim(self) -> None:
         wayland = next(pkgs for key, _title, pkgs in catalog.CATEGORIES if key == "wayland-common")

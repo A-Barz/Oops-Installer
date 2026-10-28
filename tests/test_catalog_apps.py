@@ -94,6 +94,14 @@ class EditorsIdesTests(unittest.TestCase):
         self.assertIn("app-editors/helix", atoms)
         self.assertIn("app-editors/neovim", atoms)
         self.assertNotIn("flatpak-app/md.obsidian.Obsidian", atoms)
+        # Sublime + Pulsar stay near the top so they are not buried off-screen.
+        ordered = []
+        for cat_key, _title, rows in catalog.CATEGORIES:
+            if cat_key == "editors":
+                ordered = [atom for atom, _ in rows]
+                break
+        self.assertEqual(ordered[0], "app-editors/sublime-text")
+        self.assertEqual(ordered[1], "flatpak-app/dev.pulsar_edit.Pulsar")
 
     def test_ides_include_vscode_zed_without_jetbrains_or_geany(self) -> None:
         atoms = self._category_atoms("ides")

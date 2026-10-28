@@ -303,7 +303,66 @@ def _disks(cfg: InstallConfig) -> None:
     _warn_small_disk(cfg)
     _note_ssd_trim(cfg)
 
-    cfg.wipe_disk = ui.ask_yes_no("Wipe this disk and create a new partition table?", True)
+    cfg.wipe_mode = ui.menu(
+        "What should be wiped before install?",
+        [
+            ("disk", "Entire disk — new partition table (recommended)"),
+            ("partitions", "Selected partitions only (pick one, several, or all) — then install"),
+            ("none", "Nothing — keep data; use existing partitions as-is"),
+        ],
+        "disk" if cfg.wipe_disk else ("partitions" if getattr(cfg, "wipe_partitions", None) else "none"),
+    )
+    cfg.wipe_partitions = []
+    if cfg.wipe_mode == "disk":
+        cfg.wipe_disk = True
+        ui.info(f"The whole disk {cfg.target_disk} will be wiped and repartitioned.")
+    elif cfg.wipe_mode == "partitions":
+        cfg.wipe_disk = False
+        disk = cfg.target_disk.rstrip("/")
+        part_rows: list[tuple[str, str]] = []
+        for p in detect.list_partitions():
+            path = str(p.get("path") or "")
+            if not path.startswith("/dev/"):
+                continue
+            parent = str(p.get("disk") or "") or (detect.parent_block_device(path) or "")
+            if parent != disk and not path.startswith(disk + "p") and not (
+                path.startswith(disk) and path != disk and not disk[-1:].isdigit()
+            ):
+                continue
+            fs = p.get("fstype") or "unknown"
+            size = p.get("size") or "?"
+            label = p.get("label") or p.get("parttypename") or ""
+            tag = f"{size}  {fs}"
+            if label:
+                tag += f"  {label}"
+            part_rows.append((path, tag))
+        if not part_rows:
+            ui.warn(
+                "No partitions listed on that disk. Type paths to wipe "
+                "(space-separated), or choose entire-disk wipe instead."
+            )
+            typed = ui.prompt("Partition paths to wipe (empty = none)", "")
+            cfg.wipe_partitions = typed.split() if typed.strip() else []
+        else:
+            ui.info(
+                "Space toggles each partition. Select all wipes every listed "
+                "partition on this disk. Enter continues."
+            )
+            cfg.wipe_partitions = ui.paged_checklist(
+                f"Partitions to wipe on {disk}",
+                part_rows,
+                selected=[],
+                page_size=14,
+                select_all=True,
+            )
+            if not cfg.wipe_partitions:
+                ui.warn("No partitions selected — nothing will be wiped before install.")
+        if cfg.wipe_partitions:
+            ui.ok("Will wipe: " + ", ".join(cfg.wipe_partitions))
+    else:
+        cfg.wipe_disk = False
+        ui.info("No wipe. You must point the installer at partitions that already exist.")
+
     if cfg.firmware == "uefi":
         cfg.partition_table = "gpt"
         ui.info("UEFI selected — GPT will be used (handbook).")
@@ -314,6 +373,7 @@ def _disks(cfg: InstallConfig) -> None:
             "mbr",
         )
 
+    layout_default = "existing" if cfg.wipe_mode in {"partitions", "none"} else "handbook"
     cfg.layout = ui.menu(
         "Disk layout (merged from oddlama, GForge, l0rdg3x, handbook)",
         [
@@ -323,9 +383,9 @@ def _disks(cfg: InstallConfig) -> None:
             ("lvm-luks", "LVM-on-LUKS (ESP unencrypted)"),
             ("mdraid1", "Software RAID1 of two disks, then handbook layout"),
             ("zfs", "ZFS root pool (needs zfsutils-linux on Ubuntu)"),
-            ("existing", "Use partitions you already created"),
+            ("existing", "Use partitions you already created (or wiped above)"),
         ],
-        "handbook",
+        layout_default,
     )
     if cfg.layout == "mdraid1":
         others = [c for c in choices if c[0] != cfg.target_disk]
@@ -333,7 +393,10 @@ def _disks(cfg: InstallConfig) -> None:
             cfg.extra_raid_disk = ui.menu("Second RAID1 disk", others, others[0][0])
         else:
             cfg.extra_raid_disk = ui.prompt("Second RAID1 disk", "/dev/sdb")
-    if cfg.layout == "existing":
+    if cfg.layout == "existing" or cfg.wipe_mode in {"partitions", "none"}:
+        if cfg.layout != "existing" and cfg.wipe_mode != "disk":
+            ui.info("Selected-partition / no-wipe installs use your existing partition layout.")
+            cfg.layout = "existing"
         cfg.wipe_disk = False
         cfg.existing_esp = ui.prompt("ESP / boot partition", cfg.existing_esp or "/dev/sda1")
         cfg.existing_root = ui.prompt("Root partition (or LUKS container)", cfg.existing_root or "/dev/sda3")
@@ -538,6 +601,7 @@ def _base(cfg: InstallConfig) -> None:
         ui.info(f"{flag}: {detect.hardware_note(flag)}")
     ui.info("USE flags control optional features inside packages (audio, GUI toolkits, networking).")
     ui.info("The flag name is the value written to make.conf. A detected device is shown beside alsa, wifi, and bluetooth.")
+    ui.info("Pre-ticked flags match this machine and the init/desktop choices you already made.")
     extra = ui.checklist(
         "Global USE flags (handbook ch. 6) — Space toggles, Enter continues",
         _use_rows(),
@@ -548,6 +612,12 @@ def _base(cfg: InstallConfig) -> None:
         extra = list(dict.fromkeys(extra + typed.split()))
     cfg.extra_use = extra
     cfg.use_flags = " ".join(extra)
+    # Always show the applied set — testers could not see which flags were chosen.
+    if cfg.extra_use:
+        ui.ok("USE flags that will be written to make.conf:")
+        ui.info("  " + " ".join(cfg.extra_use))
+    else:
+        ui.warn("No global USE flags were selected.")
     cfg.lto = ui.ask_yes_no("Enable LTO in CFLAGS (experimental, slower compiles)?", False)
     cfg.hardened_flags = cfg.stage_variant == "hardened" or ui.ask_yes_no("Add hardened CFLAGS / USE (pie ssp)?", False)
     ui.info(
@@ -986,22 +1056,25 @@ def _finalize(cfg: InstallConfig) -> None:
 
 def _ask_nonfree_codecs(cfg: InstallConfig) -> None:
     """Offer proprietary codecs only after an explicit license acceptance."""
+    print()
+    ui.info("—— Proprietary / non-free multimedia codecs (optional license step) ——")
     ui.info(
-        "Proprietary multimedia codecs (H.264/AAC and related GStreamer/FFmpeg pieces) "
-        "are optional. They are not installed unless you accept their licenses."
+        "H.264/AAC and related GStreamer/FFmpeg pieces are optional. "
+        "They are not installed unless you accept their licenses here."
     )
+    ui.info("Packages if accepted: " + ", ".join(catalog.nonfree_codec_atoms()))
     if not ui.ask_yes_no(
-        "Do you want the option to install proprietary / non-free multimedia codecs?",
+        "Install proprietary / non-free multimedia codecs? (requires license accept next)",
         False,
     ):
         cfg.nonfree_codecs = False
+        ui.info("Proprietary codecs skipped.")
         return
     ui.warn(
         "These packages include patented and proprietary codecs (including Fraunhofer FDK AAC). "
         "By continuing you confirm you accept those licenses and that using them is legal "
         "where you live."
     )
-    ui.info("Packages: " + ", ".join(catalog.nonfree_codec_atoms()))
     if ui.ask_yes_no(
         "I accept the licenses for proprietary multimedia codecs and want them installed.",
         False,
@@ -1038,34 +1111,44 @@ def _packages_locked_from_earlier_steps(cfg: InstallConfig) -> set[str]:
         else:
             locked.add("gui-apps/gtkgreet")
             locked.add("gui-wm/labwc")
+        # Entire greetd stack — do not ask again in display-managers.
+        locked.update({"gui-apps/tuigreet", "x11-misc/lightdm", "x11-misc/sddm", "x11-misc/slim"})
     locked.update(catalog.required_browser_atoms())
+    # Bare firefox-bin / chrome aliases also stay hidden if a list still has them.
+    locked.update({"www-client/firefox-bin", "www-client/google-chrome", "www-client/firefox"})
     return locked
 
 
 def _packages(cfg: InstallConfig) -> None:
-    """Suckless tools, shared Wayland utilities, and popular apps."""
+    """Suckless tools, shared Wayland utilities, and popular apps.
+
+    Categories advance linearly with Enter = continue (no category menu /
+    “apply” / Back loop that broke package selection).
+    """
     ui.chapter(
         "12",
         "Suckless tools and popular apps",
         "https://packages.gentoo.org/",
     )
-    ui.info("Compositor requirements are already queued. This list is optional apps.")
+    ui.info("Compositor requirements are already queued. This chapter is optional apps.")
     ui.info(
-        "Google Chrome and Firefox ESR (www-client/firefox-bin:esr) are always installed. "
-        "Bonus browsers are optional in the browsers category."
+        "Browsers: only Firefox ESR and Google Chrome — both are always installed "
+        "(no other browsers in that list)."
     )
     ui.info(
         "Flatpak is suggested for most desktop apps (Flathub). Tick sys-apps/flatpak or a "
-        "flatpak-app/* row, or install apps from Flathub after first boot."
+        "flatpak-app/* row (Pulsar, etc.), or install from Flathub after first boot."
     )
-    ui.info("Packages already chosen earlier (compositors, deps, browsers, dotfiles) stay off later lists.")
-    ui.info("GURU packages are not in these lists. Noctalia and DMS were chosen in the previous chapter.")
-    ui.info("Search with /text  ·  n/p pages  ·  toggle numbers  ·  0 when a list is finished.")
+    ui.info(
+        "Packages already chosen earlier (compositors, greetd, deps, browsers, dotfiles) "
+        "are hidden so you are not asked twice."
+    )
+    ui.info("Each category: Space toggles, Enter continues to the next category.")
     ui.info("The top row, Select all, ticks every package in that section.")
 
     if ui.ask_yes_no("Enable extra Portage overlays (eselect repository)?", True):
         cfg.overlays = ui.paged_checklist(
-            "Overlays from overlays.gentoo.org / eselect repository",
+            "Overlays from overlays.gentoo.org / eselect repository — Enter continues",
             catalog.overlay_choices(),
             selected=cfg.overlays,
             page_size=14,
@@ -1081,57 +1164,57 @@ def _packages(cfg: InstallConfig) -> None:
         for atom in catalog.niri_preselected(cfg.shell):
             if atom not in picked and atom not in locked:
                 picked.append(atom)
-    # Atoms claimed by a category stay hidden in every later category, but remain
-    # editable when that same category is opened again.
-    claimed_by_category: dict[str, set[str]] = {}
+
+    # Browsers step: show the mandatory pair only (no checklist of extras).
+    ui.info("—— Browsers (mandatory pair; nothing else in this list) ——")
+    for atom in catalog.required_browser_atoms():
+        ui.ok(f"  {atom}")
+        if atom not in picked:
+            picked.append(atom)
+
+    # Linear category walk. Enter finishes one list and continues to the next.
+    skip = {
+        "window-managers",
+        "desktop-environments",
+        "wayland-utils",
+        "browsers",  # handled above — Firefox ESR + Chrome only
+        "display-managers",  # greetd (or none) already decided in chapter 11
+    }
+    steps: list[tuple[str, str, list[tuple[str, str]]]] = []
     if niri_rows:
-        niri_atoms = {atom for atom, _ in niri_rows}
-        claimed_by_category["niri-apps"] = {atom for atom in picked if atom in niri_atoms}
-        if cfg.shell == "none" and not getattr(cfg, "_software_loaded", False):
-            ui.info("Niri apps are preselected. Untick any you do not want, including with Select all.")
-        elif cfg.shell == "none":
-            ui.info("Niri apps from the saved profile stay ticked. Untick any you do not want.")
-        else:
-            ui.info("The shell covers the bar and launcher. Niri apps are listed if you still want them.")
-    if ui.ask_yes_no("Browse suckless tools, shared Wayland utilities, and popular apps?", True):
-        hidden = {"window-managers", "desktop-environments", "wayland-utils"}
-        cats = [(key, title) for key, title, _ in catalog.CATEGORIES if key not in hidden]
-        if niri_rows:
-            cats.insert(0, ("niri-apps", "Niri"))
-        cats.append(("done", "Done with categories"))
-        # Open on the Niri list once, so the preselected rows are visible.
-        # After that, Enter lands on Done instead of reopening the same list.
-        menu_default = "niri-apps" if niri_rows else "done"
-        while True:
-            choice = ui.menu("Package category", cats, menu_default)
-            menu_default = "done"
-            if choice == "done":
-                break
-            if choice == "niri-apps":
-                packages = niri_rows
-                title = "Niri"
-            else:
-                packages = next(pkgs for key, _title, pkgs in catalog.CATEGORIES if key == choice)
-                title = next(title for key, title, _ in catalog.CATEGORIES if key == choice)
-            hide = set(locked)
-            for cat, atoms in claimed_by_category.items():
-                if cat != choice:
-                    hide |= atoms
-            visible = catalog.without_already_selected(packages, hide)
-            if not visible:
-                ui.info(f"{title}: every package here was already chosen earlier.")
-                continue
-            selected = ui.paged_checklist(
-                title, visible, selected=picked, page_size=14, select_all=True
-            )
-            visible_atoms = {atom for atom, _ in visible}
-            for atom in selected:
-                if atom not in picked:
-                    picked.append(atom)
-            for atom in list(picked):
-                if atom in visible_atoms and atom not in selected:
-                    picked.remove(atom)
-            claimed_by_category[choice] = set(selected)
+        steps.append(("niri-apps", "Niri apps", niri_rows))
+        if cfg.shell == "none":
+            ui.info("Niri apps are preselected when you open that list. Untick any you do not want.")
+    for key, title, pkgs in catalog.CATEGORIES:
+        if key in skip:
+            continue
+        steps.append((key, title, pkgs))
+
+    claimed: set[str] = set()
+    for index, (key, title, packages) in enumerate(steps, start=1):
+        hide = set(locked) | claimed
+        visible = catalog.without_already_selected(packages, hide)
+        ui.info(f"Category {index}/{len(steps)}: {title}")
+        if not visible:
+            ui.info(f"{title}: every package here was already chosen earlier — continuing.")
+            continue
+        if key == "editors":
+            ui.info("Editors include Sublime Text and Pulsar (Atom’s Flatpak successor) near the top.")
+        selected = ui.paged_checklist(
+            f"{title} — Enter continues to the next category",
+            visible,
+            selected=picked,
+            page_size=14,
+            select_all=True,
+        )
+        visible_atoms = {atom for atom, _ in visible}
+        for atom in selected:
+            if atom not in picked:
+                picked.append(atom)
+        for atom in list(picked):
+            if atom in visible_atoms and atom not in selected:
+                picked.remove(atom)
+        claimed.update(visible_atoms)
 
     extra = ui.prompt("Additional emerge atoms (space-separated, e.g. app-misc/jq media-gfx/feh)", "")
     if extra.strip():
@@ -1182,8 +1265,12 @@ def _packages(cfg: InstallConfig) -> None:
     if cfg.window_managers or any("wayland" in a or "gui-wm/" in a for a in cfg.extra_packages):
         if "wayland" not in cfg.extra_use:
             cfg.extra_use.append("wayland")
+            if "wayland" not in (cfg.use_flags or "").split():
+                cfg.use_flags = (cfg.use_flags + " wayland").strip()
     if cfg.overlays:
         ui.ok("Overlays that will be enabled: " + ", ".join(cfg.overlays))
+    if cfg.extra_use:
+        ui.ok("USE flags for make.conf: " + " ".join(cfg.extra_use))
     ui.ok(f"{len(cfg.extra_packages)} package atoms queued for emerge")
 
 
@@ -1254,6 +1341,9 @@ def _wipe_devices(cfg: InstallConfig) -> list[str]:
     """Disks and partitions this commit will destroy. Empty on resume."""
     if cfg.resume:
         return []
+    if getattr(cfg, "wipe_partitions", None):
+        # Explicit partition wipe list wins for the confirmation banner.
+        return list(dict.fromkeys(cfg.wipe_partitions))
     if cfg.layout == "existing":
         named = [cfg.existing_esp, cfg.existing_boot, cfg.existing_root, cfg.existing_swap]
         return [path for path in named if path]
@@ -1350,14 +1440,25 @@ def _review(cfg: InstallConfig) -> None:
     rows = [
         ("Firmware", cfg.firmware),
         ("Disk", cfg.target_disk),
-        ("Wipe disk", str(cfg.wipe_disk)),
+        (
+            "Wipe",
+            (
+                f"entire disk ({cfg.target_disk})"
+                if cfg.wipe_disk
+                else (
+                    "partitions: " + ", ".join(cfg.wipe_partitions)
+                    if getattr(cfg, "wipe_partitions", None)
+                    else "none"
+                )
+            ),
+        ),
+        ("USE flags", " ".join(cfg.extra_use) or cfg.use_flags or "(none)"),
         ("Layout", cfg.layout),
         ("Filesystem", cfg.filesystem),
         ("LUKS", str(cfg.luks) + (" + encrypted swap" if cfg.encrypted_swap else "")),
         ("Swap", f"{cfg.swap_mode} {cfg.swap_size_gib}G"),
         ("Init", cfg.init_system),
         ("Stage", f"{cfg.stage_level}/{cfg.install_type}/{cfg.stage_variant}"),
-        ("USE", " ".join(cfg.extra_use) or cfg.use_flags or "dist-kernel"),
         (
             "Hardware",
             "alsa "

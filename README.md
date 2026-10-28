@@ -57,8 +57,12 @@ Boot Ubuntu live, open a terminal:
 ```bash
 sudo apt-get update
 sudo apt-get install -y python3 git
-git clone <this-repo> 
-cd gentoo-live-installer
+git clone <this-repo>
+cd gentoo-live-installer   # or Oops-Installer
+# Use the PR branch (main still shows the old “Ubuntu XFCE” banner / rev 44):
+git fetch origin
+git checkout cursor/installer-ux-package-picker-cd99
+# Banner must say “Ubuntu Boot Image” and rev ≥ 51
 sudo python3 install.py
 ```
 

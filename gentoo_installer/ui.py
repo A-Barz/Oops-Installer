@@ -102,7 +102,9 @@ def banner() -> None:
     print(paint("║" + f"GENTOO LINUX INSTALLER  ·  {rev}".center(w - 2) + "║", C.BOLD, C.GREEN))
     for art in _gentoo_ascii():
         print(paint("║", C.PURPLE) + paint(art.center(w - 2), C.BOLD, C.GREEN) + paint("║", C.PURPLE))
-    print(paint("║" + "Ubuntu Boot Image live  →  disk".center(w - 2) + "║", C.GREEN))
+    # Never say XFCE here — the host is a generic Ubuntu Boot Image / Ubuntu image.
+    print(paint("║" + "Host: Ubuntu Boot Image (Ubuntu image)".center(w - 2) + "║", C.BOLD, C.GREEN))
+    print(paint("║" + "Ubuntu Boot Image live  →  Gentoo disk".center(w - 2) + "║", C.GREEN))
     print(paint("║" + "Handbook-ordered  ·  wiki.gentoo.org".center(w - 2) + "║", C.PURPLE))
     print(paint("╚" + line + "╝", C.BOLD, C.PURPLE))
     print()
@@ -454,7 +456,11 @@ class InstallProgress:
 
     def _pin_header(self) -> None:
         """Reserve the top two rows; emerge output scrolls underneath."""
+        if os.environ.get("NO_SCROLL_PROGRESS"):
+            self._pinned = False
+            return
         if not sys.stdout.isatty():
+            self._pinned = False
             return
         try:
             rows = max(_STATUS_ROWS + 4, shutil.get_terminal_size((100, 24)).lines)
@@ -463,6 +469,15 @@ class InstallProgress:
                 sys.stdout.write(f"\033[{_STATUS_ROWS + 1};1H")
                 sys.stdout.flush()
             self._pinned = True
+            # Visible proof the sticky bar is active (users reported it “missing”).
+            print(
+                paint(
+                    "  Progress: sticky bar at the top (percent, ETA, emerge Jobs).",
+                    C.BOLD,
+                    C.GREEN,
+                ),
+                flush=True,
+            )
         except Exception:
             self._pinned = False
 
@@ -481,19 +496,23 @@ class InstallProgress:
         self._pinned = False
 
     def _draw_status(self, bar: str, detail: str) -> None:
-        cols = width()
-        # Strip ANSI when truncating length is hard; keep full colour when it fits.
         with OUTPUT_LOCK:
             if self._pinned:
-                sys.stdout.write("\033[s")
-                sys.stdout.write(f"\033[1;1H\033[2K{bar}")
-                sys.stdout.write(f"\033[2;1H\033[2K{detail}")
-                sys.stdout.write("\033[u")
-                sys.stdout.flush()
-            else:
-                # Non-TTY / no pin: print a compact status line so progress is still visible.
-                print(bar, flush=True)
-                print(detail, flush=True)
+                try:
+                    rows = max(_STATUS_ROWS + 4, shutil.get_terminal_size((100, 24)).lines)
+                    # Re-assert the scroll region — some emerge output resets it.
+                    sys.stdout.write(f"\033[{_STATUS_ROWS + 1};{rows}r")
+                    sys.stdout.write("\033[s")
+                    sys.stdout.write(f"\033[1;1H\033[2K{bar}")
+                    sys.stdout.write(f"\033[2;1H\033[2K{detail}")
+                    sys.stdout.write("\033[u")
+                    sys.stdout.flush()
+                    return
+                except Exception:
+                    self._pinned = False
+            # Fallback: print status lines so the bar is never invisible.
+            print(bar, flush=True)
+            print(detail, flush=True)
 
     def _loop(self) -> None:
         # Refresh often enough that the Jobs countdown and ETA stay live.
@@ -840,7 +859,9 @@ def paged_checklist(
             view = filtered[start : start + page_size]
             if view and cursor >= 0:
                 cursor = min(cursor, len(view) - 1)
-            hint = "  ↑↓ move   Space toggle   Enter done   ←→ page   / search   a page   c clear"
+            hint = (
+                "  ↑↓ move   Space toggle   Enter — continue   ←→ page   / search   a page   c clear"
+            )
             if select_all:
                 hint += "   top row: whole section"
             lines = [

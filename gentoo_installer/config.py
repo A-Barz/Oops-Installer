@@ -59,6 +59,10 @@ class InstallConfig:
     firmware: str = "uefi"  # uefi | bios — drives ESP vs BIOS-boot partition
     uefi_bits: int = 64  # 64, 32 (IA32/mixed mode), or 0 when firmware is BIOS
     wipe_disk: bool = True
+    # disk = whole target; partitions = wipe_partitions only; none = leave data.
+    wipe_mode: str = "disk"  # disk | partitions | none
+    # When wipe_mode == "partitions", wipe these block devices with wipefs before install.
+    wipe_partitions: list[str] = field(default_factory=list)
     # handbook = ESP/boot + swap + root (wiki default scheme)
     layout: str = "handbook"  # handbook, btrfs-subvols, lvm, lvm-luks, zfs, existing, mdraid1
     filesystem: str = "ext4"  # ext4, xfs, btrfs, f2fs, jfs, zfs

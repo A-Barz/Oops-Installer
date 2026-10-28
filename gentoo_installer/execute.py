@@ -641,6 +641,14 @@ def phase_disks(cfg: InstallConfig, runner: Runner) -> None:
         ui.info("Resume: not wiping or formatting; ensuring the target is mounted.")
         _ensure_target_mounted(cfg, runner)
         return
+    # Selected-partition wipe (one, several, or all listed) before using existing layout.
+    wipe_parts = [p for p in (getattr(cfg, "wipe_partitions", None) or []) if p]
+    if wipe_parts and cfg.layout == "existing":
+        _unmount_target(cfg, runner)
+        for part in wipe_parts:
+            ui.danger(f"Wiping partition {part}")
+            runner.shell(f"wipefs -af {shlex.quote(part)} || true")
+        runner.shell("udevadm settle || true")
     if cfg.wipe_disk and cfg.layout != "existing":
         _unmount_target(cfg, runner)
         ui.danger(f"Zapping partition tables on {disk}")
@@ -3610,6 +3618,12 @@ echo ">> binhost / installkernel"
 {installkernel_conf}
 {dracut_luks}
 echo 'sys-kernel/linux-firmware @BINARY-REDISTRIBUTABLE' > /etc/portage/package.license/firmware || true
+# Mandatory Chrome + other proprietary Portage apps (ACCEPT_LICENSE also set in make.conf).
+cat > /etc/portage/package.license/apps << 'EOF'
+www-client/google-chrome google-chrome
+app-editors/sublime-text *
+app-editors/vscode *
+EOF
 {codec_license_block}
 {keywords}
 

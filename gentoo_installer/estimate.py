@@ -18,6 +18,7 @@ _LIGHT_SOURCE = 12
 _HEAVY_MINUTES = {
     "www-client/firefox": (25, 180),
     "www-client/firefox-bin": (12, 12),
+    "www-client/firefox-bin:esr": (12, 12),
     "www-client/google-chrome": (10, 10),
     "www-client/librewolf": (20, 180),
     "www-client/qutebrowser": (15, 40),

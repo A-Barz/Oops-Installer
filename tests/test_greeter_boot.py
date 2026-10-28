@@ -43,13 +43,15 @@ class MandatoryBrowserTests(unittest.TestCase):
             ["www-client/firefox-bin:esr", "www-client/google-chrome"],
         )
 
-    def test_browser_category_excludes_mandatory_pair(self) -> None:
+    def test_browser_category_is_only_firefox_esr_and_chrome(self) -> None:
         browsers = next(pkgs for key, _title, pkgs in catalog.CATEGORIES if key == "browsers")
-        atoms = {atom for atom, _ in browsers}
-        self.assertNotIn("www-client/google-chrome", atoms)
-        self.assertNotIn("www-client/firefox-bin", atoms)
-        self.assertNotIn("www-client/firefox-bin:esr", atoms)
-        self.assertIn("www-client/qutebrowser", atoms)
+        atoms = [atom for atom, _ in browsers]
+        self.assertEqual(
+            atoms,
+            ["www-client/firefox-bin:esr", "www-client/google-chrome"],
+        )
+        self.assertNotIn("www-client/qutebrowser", atoms)
+        self.assertNotIn("www-client/firefox", atoms)
 
     def test_desktop_packages_always_queue_pair(self) -> None:
         cfg = _base_cfg(browser="none", pipewire=False)

@@ -836,25 +836,24 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
     ),
     (
         "browsers",
-        "Bonus browsers (Chrome + Firefox ESR are already queued)",
+        "Web browsers (Firefox ESR + Chrome only)",
         _pkgs(
-            # Chrome and Firefox ESR are mandatory (see REQUIRED_BROWSERS). This
-            # list is optional extras only. Gentoo has no www-client/firefox-esr
-            # package; ESR is the :esr slot of www-client/firefox-bin.
-            Pkg("www-client/firefox", "Firefox — compile from source (hours, Rapid)"),
-            Pkg("www-client/librewolf", "LibreWolf — privacy-forked Firefox", "librewolf"),
-            Pkg("www-client/qutebrowser", "qutebrowser — keyboard-driven Qt browser"),
-            Pkg("www-client/falkon", "Falkon — KDE Qt WebEngine browser"),
-            Pkg("www-client/epiphany", "GNOME Web — GTK WebKit browser"),
-            Pkg("www-client/w3m", "w3m — text browser with images in a terminal"),
-            Pkg("www-client/lynx", "Lynx — classic text-only browser"),
-            Pkg("www-client/links", "Links — text/graphical lightweight browser"),
+            # Only the mandatory pair. Gentoo has no www-client/firefox-esr;
+            # ESR is the :esr slot of firefox-bin. No other browsers are listed.
+            Pkg("www-client/firefox-bin:esr", "Firefox ESR — official binary (always installed)"),
+            Pkg("www-client/google-chrome", "Google Chrome — official binary (always installed)"),
         ),
     ),
     (
         "editors",
         "Text editors",
         _pkgs(
+            # Sublime + Pulsar near the top so they are reachable without paging past a long list.
+            Pkg("app-editors/sublime-text", "Sublime Text — proprietary"),
+            Pkg(
+                "flatpak-app/dev.pulsar_edit.Pulsar",
+                "Pulsar — Atom successor (Flatpak; Atom itself is discontinued)",
+            ),
             Pkg("app-editors/neovim", "Neovim"),
             Pkg("app-editors/vim", "Vim"),
             Pkg("app-editors/gvim", "gVim — Vim with a GUI"),
@@ -863,7 +862,6 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
             Pkg("app-editors/helix", "Helix — modal editor"),
             Pkg("app-editors/kakoune", "Kakoune"),
             Pkg("app-editors/micro", "micro — friendly terminal editor"),
-            Pkg("app-editors/sublime-text", "Sublime Text — proprietary"),
             Pkg("app-editors/kate", "Kate"),
             Pkg("app-editors/gedit", "gedit"),
             Pkg("app-editors/gnome-text-editor", "GNOME Text Editor"),
@@ -871,11 +869,6 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
             Pkg("app-editors/mousepad", "Mousepad"),
             Pkg("app-editors/kile", "Kile — LaTeX"),
             Pkg("app-editors/ghostwriter", "ghostwriter — Markdown"),
-            # Atom is discontinued; Pulsar is the community fork (Flathub, not Portage).
-            Pkg(
-                "flatpak-app/dev.pulsar_edit.Pulsar",
-                "Pulsar — Atom successor (Flatpak; Atom itself is discontinued)",
-            ),
             Pkg("app-editors/logseq-desktop-bin", "Logseq — open-source knowledge base (binary)"),
         ),
     ),
