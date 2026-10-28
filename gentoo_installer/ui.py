@@ -89,33 +89,41 @@ def width() -> int:
     return max(60, shutil.get_terminal_size((100, 24)).columns)
 
 
-def _gentoo_ascii() -> list[str]:
-    """Compact Gentoo 'g' mark. Purple body, green highlight on the tail."""
+# Opening brand (user wording). Closing quote added so the tagline displays balanced.
+BANNER_NAME = "Oops-Installer"
+BANNER_TAGLINE = "'A Gentoo Wayland First and Suckless Setup Tool'"
+
+
+def _oops_installer_ascii() -> list[str]:
+    """Block ASCII for Oops-Installer — replaces the old Gentoo 'g' / 8-ball mark."""
+    # Raw strings keep backslashes literal. Lines padded to a shared width for centering.
     return [
-        "            .-----.            ",
-        "          .'       `.          ",
-        "         /   .---.   \\         ",
-        "        |   /     \\   |        ",
-        "        |  |   G   |  |        ",
-        "         \\  \\     /  /         ",
-        "          '. `---' .'          ",
-        "            `-----'            ",
+        r"  ___                   ___           _        _ _           ",
+        r" / _ \  ___  _ __  ___ |_ _|_ __  ___| |_ __ _| | | ___ _ __ ",
+        r"| | | |/ _ \| '_ \/ __| | || '_ \/ __| __/ _` | | |/ _ \ '__|",
+        r"| |_| | (_) | |_) \__ \ | || | | \__ \ || (_| | | |  __/ |   ",
+        r" \___/ \___/| .__/|___/|___|_| |_|___/\__\__,_|_|_|\___|_|   ",
+        r"            |_|                                              ",
     ]
 
 
 def banner() -> None:
-    """Revision first, then logo and navigation — the first thing install.py prints."""
+    """Revision first, then Oops-Installer ASCII + tagline — first thing install.py prints."""
     from .rev import INSTALLER_REV
 
     w = width()
     line = "═" * (w - 2)
     rev = f"rev {INSTALLER_REV}"
     print()
-    print(paint(f"  Oops Installer  {rev}", C.BOLD, C.GREEN))
+    print(paint(f"  {BANNER_NAME}  {rev}", C.BOLD, C.PURPLE))
+    # Title art sits above the frame so wide glyphs are not clipped by box borders.
+    for index, art in enumerate(_oops_installer_ascii()):
+        # Gentoo palette: purple #54487A body, green #DDDA55 on alternating rows.
+        tone = C.PURPLE if index % 2 == 0 else C.GREEN
+        print(paint(art.center(w) if len(art) < w else art, C.BOLD, tone))
+    print(paint(BANNER_TAGLINE.center(w) if len(BANNER_TAGLINE) < w else f"  {BANNER_TAGLINE}", C.BOLD, C.GREEN))
+    print()
     print(paint("╔" + line + "╗", C.BOLD, C.PURPLE))
-    print(paint("║" + f"GENTOO LINUX INSTALLER  ·  {rev}".center(w - 2) + "║", C.BOLD, C.GREEN))
-    for art in _gentoo_ascii():
-        print(paint("║", C.PURPLE) + paint(art.center(w - 2), C.BOLD, C.GREEN) + paint("║", C.PURPLE))
     # Never say XFCE here — the host is a generic Ubuntu Boot Image / Ubuntu image.
     print(paint("║" + "Host: Ubuntu Boot Image (Ubuntu image)".center(w - 2) + "║", C.BOLD, C.GREEN))
     print(paint("║" + "Ubuntu Boot Image live  →  Gentoo disk".center(w - 2) + "║", C.GREEN))

@@ -21,6 +21,34 @@ class BannerHostTests(unittest.TestCase):
         self.assertNotIn("XFCE", text)
         self.assertNotIn("Xfce", text)
 
+    def test_banner_uses_oops_installer_ascii_not_ball(self) -> None:
+        buf = io.StringIO()
+        with mock.patch("sys.stdout", buf):
+            ui.banner()
+        text = buf.getvalue()
+        self.assertIn(ui.BANNER_NAME, text)
+        self.assertIn("Oops-Installer", text)
+        self.assertIn("Wayland First and Suckless Setup Tool", text)
+        # Old Gentoo 'g' / 8-ball mark is gone.
+        self.assertNotIn("|  |   G   |  |", text)
+        self.assertNotIn(".-----.", text)
+        art = "\n".join(ui._oops_installer_ascii())
+        self.assertIn("___", art)
+        for line in ui._oops_installer_ascii():
+            self.assertIn(line.rstrip(), text)
+
+    def test_banner_ascii_uses_gentoo_purple_and_green(self) -> None:
+        import os
+
+        os.environ["FORCE_COLOR"] = "1"
+        os.environ.pop("NO_COLOR", None)
+        buf = io.StringIO()
+        with mock.patch("sys.stdout", buf):
+            ui.banner()
+        text = buf.getvalue()
+        self.assertIn(ui.C.PURPLE, text)
+        self.assertIn(ui.C.GREEN, text)
+
 
 class CodecsOfferTests(unittest.TestCase):
     def test_codecs_prompt_still_reachable(self) -> None:
