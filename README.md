@@ -47,6 +47,7 @@ In chapter 12 you can search (`/text`), page (`n`/`p`), and toggle packages. Ove
 - Wired or wireless internet
 - Root privileges
 - A target disk you can **wipe** (unless you choose existing partitions)
+- Optional but recommended for stage3 GPG: Ubuntu package **`ntc`** for live-host clock sync (`sudo apt-get install -y ntc`). If NTP tools are missing, the installer prints this hint during the network phase.
 
 Read **[HOWTO.txt](HOWTO.txt)** before a real install (plain-text walkthrough, safety, resume, and limits).
 
@@ -56,13 +57,9 @@ Boot Ubuntu live, open a terminal:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y python3 git
+sudo apt-get install -y python3 git ntc
 git clone <this-repo>
 cd gentoo-live-installer   # or Oops-Installer
-# Use the PR branch (main still shows the old “Ubuntu XFCE” banner / rev 44):
-git fetch origin
-git checkout cursor/installer-ux-package-picker-cd99
-# Banner must say “Ubuntu Boot Image” and rev ≥ 51
 sudo python3 install.py
 ```
 

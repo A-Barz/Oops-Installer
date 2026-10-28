@@ -67,8 +67,17 @@ HOST_PACKAGES = [
     "pciutils",
     "iw",
     "wpasupplicant",
+    # Ubuntu Boot Image clock sync. Prefer the ntc package; ntpdate is a fallback.
+    "ntc",
     "ntpdate",
 ]
+
+# Shown when live-host NTP tools are missing or sync fails (stage3 GPG needs a sane clock).
+NTP_NTC_HINT = (
+    "NTP sync tools were not found (or clock sync failed) on this Ubuntu Boot Image host. "
+    "Install the Ubuntu package ntc for time sync, then re-run the installer: "
+    "sudo apt-get install -y ntc"
+)
 
 
 def execute(cfg: InstallConfig) -> None:
@@ -199,6 +208,50 @@ def phase_host(cfg: InstallConfig, runner: Runner) -> None:
     ui.ok("Host tools ready")
 
 
+def _host_ntp_tools_present() -> bool:
+    """True when the live host has at least one usable clock-sync command."""
+    return any(
+        shutil.which(name)
+        for name in ("ntc", "ntpdate", "chronyd", "timedatectl")
+    )
+
+
+def sync_live_clock(cfg: InstallConfig, runner: Runner) -> bool:
+    """Synchronise the Ubuntu Boot Image clock before stage3 / GPG.
+
+    Prefers the Ubuntu ``ntc`` package. When tools are missing or every sync
+    attempt fails, warn with :data:`NTP_NTC_HINT` so the user can install ntc.
+    Returns True when sync looked successful (or was skipped / dry-run).
+    """
+    if not cfg.ntp:
+        return True
+    if cfg.dry_run:
+        ui.info("Dry-run: would synchronise the live clock (ntc / ntpdate / timedatectl).")
+        return True
+    if not _host_ntp_tools_present():
+        ui.warn("ntp update was not found on this live host.")
+        ui.warn(NTP_NTC_HINT)
+        return False
+    # Prefer ntc (Ubuntu package for this installer's host sync), then classic tools.
+    script = (
+        "if command -v ntc >/dev/null 2>&1; then ntc; "
+        "elif command -v ntpdate >/dev/null 2>&1; then ntpdate -u pool.ntp.org; "
+        "elif command -v chronyd >/dev/null 2>&1; then chronyd -q 'server pool.ntp.org iburst'; "
+        "elif command -v timedatectl >/dev/null 2>&1; then timedatectl set-ntp true; "
+        "else exit 127; fi"
+    )
+    proc = runner.shell(script, check=False)
+    if proc.returncode == 0:
+        ui.ok("Live clock synchronised.")
+        return True
+    if proc.returncode == 127 or not _host_ntp_tools_present():
+        ui.warn("ntp update was not found on this live host.")
+    else:
+        ui.warn("Live clock synchronisation failed.")
+    ui.warn(NTP_NTC_HINT)
+    return False
+
+
 def phase_network(cfg: InstallConfig, runner: Runner) -> None:
     """Bring up live Wi-Fi/static IP and NTP so distfiles.gentoo.org works."""
     if cfg.network_mode == "wifi":
@@ -228,8 +281,7 @@ def phase_network(cfg: InstallConfig, runner: Runner) -> None:
             runner.shell(f"ip route add default via {shlex.quote(cfg.static_gateway)} || true")
         if not cfg.dry_run:
             Path("/etc/resolv.conf").write_text(f"nameserver {cfg.static_dns}\n", encoding="utf-8")
-    if cfg.ntp:
-        runner.shell("ntpdate -u pool.ntp.org || timedatectl set-ntp true || true")
+    sync_live_clock(cfg, runner)
     if not cfg.dry_run and not detect.has_network():
         ui.warn("Network still looks down. Stage3 download may fail.")
 
@@ -331,6 +383,55 @@ def _linux_root_type(cfg: InstallConfig) -> str:
     return "8304"
 
 
+# Bare `partprobe` (no disk arg) walks every block device, including the live
+# USB's casper device-mapper overlays. Those often hang on
+# "device-mapper: reload ioctl … failed" — so we never probe the whole system.
+PARTPROBE_TIMEOUT_SEC = 15
+
+
+def _partprobe_disk(runner: Runner, disk: str) -> None:
+    """Reread partition table for one target disk only, with a hard timeout.
+
+    Skips the Ubuntu Boot Image medium. On ioctl / dm failure, logs and
+    continues — udev + waiting for /dev nodes is enough for the next steps.
+    """
+    if not disk or not disk.startswith("/dev/"):
+        return
+    if detect.is_live_installer_disk(disk):
+        ui.warn(
+            f"Skipping partprobe on live installer medium {disk} "
+            "(avoids USB device-mapper reload ioctl hangs)."
+        )
+        return
+    q = shlex.quote(disk)
+    t = int(PARTPROBE_TIMEOUT_SEC)
+    ui.info(f"partprobe {disk} (timeout {t}s; target disk only)")
+    # Prefer timeout(1); fall back to a short blockdev reread. Never call
+    # partprobe with no arguments — that scans the live USB dm stack too.
+    runner.shell(
+        "\n".join(
+            [
+                "if command -v timeout >/dev/null 2>&1; then",
+                f"  timeout {t} partprobe {q} 2>/dev/null || "
+                f"timeout {t} blockdev --rereadpt {q} 2>/dev/null || "
+                f'echo ">> partprobe {disk} timed out or failed '
+                f'(device-mapper ioctl); continuing without hang" >&2',
+                "else",
+                f"  partprobe {q} 2>/dev/null || blockdev --rereadpt {q} 2>/dev/null || "
+                f'echo ">> partprobe {disk} failed; continuing" >&2',
+                "fi",
+                # Bound udev wait so a busy live USB cannot stall here either.
+                "if command -v timeout >/dev/null 2>&1; then",
+                "  timeout 10 udevadm settle --timeout=8 2>/dev/null || true",
+                "else",
+                "  udevadm settle --timeout=8 2>/dev/null || udevadm settle || true",
+                "fi",
+            ]
+        ),
+        check=False,
+    )
+
+
 def _release_disk_mounts(runner: Runner, disk: str) -> None:
     """Unmount live-desktop automounts of this disk so mkfs and mount can use it.
 
@@ -338,6 +439,9 @@ def _release_disk_mounts(runner: Runner, disk: str) -> None:
     mount up makes the later Gentoo mount look at a busy or half-wiped NTFS.
     """
     if not disk or not disk.startswith("/dev/"):
+        return
+    if detect.is_live_installer_disk(disk):
+        ui.warn(f"Not releasing mounts on live installer medium {disk}")
         return
     q = shlex.quote(disk)
     runner.shell(
@@ -348,7 +452,11 @@ def _release_disk_mounts(runner: Runner, disk: str) -> None:
                 '    umount "$mnt" || umount -l "$mnt" || true',
                 "  done",
                 "done",
-                "udevadm settle || true",
+                "if command -v timeout >/dev/null 2>&1; then",
+                "  timeout 10 udevadm settle --timeout=8 2>/dev/null || true",
+                "else",
+                "  udevadm settle --timeout=8 2>/dev/null || udevadm settle || true",
+                "fi",
             ]
         )
     )
@@ -660,8 +768,9 @@ def phase_disks(cfg: InstallConfig, runner: Runner) -> None:
             _sgdisk_gpt(cfg, runner, disk)
         else:
             _parted_mbr(cfg, runner, disk)
-        runner.shell("partprobe || true")
-        runner.shell("udevadm settle || true")
+        _partprobe_disk(runner, disk)
+        if cfg.layout == "mdraid1" and cfg.extra_raid_disk:
+            _partprobe_disk(runner, cfg.extra_raid_disk)
         runner.shell("sleep 1 || true")
         _release_disk_mounts(runner, disk)
 

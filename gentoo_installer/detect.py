@@ -322,20 +322,61 @@ def list_partitions() -> list[dict]:
 
 
 def live_boot_disk() -> str | None:
-    """Best-effort parent disk of the live USB so we can warn 'do not wipe this'."""
+    """Best-effort parent disk of the live USB so we can warn 'do not wipe this'.
+
+    Casper / Ubuntu Boot Image media show up under several mountpoints. Any of
+    them is enough to exclude that disk from wipe and from partprobe.
+    """
     findmnt = shutil.which("findmnt")
     if not findmnt:
         return None
-    proc = subprocess.run(
-        [findmnt, "-n", "-o", "SOURCE", "/cdrom"],
-        capture_output=True,
-        text=True,
-        check=False,
+    # Prefer dedicated live-media mounts, then the rootfs source (often a dm
+    # snapshot whose backing disk is still the installer USB).
+    candidates = (
+        "/cdrom",
+        "/run/live/medium",
+        "/lib/live/mount/medium",
+        "/isodevice",
+        "/",
     )
-    src = proc.stdout.strip()
-    if src.startswith("/dev/"):
-        return parent_block_device(src)
+    for mount in candidates:
+        proc = subprocess.run(
+            [findmnt, "-n", "-o", "SOURCE", mount],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        src = (proc.stdout or "").strip().split()[0] if proc.stdout else ""
+        if not src.startswith("/dev/"):
+            continue
+        # Overlay /mapper names → resolve to the underlying block disk when possible.
+        real = src
+        try:
+            real = str(Path(src).resolve())
+        except OSError:
+            real = src
+        parent = parent_block_device(real)
+        if parent.startswith("/dev/") and Path(parent).exists():
+            return parent
+        if src.startswith("/dev/"):
+            return parent_block_device(src)
     return None
+
+
+def is_live_installer_disk(path: str) -> bool:
+    """True when path is the Ubuntu Boot Image medium (or a partition on it)."""
+    if not path or not path.startswith("/dev/"):
+        return False
+    live = live_boot_disk()
+    if not live:
+        return False
+    try:
+        target = str(Path(parent_block_device(path)).resolve())
+        medium = str(Path(live).resolve())
+    except OSError:
+        target = parent_block_device(path)
+        medium = live
+    return target == medium
 
 
 # Linux flag names for the x86-64-v3 psABI. avx in cpuinfo already means the OS
