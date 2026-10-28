@@ -1697,9 +1697,14 @@ def _required_tools(cfg: InstallConfig, loaders: list[str]) -> list[tuple[str, t
         if openrc:
             add("sys-apps/dbus", *_service_probe(True, "dbus"))
             add("sys-auth/elogind", *_service_probe(True, "elogind"))
+        else:
+            # Still emerge dbus so the NM stack is complete on systemd stages.
+            add("sys-apps/dbus", "command", "-v", "dbus-daemon")
         add("net-misc/networkmanager", *_service_probe(openrc, "NetworkManager"))
     elif cfg.network_stack == "dhcpcd":
         add("net-misc/dhcpcd", *_service_probe(openrc, "dhcpcd"))
+    elif cfg.network_stack == "systemd-networkd":
+        add("sys-apps/systemd", "command", "-v", "networkctl")
     if cfg.sshd:
         add("net-misc/openssh", *_service_probe(openrc, "sshd"))
     if cfg.chrony:
@@ -3127,6 +3132,89 @@ def _bare_atom(atom: str) -> str:
     return bare
 
 
+def _service_stack_atoms(cfg: InstallConfig) -> list[str]:
+    """Network, syslog, cron, ZRAM, and related packages the chroot may emerge.
+
+    Kept in sync with the net_pkgs list inside render_chroot_script so keywords
+    cover every stack choice (including systemd-networkd and dbus on systemd).
+    """
+    atoms: list[str] = []
+    if cfg.network_stack == "networkmanager":
+        atoms.extend(["net-misc/networkmanager", "sys-apps/dbus"])
+        if cfg.init_system == "openrc":
+            atoms.append("sys-auth/elogind")
+    elif cfg.network_stack == "dhcpcd":
+        atoms.append("net-misc/dhcpcd")
+    elif cfg.network_stack == "systemd-networkd":
+        atoms.append("sys-apps/systemd")
+    if cfg.wireless:
+        atoms.extend(["net-wireless/iw", "net-wireless/wpa_supplicant"])
+    if cfg.sshd:
+        atoms.append("net-misc/openssh")
+    if cfg.cups:
+        atoms.append("net-print/cups")
+    if cfg.chrony:
+        atoms.append("net-misc/chrony")
+    if cfg.init_system == "openrc":
+        if cfg.syslog != "none":
+            atoms.append(f"app-admin/{cfg.syslog}")
+        if cfg.cron != "none":
+            atoms.append(f"sys-process/{cfg.cron}")
+    if cfg.zram:
+        atoms.append(
+            "sys-apps/zram-generator" if cfg.init_system == "systemd" else "sys-block/zram-init"
+        )
+    if cfg.nftables:
+        atoms.append("net-firewall/nftables")
+    return atoms
+
+
+def _chroot_helper_atoms(cfg: InstallConfig) -> list[str]:
+    """Tooling the chroot script emerges outside the desktop package lists."""
+    atoms = [
+        "sys-apps/portage",
+        "app-portage/cpuid2cpuflags",
+    ]
+    if not (cfg.gentoo_mirrors or "").strip():
+        atoms.append("app-portage/mirrorselect")
+    # Overlays (guru for niri, hyproverlay, CachyOS, shells) need these first.
+    queued = [
+        catalog.kernel_atom(cfg.kernel),
+        *cfg.extra_packages,
+        *_window_managers(cfg),
+        *cfg.selected_packages,
+        *_support_atoms(cfg),
+        *(atom for atom, _test in _display_manager_tools(cfg)),
+    ]
+    overlay_names = [name for name in cfg.overlays if name != "guru"]
+    if catalog.shell_atoms(getattr(cfg, "shell", "") or ""):
+        overlay_names.append("guru")
+    kernel_ov = catalog.kernel_overlay(cfg.kernel)
+    if kernel_ov != "gentoo":
+        overlay_names.append(kernel_ov)
+    if catalog.overlays_required_by(
+        [a for a in queued if a and (_atom_allowed(cfg, a) or str(a).startswith("sys-kernel/"))],
+        overlay_names,
+    ):
+        atoms.extend(["app-eselect/eselect-repository", "dev-vcs/git"])
+    # Remote dotfile fetch uses curl from the chroot.
+    for atom in cfg.window_managers or []:
+        choices = catalog.dotfile_choices(atom)
+        if not choices:
+            continue
+        wanted = "installer"
+        for item in cfg.wm_dotfiles or []:
+            key, _, value = str(item).partition("=")
+            if key == atom and value:
+                wanted = value
+                break
+        for choice in choices:
+            if choice.id == wanted and choice.repo:
+                atoms.append("net-misc/curl")
+                break
+    return atoms
+
+
 def _atoms_to_unmask(cfg: InstallConfig) -> list[str]:
     """Every Portage atom this install plans to emerge (for keywords / unmask)."""
     loaders = selected_bootloaders(cfg)
@@ -3138,6 +3226,8 @@ def _atoms_to_unmask(cfg: InstallConfig) -> list[str]:
     atoms.extend(atom for atom, _test in _required_tools(cfg, loaders))
     atoms.extend(atom for atom, _test in _display_manager_tools(cfg))
     atoms.extend(_support_atoms(cfg))
+    atoms.extend(_service_stack_atoms(cfg))
+    atoms.extend(_chroot_helper_atoms(cfg))
     if cfg.linux_firmware:
         atoms.append("sys-kernel/linux-firmware")
     if cfg.sof_firmware:
@@ -3164,6 +3254,29 @@ def _atoms_to_unmask(cfg: InstallConfig) -> list[str]:
         seen.add(bare)
         out.append(bare)
     return out
+
+
+def _package_license_lines(cfg: InstallConfig) -> list[str]:
+    """package.license entries for proprietary / binary apps this install may emerge."""
+    planned = set(_atoms_to_unmask(cfg))
+    # Always allow Chrome — required_browser_atoms forces it onto every desktop path.
+    lines = [
+        "www-client/google-chrome google-chrome",
+    ]
+    # Map planned atoms → license tokens Portage needs beyond ACCEPT_LICENSE=* .
+    extra = {
+        "app-editors/sublime-text": "app-editors/sublime-text *",
+        "app-editors/vscode": "app-editors/vscode *",
+        "app-editors/logseq-desktop-bin": "app-editors/logseq-desktop-bin *",
+        "www-client/google-chrome": "www-client/google-chrome google-chrome",
+        "sys-kernel/linux-firmware": "sys-kernel/linux-firmware @BINARY-REDISTRIBUTABLE",
+    }
+    seen = {"www-client/google-chrome google-chrome"}
+    for atom, line in extra.items():
+        if atom in planned and line not in seen:
+            lines.append(line)
+            seen.add(line)
+    return lines
 
 
 def _keyword_text(cfg: InstallConfig) -> str:
@@ -3510,6 +3623,7 @@ EOF
             + "\nEOF\n"
             'echo ">> proprietary codec licenses accepted by the user"\n'
         )
+    license_apps = "\n".join(_package_license_lines(cfg))
     dracut_block = ""
     if dracut_conf:
         dracut_block = f"""mkdir -p /etc/dracut.conf.d /etc/conf.d
@@ -3745,11 +3859,9 @@ echo ">> binhost / installkernel"
 {installkernel_conf}
 {dracut_luks}
 echo 'sys-kernel/linux-firmware @BINARY-REDISTRIBUTABLE' > /etc/portage/package.license/firmware || true
-# Mandatory Chrome + other proprietary Portage apps (ACCEPT_LICENSE also set in make.conf).
+# Proprietary / binary apps this install may emerge (ACCEPT_LICENSE also set in make.conf).
 cat > /etc/portage/package.license/apps << 'EOF'
-www-client/google-chrome google-chrome
-app-editors/sublime-text *
-app-editors/vscode *
+{license_apps}
 EOF
 {codec_license_block}
 {keywords}

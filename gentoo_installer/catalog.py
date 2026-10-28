@@ -1244,6 +1244,48 @@ def _known_packages() -> list[Pkg]:
     return pkgs
 
 
+def offerable_portage_atoms() -> list[str]:
+    """Every Portage atom the wizard or catalog can ask emerge to install.
+
+    Flatpak app ids are omitted — they are not Portage atoms and are not
+    written to package.accept_keywords / package.unmask.
+    """
+    atoms: list[str] = []
+    seen: set[str] = set()
+
+    def add(atom: str) -> None:
+        bare = (atom or "").split("::", 1)[0].strip()
+        if not bare or bare.startswith("flatpak-app/") or bare in seen:
+            return
+        seen.add(bare)
+        atoms.append(bare)
+
+    for pkg in _known_packages():
+        add(pkg.atom)
+    for atom in required_browser_atoms():
+        add(atom)
+    for atom in nonfree_codec_atoms():
+        add(atom)
+    for _key, _title, pkgs in CATEGORIES:
+        for value, _desc in pkgs:
+            add(value)
+    for wm in WINDOW_MANAGERS:
+        for choice in dotfile_choices(wm.atom):
+            for pkg in choice.packages:
+                add(pkg)
+    # Greeter stack always available when Wayland is chosen.
+    for atom in (
+        "gui-libs/greetd",
+        "gui-apps/gtkgreet",
+        "gui-wm/labwc",
+        "acct-user/greetd",
+        "acct-group/greetd",
+        "gui-libs/display-manager-init",
+    ):
+        add(atom)
+    return atoms
+
+
 def atom_overlay(atom: str) -> str:
     """Which eselect overlay an atom needs, or 'gentoo' for the main tree."""
     bare = atom.split("::", 1)[0]
