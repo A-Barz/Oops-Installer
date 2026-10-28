@@ -1555,6 +1555,8 @@ def _confirm_disk(cfg: InstallConfig) -> None:
     typed = ui.prompt(f"Type the disk path to confirm ({cfg.target_disk})", "")
     if typed != cfg.target_disk:
         raise SystemExit("Disk confirmation did not match. Aborting.")
+    # Immediate, hard-to-miss nap banner — do not wait for execute() to start.
+    ui.install_wait_notice()
 
 
 def _choose_iface(title: str, prefer_wireless: bool | None, default: str = "") -> str:
