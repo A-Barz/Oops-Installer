@@ -1024,6 +1024,108 @@ def assert_wipe_layout_consistent(cfg: InstallConfig) -> None:
     )
 
 
+# Expected TYPE= values (blkid) for mount-existing fail-closed checks.
+_FSTYPE_ALIASES: dict[str, frozenset[str]] = {
+    "ext4": frozenset({"ext4"}),
+    "xfs": frozenset({"xfs"}),
+    "btrfs": frozenset({"btrfs"}),
+    "f2fs": frozenset({"f2fs"}),
+    "jfs": frozenset({"jfs"}),
+    "vfat": frozenset({"vfat", "fat", "fat32", "fat16", "msdos"}),
+    "swap": frozenset({"swap"}),
+    "crypto_LUKS": frozenset({"crypto_luks"}),
+}
+
+
+def _fstype_matches(actual: str, expected: str) -> bool:
+    want = (expected or "").strip().lower()
+    got = (actual or "").strip().lower()
+    if not want:
+        return False
+    aliases = _FSTYPE_ALIASES.get(want, frozenset({want}))
+    return got in aliases
+
+
+def assert_mount_existing_fstypes(cfg: InstallConfig, devices: dict[str, str]) -> None:
+    """H8-B: fail closed when on-disk TYPE does not match the chosen filesystem."""
+    checks: list[tuple[str, str, str]] = []
+    root = devices.get("root") or ""
+    if root:
+        checks.append(("root", root, _root_fstype(cfg)))
+    if cfg.firmware == "uefi" and devices.get("esp"):
+        checks.append(("ESP", devices["esp"], "vfat"))
+    boot = devices.get("boot") or ""
+    if boot and boot not in {devices.get("esp"), devices.get("root")}:
+        checks.append(("boot", boot, "ext4"))
+    swap = devices.get("swap") or ""
+    if swap and cfg.swap_mode in {"partition", "both"}:
+        checks.append(("swap", swap, "swap"))
+    for role, node, expected in checks:
+        actual = detect.blkid_type(node)
+        if not actual:
+            raise SystemExit(
+                f"mount-existing: could not read filesystem TYPE on {role} ({node}). "
+                "Refuse to mount without a matching TYPE."
+            )
+        if not _fstype_matches(actual, expected):
+            raise SystemExit(
+                f"mount-existing: {role} {node} has TYPE={actual!r}, "
+                f"expected {expected!r}. Refusing to mount (no mkfs)."
+            )
+
+
+def _phase_disks_mount_existing(cfg: InstallConfig, runner: Runner) -> None:
+    """H8-B expert path: open LUKS if needed, assert fstypes, mount — never mkfs/luksFormat."""
+    if cfg.layout != "existing":
+        raise SystemExit(
+            f"wipe_mode=mount requires layout=existing (got {cfg.layout!r})."
+        )
+    if cfg.wipe_disk or getattr(cfg, "wipe_partitions", None):
+        raise SystemExit(
+            "wipe_mode=mount refuses wipe_disk / wipe_partitions "
+            "(mount-existing must not wipe)."
+        )
+    ui.info("Expert mount-existing: skipping wipefs, mkfs, mkswap, and luksFormat.")
+    devices = _map_devices(cfg)
+    if cfg.luks and devices.get("luks_source"):
+        # Container TYPE must be LUKS before open; FS TYPE is checked on the mapper.
+        source = devices["luks_source"]
+        if not cfg.dry_run:
+            actual = detect.blkid_type(source)
+            if actual and not _fstype_matches(actual, "crypto_LUKS"):
+                raise SystemExit(
+                    f"mount-existing: root source {source} has TYPE={actual!r}, "
+                    "expected crypto_LUKS before open."
+                )
+        _luks_open_only(cfg, runner, source, "root")
+        devices["root"] = "/dev/mapper/root"
+    if (
+        cfg.luks
+        and cfg.encrypted_swap
+        and devices.get("swap")
+        and cfg.swap_mode in {"partition", "both"}
+    ):
+        devices["luks_swap_source"] = devices["swap"]
+        if not cfg.dry_run:
+            actual = detect.blkid_type(devices["luks_swap_source"])
+            if actual and not _fstype_matches(actual, "crypto_LUKS"):
+                raise SystemExit(
+                    f"mount-existing: swap source {devices['luks_swap_source']} has "
+                    f"TYPE={actual!r}, expected crypto_LUKS before open."
+                )
+        _luks_open_only(cfg, runner, devices["luks_swap_source"], "swap")
+        devices["swap"] = "/dev/mapper/swap"
+    if not cfg.dry_run:
+        assert_mount_existing_fstypes(cfg, devices)
+    else:
+        ui.info("Dry-run: would assert on-disk fstypes match before mount.")
+    if devices.get("swap") and cfg.swap_mode in {"partition", "both"}:
+        runner.shell(f"swapon {shlex.quote(devices['swap'])} || true")
+    _mount_tree(cfg, runner, devices, create_subvols=False)
+    cfg._devices = devices  # type: ignore[attr-defined]
+    ui.ok("Existing filesystems mounted (no format)")
+
+
 def phase_disks(cfg: InstallConfig, runner: Runner) -> None:
     """Wipe/partition/LUKS/LVM, mkfs, and mount at cfg.mountpoint (handbook /mnt/gentoo)."""
     disk = cfg.target_disk
@@ -1033,6 +1135,9 @@ def phase_disks(cfg: InstallConfig, runner: Runner) -> None:
         return
     refuse_live_installer_targets(cfg)
     assert_wipe_layout_consistent(cfg)
+    if cfg.wipe_mode == "mount":
+        _phase_disks_mount_existing(cfg, runner)
+        return
     # Selected-partition wipe (one, several, or all listed) before using existing layout.
     wipe_parts = [p for p in (getattr(cfg, "wipe_partitions", None) or []) if p]
     if wipe_parts and cfg.layout == "existing":

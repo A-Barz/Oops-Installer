@@ -96,9 +96,9 @@ Defaults are `InstallConfig` values unless noted. Conditional steps are marked.
 | Ask | Options / notes | Default |
 |-----|-----------------|---------|
 | Target disk | Detected disks (tags removable / live USB) or typed path | First disk / `/dev/sda` |
-| Wipe mode | `disk`, `partitions`, `none` | `disk` |
+| Wipe mode | `disk`, `partitions`, `none` (reformat named ESP/root/swap), `mount` (expert: no mkfs; fstype fail-closed) | `disk` |
 | Partition table | UEFI → forced `gpt`; BIOS → `mbr` / `gpt` | `mbr` on BIOS |
-| Layout | `handbook`, `btrfs-subvols`, `lvm`, `lvm-luks`, `mdraid1`, `zfs`, `existing` | `handbook` (or `existing` if wipe is partitions/none) |
+| Layout | `handbook`, `btrfs-subvols`, `lvm`, `lvm-luks`, `mdraid1`, `zfs`, `existing` | `handbook` (or `existing` if wipe is partitions/none/mount) |
 | Root filesystem | Forced `btrfs` / `zfs` for those layouts; else `ext4`, `xfs`, `btrfs`, `f2fs`, `jfs` | `ext4` |
 | Swap | On btrfs-subvols: `file`, `partition`, `zram`, `both`, `none` (note: `@swap` ≠ swap yet). Else: `partition`, `file`, `zram`, `both`, `none` | `file` / `partition` |
 | Swap size | GiB | ~RAM-based (2–8) |
