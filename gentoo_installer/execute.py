@@ -2113,28 +2113,75 @@ def _probe_to_shell_test(test: tuple[str, ...]) -> str:
     return " ".join(shlex.quote(part) for part in test)
 
 
+def required_atom_plan(cfg: InstallConfig) -> list[str]:
+    """Service/network atoms shared by keywords, emerge, and H5 final checks (M4).
+
+    Single ordered list so package.accept_keywords, the chroot emerge fetch set, and
+    fail-closed probes cannot silently drift (elogind, nftables, …).
+    """
+    atoms: list[str] = []
+    if cfg.network_stack == "networkmanager":
+        atoms.extend(["net-misc/networkmanager", "sys-apps/dbus"])
+        if cfg.init_system == "openrc":
+            atoms.append("sys-auth/elogind")
+    elif cfg.network_stack == "dhcpcd":
+        atoms.append("net-misc/dhcpcd")
+    elif cfg.network_stack == "systemd-networkd":
+        atoms.append("sys-apps/systemd")
+    if cfg.wireless:
+        atoms.extend(["net-wireless/iw", "net-wireless/wpa_supplicant"])
+    if cfg.sshd:
+        atoms.append("net-misc/openssh")
+    if cfg.cups:
+        atoms.append("net-print/cups")
+    if cfg.chrony:
+        atoms.append("net-misc/chrony")
+    if cfg.init_system == "openrc":
+        if cfg.syslog != "none":
+            atoms.append(f"app-admin/{cfg.syslog}")
+        if cfg.cron != "none":
+            atoms.append(f"sys-process/{cfg.cron}")
+    if cfg.zram:
+        atoms.append(
+            "sys-apps/zram-generator" if cfg.init_system == "systemd" else "sys-block/zram-init"
+        )
+    if cfg.nftables:
+        atoms.append("net-firewall/nftables")
+    return atoms
+
+
+def _critical_probe_for(cfg: InstallConfig, atom: str) -> tuple[str, ...] | None:
+    """Probe for an H5 fail-closed service atom; None if the atom is plan-only support."""
+    openrc = cfg.init_system == "openrc"
+    if atom == "net-misc/networkmanager":
+        return _service_probe(openrc, "NetworkManager")
+    if atom == "net-misc/dhcpcd":
+        return _service_probe(openrc, "dhcpcd")
+    if atom == "sys-apps/systemd" and cfg.network_stack == "systemd-networkd":
+        return ("command", "-v", "networkctl")
+    if atom == "net-misc/chrony":
+        return _service_probe(openrc, "chronyd")
+    if atom == "net-firewall/nftables":
+        return ("command", "-v", "nft")
+    if openrc and atom.startswith("app-admin/") and atom == f"app-admin/{cfg.syslog}":
+        return _service_probe(True, cfg.syslog)
+    if openrc and atom.startswith("sys-process/") and atom == f"sys-process/{cfg.cron}":
+        svc = "cronie" if cfg.cron == "cronie" else cfg.cron
+        return _service_probe(True, svc)
+    return None
+
+
 def _critical_service_tools(cfg: InstallConfig) -> list[tuple[str, tuple[str, ...]]]:
     """Network / chrony / firewall / syslog / cron — fail closed for install success (H5).
 
+    Derived from required_atom_plan so keywords/emerge/checks stay aligned (M4).
     Target Gentoo chronyd when cfg.chrony is enabled. Never implies removing chrony.
     """
     tools: list[tuple[str, tuple[str, ...]]] = []
-    openrc = cfg.init_system == "openrc"
-    if cfg.network_stack == "networkmanager":
-        tools.append(("net-misc/networkmanager", _service_probe(openrc, "NetworkManager")))
-    elif cfg.network_stack == "dhcpcd":
-        tools.append(("net-misc/dhcpcd", _service_probe(openrc, "dhcpcd")))
-    elif cfg.network_stack == "systemd-networkd":
-        tools.append(("sys-apps/systemd", ("command", "-v", "networkctl")))
-    if cfg.chrony:
-        tools.append(("net-misc/chrony", _service_probe(openrc, "chronyd")))
-    if cfg.nftables:
-        tools.append(("net-firewall/nftables", ("command", "-v", "nft")))
-    if openrc and cfg.syslog != "none":
-        tools.append((f"app-admin/{cfg.syslog}", _service_probe(True, cfg.syslog)))
-    if openrc and cfg.cron != "none":
-        svc = "cronie" if cfg.cron == "cronie" else cfg.cron
-        tools.append((f"sys-process/{cfg.cron}", _service_probe(True, svc)))
+    for atom in required_atom_plan(cfg):
+        probe = _critical_probe_for(cfg, atom)
+        if probe is not None:
+            tools.append((atom, probe))
     return tools
 
 
@@ -3783,40 +3830,8 @@ def _bare_atom(atom: str) -> str:
 
 
 def _service_stack_atoms(cfg: InstallConfig) -> list[str]:
-    """Network, syslog, cron, ZRAM, and related packages the chroot may emerge.
-
-    Kept in sync with the net_pkgs list inside render_chroot_script so keywords
-    cover every stack choice (including systemd-networkd and dbus on systemd).
-    """
-    atoms: list[str] = []
-    if cfg.network_stack == "networkmanager":
-        atoms.extend(["net-misc/networkmanager", "sys-apps/dbus"])
-        if cfg.init_system == "openrc":
-            atoms.append("sys-auth/elogind")
-    elif cfg.network_stack == "dhcpcd":
-        atoms.append("net-misc/dhcpcd")
-    elif cfg.network_stack == "systemd-networkd":
-        atoms.append("sys-apps/systemd")
-    if cfg.wireless:
-        atoms.extend(["net-wireless/iw", "net-wireless/wpa_supplicant"])
-    if cfg.sshd:
-        atoms.append("net-misc/openssh")
-    if cfg.cups:
-        atoms.append("net-print/cups")
-    if cfg.chrony:
-        atoms.append("net-misc/chrony")
-    if cfg.init_system == "openrc":
-        if cfg.syslog != "none":
-            atoms.append(f"app-admin/{cfg.syslog}")
-        if cfg.cron != "none":
-            atoms.append(f"sys-process/{cfg.cron}")
-    if cfg.zram:
-        atoms.append(
-            "sys-apps/zram-generator" if cfg.init_system == "systemd" else "sys-block/zram-init"
-        )
-    if cfg.nftables:
-        atoms.append("net-firewall/nftables")
-    return atoms
+    """Alias for required_atom_plan — kept for call sites / older tests."""
+    return required_atom_plan(cfg)
 
 
 # Emerged before any eselect-repository enable/sync. Must be keyworded+unmasked first.
@@ -4146,7 +4161,7 @@ def _atoms_to_unmask(cfg: InstallConfig) -> list[str]:
     atoms.extend(atom for atom, _test in _required_tools(cfg, loaders))
     atoms.extend(atom for atom, _test in _display_manager_tools(cfg))
     atoms.extend(_support_atoms(cfg))
-    atoms.extend(_service_stack_atoms(cfg))
+    atoms.extend(required_atom_plan(cfg))
     atoms.extend(_chroot_helper_atoms(cfg))
     if cfg.linux_firmware:
         atoms.append("sys-kernel/linux-firmware")
@@ -4333,29 +4348,8 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
         extra_fw.append("sys-firmware/sof-firmware")
     if cfg.intel_microcode:
         extra_fw.append("sys-firmware/intel-microcode")
-    net_pkgs = []
-    if cfg.network_stack == "networkmanager":
-        net_pkgs.append("net-misc/networkmanager")
-        net_pkgs.append("sys-apps/dbus")
-    elif cfg.network_stack == "dhcpcd":
-        net_pkgs.append("net-misc/dhcpcd")
-    elif cfg.network_stack == "systemd-networkd":
-        net_pkgs.append("sys-apps/systemd")
-    if cfg.wireless:
-        net_pkgs.extend(["net-wireless/iw", "net-wireless/wpa_supplicant"])
-    if cfg.sshd:
-        net_pkgs.append("net-misc/openssh")
-    if cfg.cups:
-        net_pkgs.append("net-print/cups")
-    if cfg.chrony:
-        net_pkgs.append("net-misc/chrony")
-    if cfg.init_system == "openrc":
-        if cfg.syslog != "none":
-            net_pkgs.append(f"app-admin/{cfg.syslog}")
-        if cfg.cron != "none":
-            net_pkgs.append(f"sys-process/{cfg.cron}")
-    if cfg.zram:
-        net_pkgs.append("sys-apps/zram-generator" if cfg.init_system == "systemd" else "sys-block/zram-init")
+    # Same plan as keywords + H5 checks — do not rebuild a parallel net_pkgs list (M4).
+    net_pkgs = required_atom_plan(cfg)
 
     boot_pkgs = []
     if "grub" in loaders:
