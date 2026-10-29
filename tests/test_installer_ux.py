@@ -48,8 +48,15 @@ class AlreadySelectedPackageTests(unittest.TestCase):
         self.assertIn("gui-wm/hyprland", locked)
         self.assertIn("gui-apps/hyprpaper", locked)
         self.assertIn("media-video/pipewire", locked)
-        self.assertIn("www-client/firefox-bin:esr", locked)
-        self.assertIn("www-client/google-chrome", locked)
+        # end-4 dotfiles may pull Firefox; Chrome is never auto-locked as mandatory.
+        self.assertNotIn("www-client/google-chrome", locked)
+        cfg_no_dot = InstallConfig()
+        cfg_no_dot.window_managers = ["gui-wm/sway"]
+        cfg_no_dot.shell = "none"
+        cfg_no_dot.pipewire = False
+        locked_plain = _packages_locked_from_earlier_steps(cfg_no_dot)
+        self.assertNotIn("www-client/firefox-bin:esr", locked_plain)
+        self.assertNotIn("www-client/google-chrome", locked_plain)
 
     def test_locked_includes_greetd_when_chosen(self) -> None:
         cfg = InstallConfig()
