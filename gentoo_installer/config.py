@@ -79,6 +79,8 @@ class InstallConfig:
     boot_size_mib: int = 1024
     swap_mode: str = "partition"  # partition, file, zram, both, none
     swap_size_gib: int = 4
+    # Dataclass/YAML empty default stays False. Wizard wipe/full-disk paths ask
+    # with default Yes (Omarchy-inspired); mount-existing open-only stays No.
     luks: bool = False
     luks_passphrase: str = ""  # Never log this; only passed into cryptsetup / secrets file.
     tpm2_unlock: bool = False  # Writes a helper script; enrollment happens after first boot.
@@ -149,6 +151,10 @@ class InstallConfig:
     chrony: bool = True
     zram: bool = True
     nftables: bool = True  # Basic inbound filter; SSH is opened only when sshd is enabled.
+    # When nftables is off and UFW is chosen: deny-in / allow-out (Omarchy-like).
+    ufw: bool = False
+    # LocalSend-style 53317/tcp+udp holes — opt-in only (never mandatory).
+    ufw_localsend: bool = False
     fstrim: bool = False  # Weekly trim when the target disk is non-rotational.
 
     # --- Handbook ch. 10: bootloader + splash ---
@@ -182,6 +188,16 @@ class InstallConfig:
     overlays: list[str] = field(default_factory=list)  # eselect repository names
     kde_games: bool = False
     flatpak: bool = False
+
+    # --- Omarchy-inspired optional UX (still Gentoo handbook; not an Omarchy port) ---
+    # Thin preset: Hyprland + LUKS + mise invite. Labelled "inspired by" in the wizard.
+    omarchy_inspired: bool = False
+    # Optional mise + small agent set — first-login invite only (no panel / passwordless sudo).
+    mise_agents: bool = False
+    mise_agent_tools: list[str] = field(default_factory=list)
+    # live | cache | bundled | builtin — set when the wizard refreshes Omarchy cues.
+    omarchy_sync_source: str = ""
+    omarchy_sync_ref: str = ""
 
     def public_dict(self) -> dict[str, Any]:
         """Serializable view with credentials removed (empty string, not stored as ***)."""

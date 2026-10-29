@@ -16,8 +16,15 @@ layout: handbook
 filesystem: ext4
 swap_mode: partition
 swap_size_gib: 4
+# Wizard wipe/full-disk paths default LUKS to Yes; this example opts out.
 luks: false
 encrypted_swap: false
+# Optional Omarchy-inspired flags (omit or false for a plain handbook run):
+# omarchy_inspired: false
+# mise_agents: false
+# mise_agent_tools: []
+# ufw: false
+# ufw_localsend: false
 network_mode: dhcp
 static_iface: ""
 netifrc_iface: ""

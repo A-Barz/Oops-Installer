@@ -2254,6 +2254,8 @@ def required_atom_plan(cfg: InstallConfig) -> list[str]:
         )
     if cfg.nftables:
         atoms.append("net-firewall/nftables")
+    elif cfg.ufw:
+        atoms.append("net-firewall/ufw")
     return atoms
 
 
@@ -2270,6 +2272,8 @@ def _critical_probe_for(cfg: InstallConfig, atom: str) -> tuple[str, ...] | None
         return _service_probe(openrc, "chronyd")
     if atom == "net-firewall/nftables":
         return ("command", "-v", "nft")
+    if atom == "net-firewall/ufw":
+        return ("command", "-v", "ufw")
     if openrc and atom.startswith("app-admin/") and atom == f"app-admin/{cfg.syslog}":
         return _service_probe(True, cfg.syslog)
     if openrc and atom.startswith("sys-process/") and atom == f"sys-process/{cfg.cron}":
@@ -2302,6 +2306,7 @@ def _critical_service_final_checks(cfg: InstallConfig) -> list[tuple[str, str]]:
             "sys-apps/systemd": "systemd-networkd",
             "net-misc/chrony": "chronyd",
             "net-firewall/nftables": "nftables",
+            "net-firewall/ufw": "ufw",
         }.get(atom)
         if label is None:
             if atom.startswith("app-admin/"):
@@ -2314,6 +2319,8 @@ def _critical_service_final_checks(cfg: InstallConfig) -> list[tuple[str, str]]:
     openrc = cfg.init_system == "openrc"
     if cfg.nftables and openrc:
         checks.append(("[ -e /etc/init.d/nftables ]", "nftables init"))
+    if cfg.ufw and not cfg.nftables and openrc:
+        checks.append(("[ -e /etc/init.d/ufw ]", "ufw init"))
     return checks
 
 
@@ -2379,6 +2386,8 @@ def _required_tools(cfg: InstallConfig, loaders: list[str]) -> list[tuple[str, t
     add("app-editors/nano", "command", "-v", "nano")
     if cfg.nftables:
         add("net-firewall/nftables", "command", "-v", "nft")
+    elif cfg.ufw:
+        add("net-firewall/ufw", "command", "-v", "ufw")
     if "grub" in loaders:
         add("sys-boot/grub", "bash", "-c", "command -v grub-install >/dev/null 2>&1 && command -v grub-mkconfig >/dev/null 2>&1")
         if cfg.firmware == "uefi":
@@ -4576,6 +4585,9 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
     if cfg.nftables:
         openrc_services.append("nftables")
         systemd_services.append("nftables")
+    elif cfg.ufw:
+        openrc_services.append("ufw")
+        systemd_services.append("ufw")
     if cfg.chrony:
         openrc_services.append("chronyd")
         systemd_services.append("chronyd")
@@ -4675,6 +4687,8 @@ done
     installkernel_conf = _installkernel_setup(cfg)
     mirrorselect_block = _mirrorselect_block(cfg)
     nftables_block = _nftables_block(cfg)
+    ufw_block = _ufw_block(cfg)
+    mise_invite_block = _mise_agents_invite_block(cfg)
     fstrim_block = _fstrim_block(cfg)
     kernel_seek = _kernel_found_shell("kernel_found")
 
@@ -4972,6 +4986,8 @@ fi
 {tpm_script}
 {selinux_block}
 {nftables_block}
+{ufw_block}
+{mise_invite_block}
 {fstrim_block}
 
 {grub_install}
@@ -6015,6 +6031,133 @@ cat > /etc/nftables.conf << 'EOF'
 EOF
 cp -f /etc/nftables.conf /var/lib/nftables/rules-save
 """
+
+
+def _ufw_block(cfg: InstallConfig) -> str:
+    """Configure UFW deny-incoming / allow-outgoing when UFW is the chosen stack.
+
+    LocalSend-style holes are opt-in only. Docker DNS holes from Omarchy are not
+    copied (Gentoo/OpenRC-safe minimal defaults).
+    """
+    if cfg.nftables or not cfg.ufw:
+        return ""
+    from . import omarchy_sync
+
+    ports = []
+    if cfg.ufw_localsend:
+        snap_ports = omarchy_sync.load_omarchy_snapshot(offline=True).localsend_ports
+        ports = snap_ports or [
+            {"port": 53317, "proto": "udp"},
+            {"port": 53317, "proto": "tcp"},
+        ]
+    allow_lines = []
+    if cfg.sshd:
+        allow_lines.append("ufw allow OpenSSH || ufw allow 22/tcp || true")
+    for entry in ports:
+        port = int(entry.get("port", 53317))
+        proto = str(entry.get("proto", "tcp"))
+        allow_lines.append(f"ufw allow {port}/{proto} || true")
+    allows = "\n".join(allow_lines)
+    enable_openrc = ""
+    if cfg.init_system == "openrc":
+        enable_openrc = """
+if [ -e /etc/init.d/ufw ]; then
+  rc-update add ufw default || true
+fi
+"""
+    else:
+        enable_openrc = """
+systemctl enable ufw || true
+"""
+    return f"""
+echo ">> ufw (deny incoming / allow outgoing)"
+if ! command -v ufw >/dev/null 2>&1; then
+  echo ">> ufw binary missing; skipping UFW defaults" >&2
+else
+  ufw --force reset || true
+  ufw default deny incoming || true
+  ufw default allow outgoing || true
+{textwrap.indent(allows, "  ") if allows else ""}
+  sed -i 's/^ENABLED=.*/ENABLED=yes/' /etc/ufw/ufw.conf 2>/dev/null || true
+  ufw --force enable || true
+{enable_openrc}
+fi
+"""
+
+
+def _mise_agents_invite_block(cfg: InstallConfig) -> str:
+    """First-login invite for optional mise + small agent set (no panel / NOPASSWD)."""
+    if not cfg.mise_agents:
+        return ""
+    tools = list(cfg.mise_agent_tools) or list(omarchy_sync_safe_agents())
+    tools_csv = ", ".join(tools)
+    tools_toml = "\n".join(
+        f'{name} = {{ version = "latest", lazy = true }}' for name in tools
+    )
+    user = (cfg.username or "").strip()
+    if not user:
+        return """
+echo ">> mise/agents invite skipped (no non-root user)"
+"""
+    # Invite + sample mise config only — never enable passwordless sudo for agents.
+    return f"""
+echo ">> first-login mise/agents invite (inspired by Omarchy; Gentoo handbook path)"
+userhome=$(getent passwd {shlex.quote(user)} | cut -d: -f6 || true)
+if [ -n "$userhome" ] && [ -d "$userhome" ]; then
+  install -d -m 755 "$userhome/.config/mise" "$userhome/.config/oops-installer"
+  cat > "$userhome/.config/oops-installer/mise-agents-invite.txt" << 'INVITE'
+Oops-Installer — optional mise + AI agents (first login)
+========================================================
+
+This note is an invitation only. No agent was installed as a default.
+There is no Quickshell agents panel and no passwordless sudo for agents.
+
+1. Install mise (not in the official Gentoo tree at the time of this install):
+
+     curl https://mise.run | sh
+     # then add mise to your shell per https://mise.jdx.dev/getting-started.html
+
+   Or emerge from a trusted third-party overlay that ships dev-util/mise, if you
+   prefer Portage.
+
+2. Optional sample tools were written to ~/.config/mise/config.toml when missing.
+   Activate lazy shims after mise is on PATH:
+
+     mise trust
+     mise install
+     mise reshim
+
+Suggested tools for this install: {tools_csv}
+
+3. Decline anytime: delete ~/.config/oops-installer/mise-agents-invite.txt and
+   ~/.config/mise/config.toml (or edit tools out).
+
+Omarchy cues used for this run were sync'd at install time when the network
+allowed; offline installs used the bundled/cached snapshot. Handbook Gentoo
+remains the source of truth — this is inspired by Omarchy, not Omarchy.
+INVITE
+  if [ ! -f "$userhome/.config/mise/config.toml" ]; then
+    cat > "$userhome/.config/mise/config.toml" << 'MISE'
+# Optional Oops-Installer sample (inspired by Omarchy mise tools).
+# Safe to delete. No passwordless sudo is configured by the installer.
+[tools]
+{tools_toml}
+MISE
+  fi
+  chown -R {shlex.quote(user)}:{shlex.quote(user)} \\
+    "$userhome/.config/oops-installer" "$userhome/.config/mise" || true
+  # Also drop a short pointer next to HOWTO-style docs if the tree has HOWTO.txt.
+  if [ -f /root/HOWTO.txt ] || [ -f /HOWTO.txt ]; then
+    true
+  fi
+fi
+"""
+
+
+def omarchy_sync_safe_agents() -> list[str]:
+    from .omarchy_sync import SAFE_AGENT_TOOLS
+
+    return list(SAFE_AGENT_TOOLS)
 
 
 def _fstrim_block(cfg: InstallConfig) -> str:

@@ -128,16 +128,28 @@ disk until the review at the end.
                     sudo apt-get remove -y chrony
                     sudo apt-get install -y ntpsec
   4. Disks        Target disk, wipe, layout, filesystem, swap, LUKS
+                  (wipe/full-disk paths default LUKS on; clear opt-out)
   5. Stage3       OpenRC or systemd, desktop / hardened / musl
                   (stage tarball only — no kernel image; pick the kernel in step 7)
   6. Base         Profile, sync method, binhost, USE flags
   7. Kernel       gentoo-kernel-bin (fastest), gentoo-kernel, gentoo-sources,
                   CachyOS binary/source via CachyOS-kernels, firmware, dracut
   8. System       Hostname, locale, timezone, root and user passwords
-  9. Tools        NetworkManager / dhcpcd / netifrc, sshd, cron, CUPS
+  9. Tools        NetworkManager / dhcpcd / netifrc, sshd, cron, CUPS,
+                  nftables or UFW (deny-in/allow-out; LocalSend ports opt-in)
  10. Bootloader   GRUB (handbook default) and optional extras, Plymouth
- 11. Session      Wayland compositors, Noctalia or DMS, greetd
+ 11. Session      Wayland compositors, Noctalia or DMS, greetd;
+                  optional mise/agent first-login invite
  12. Packages     Shared Wayland utilities, suckless tools, popular apps
+
+Chapter 1 can apply a thin "inspired by Omarchy" preset (Hyprland + LUKS +
+mise invite). That is still a Gentoo handbook install — not Omarchy.
+
+At startup the installer fetches Omarchy cues from GitHub (omacom/omarchy,
+preferring the quattro install tree when present). On network failure it
+uses a cache under /var/tmp, then a bundled snapshot. Install never blocks
+solely because GitHub is unreachable. Arch packages are mapped to Gentoo
+atoms or skipped with a clear note — never pacstrapped.
 
 Menus (shown again at the start of the installer):
 
@@ -208,6 +220,11 @@ you chose are the sessions. tty2 stays a text console.
 If you enabled LUKS, you will type the passphrase at boot (unless you later
 enroll TPM2 yourself; this installer only drops a helper script).
 
+If you accepted the optional mise/agents invite, read
+~/.config/oops-installer/mise-agents-invite.txt after first login. mise is
+not forced from Portage; the note documents a user install. No passwordless
+sudo and no agents panel are configured by the installer.
+
 If you used Limine on UEFI, kernel upgrades later may need you to refresh
 /efi/limine.conf and copy the kernel onto the ESP. BIOS Limine uses
 /boot/limine.conf. GRUB's grub-mkconfig path is the more automatic handbook default.
@@ -246,9 +263,13 @@ Limits you should know
 ----------------------
   * The package list is a handbook-sized catalogue plus overlays, not
     every ebuild in Portage. You can type extra atoms such as app-misc/jq.
+  * LUKS defaults to Yes on wipe/full-disk paths; say No to opt out.
+    Mount-existing / open-only paths still default to No.
   * Encrypted swap is a separate LUKS volume (/dev/mapper/swap) when you
     use a swap partition or LV. LVM-on-LUKS already encrypts the volume
     group, so swap is not wrapped twice. A swap FILE is not encrypted.
+  * Omarchy-inspired options never remove Extra Compositors, DE metas,
+    Plymouth themes, Flatpak, or chrony from the Gentoo target.
   * TPM2 auto-unlock is not completed during install. Enroll after first
     boot (helper: /usr/local/sbin/gentoo-tpm-enroll.sh on the new system).
   * Static IP and OpenRC netifrc use the NIC you choose; they do not
