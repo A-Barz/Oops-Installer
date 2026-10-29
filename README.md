@@ -69,8 +69,11 @@ Defaults are `InstallConfig` values unless noted. Conditional steps are marked.
 
 ### 1 — About the installation
 
+Before chapter 1 the wizard refreshes **Omarchy cues** from GitHub (`omacom/omarchy`, prefer `quattro` install tree) with a short TLS timeout. Offline → cache → bundled snapshot; never blocks the handbook install.
+
 | Ask | Options / notes | Default |
 |-----|-----------------|---------|
+| Omarchy-inspired thin preset? | Hyprland + LUKS + mise invite (still Gentoo handbook; *inspired by*, not Omarchy) | No |
 | Dry-run only? | yes/no | No |
 | Resume interrupted install? | yes/no (skipped if already decided) | No |
 | Target mountpoint | prompt | `/mnt/gentoo` |
@@ -104,7 +107,7 @@ Defaults are `InstallConfig` values unless noted. Conditional steps are marked.
 | Swap size | GiB | ~RAM-based (2–8) |
 | ZRAM | Asked or implied by swap mode | Often yes with partition/file |
 | Console keymap | e.g. `us` | `us` |
-| LUKS2 | Forced on `lvm-luks`; else yes/no; passphrase; encrypt swap; TPM2 helper scripts. With GRUB+UEFI, first unlock is at the GRUB cryptodisk prompt (`GRUB_ENABLE_CRYPTODISK=y`); initramfs may ask again | Off unless lvm-luks |
+| LUKS2 | Forced on `lvm-luks`; else yes/no with **default Yes** on wipe/full-disk paths (clear opt-out); passphrase; encrypt swap; TPM2 helper scripts. Mount-existing open-only still defaults No. With GRUB+UEFI, first unlock is at the GRUB cryptodisk prompt (`GRUB_ENABLE_CRYPTODISK=y`); initramfs may ask again | **On** for wipe paths (opt out with No) |
 | ESP size | MiB (UEFI) | `1024` |
 
 SSD detection enables weekly `fstrim`. Disks under ~40 GiB get a warning. Dual boot is not supported.
@@ -172,7 +175,8 @@ There is no Ubuntu LTS ebuild and no fake `*-lts` package.
 | Ask | Options / notes | Default |
 |-----|-----------------|---------|
 | Networking stack | `networkmanager`, `dhcpcd`, `netifrc`; + `systemd-networkd` if systemd | NM on desktop |
-| Wireless tools / sshd / nftables | yes/no (nftables excludes catalogue `ufw`; one firewall stack) | Yes |
+| Wireless tools / sshd / nftables | yes/no (nftables excludes catalogue `ufw`; one firewall stack) | Yes (nftables) |
+| UFW (when nftables No) | deny-incoming / allow-outgoing; LocalSend-style ports **opt-in** | Off unless Omarchy-inspired preset |
 | CUPS | yes/no | No |
 | chrony | yes/no | Yes |
 | Syslog | `sysklogd`, `metalog`, `rsyslog`, `none` | `sysklogd` |
@@ -204,6 +208,8 @@ No desktop environment. Browsers are optional (Firefox ESR soft-default in chapt
 | Proprietary codecs | license accept for ugly/bad/libav, fdk-aac, faac, lame, ffmpeg | Off |
 
 **If a Wayland compositor or shell is chosen**, login is **greetd** (gtkgreet+labwc, or noctalia-greeter with Noctalia). X11-only dwm/i3 → text console / startx (no greeter). Shell without a WM → `labwc` is added.
+
+Optional **mise + small agent set** invite (inspired by Omarchy): first-login note only — no Quickshell panel, no passwordless sudo. `dev-util/mise` is not emerged from ::gentoo; the invite documents a user install. Agent names track the live Omarchy mise tools snapshot when possible.
 
 **Compositors / WMs offered**
 

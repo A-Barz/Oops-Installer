@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 *.json
 !example-config.json
+!gentoo_installer/data/omarchy_snapshot.json
 gentoo-install.yaml
 gentoo-install.yml
 !example-config.yaml

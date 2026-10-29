@@ -94,6 +94,16 @@ BANNER_NAME = "Oops-Installer"
 BANNER_TAGLINE = "'A Gentoo Wayland First and Suckless Setup Tool'"
 
 
+def _oops_mark_ascii() -> list[str]:
+    """Compact Gentoo-coloured mark above the wordmark (not a FIGlet / screensaver)."""
+    return [
+        r"   .--.  ",
+        r"  /    \ ",
+        r"  \ OO / ",
+        r"   '--'  ",
+    ]
+
+
 def _oops_installer_ascii() -> list[str]:
     """Block ASCII for Oops-Installer — replaces the old Gentoo 'g' / 8-ball mark."""
     # Raw strings keep backslashes literal. Lines padded to a shared width for centering.
@@ -116,7 +126,10 @@ def banner() -> None:
     rev = f"rev {INSTALLER_REV}"
     print()
     print(paint(f"  {BANNER_NAME}  {rev}", C.BOLD, C.PURPLE))
-    # Title art sits above the frame so wide glyphs are not clipped by box borders.
+    # Small mark, then the wordmark — purple/green Gentoo palette only.
+    for index, art in enumerate(_oops_mark_ascii()):
+        tone = C.GREEN if index % 2 == 0 else C.PURPLE
+        print(paint(art.center(w) if len(art) < w else art, C.BOLD, tone))
     for index, art in enumerate(_oops_installer_ascii()):
         # Gentoo palette: purple #54487A body, green #DDDA55 on alternating rows.
         tone = C.PURPLE if index % 2 == 0 else C.GREEN
@@ -128,6 +141,7 @@ def banner() -> None:
     print(paint("║" + "Host: Ubuntu Boot Image (Ubuntu image)".center(w - 2) + "║", C.BOLD, C.GREEN))
     print(paint("║" + "Ubuntu Boot Image live  →  Gentoo disk".center(w - 2) + "║", C.GREEN))
     print(paint("║" + "Handbook-ordered  ·  wiki.gentoo.org".center(w - 2) + "║", C.PURPLE))
+    print(paint("║" + "Wayland-first · suckless · OpenRC-safe".center(w - 2) + "║", C.GREEN))
     print(paint("╚" + line + "╝", C.BOLD, C.PURPLE))
     print()
     opening_thanks()

@@ -11,11 +11,37 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import catalog, detect, ui
+from . import catalog, detect, omarchy_sync, ui
 from .config import InstallConfig, part_name
 from .estimate import estimate_minutes, format_duration
+from .omarchy_sync import OmarchySnapshot
 
 HANDBOOK = "https://wiki.gentoo.org/wiki/Handbook:AMD64"
+
+# Per-run Omarchy cue snapshot (live → cache → bundled). Never blocks install.
+_OMARCHY_SNAP: OmarchySnapshot | None = None
+
+
+def _omarchy_snapshot() -> OmarchySnapshot:
+    """Lazy-load Omarchy cues once per wizard process."""
+    global _OMARCHY_SNAP
+    if _OMARCHY_SNAP is None:
+        _OMARCHY_SNAP = omarchy_sync.load_omarchy_snapshot()
+    return _OMARCHY_SNAP
+
+
+def refresh_omarchy_cues(cfg: InstallConfig) -> OmarchySnapshot:
+    """Fetch/inspect Omarchy GitHub cues and record source on the config."""
+    snap = _omarchy_snapshot()
+    cfg.omarchy_sync_source = snap.source
+    cfg.omarchy_sync_ref = f"{snap.repo}@{snap.ref}"
+    ui.info(omarchy_sync.summarize_for_ui(snap))
+    if snap.source != "live":
+        ui.info(
+            "Offline fallback: using cached/bundled Omarchy cues. "
+            "Handbook install continues; optional package picks may be less current."
+        )
+    return snap
 
 
 def profile_has_software(cfg: InstallConfig) -> bool:
@@ -168,6 +194,8 @@ def run_wizard(cfg: InstallConfig) -> InstallConfig:
         "Limine kernel upgrades need a limine.conf refresh; a swap *file* is not LUKS-wrapped."
     )
     print()
+    # Live Omarchy sync first so later chapters can adjust optional defaults for this run.
+    refresh_omarchy_cues(cfg)
 
     _about(cfg)
     _media(cfg)
@@ -186,10 +214,11 @@ def run_wizard(cfg: InstallConfig) -> InstallConfig:
 
 
 def _about(cfg: InstallConfig) -> None:
-    """Handbook: About — dry-run, resume, mountpoint."""
+    """Handbook: About — dry-run, resume, mountpoint, optional Omarchy-inspired preset."""
     ui.chapter("1", "About the installation", f"{HANDBOOK}/Installation/About")
     ui.info("A live Ubuntu Boot Image session is used as the host instead of the Gentoo minimal ISO.")
     ui.info("After you answer every chapter, a summary is shown before any disk is touched.")
+    _ask_omarchy_inspired_preset(cfg)
     cfg.dry_run = ui.ask_yes_no("Dry-run only (print commands, do not change disks)?", False)
     if getattr(cfg, "_resume_decided", False):
         if cfg.resume:
@@ -199,6 +228,59 @@ def _about(cfg: InstallConfig) -> None:
     else:
         cfg.resume = ui.ask_yes_no("Resume a previous interrupted install?", False)
     cfg.mountpoint = ui.prompt("Target mountpoint", cfg.mountpoint)
+
+
+def _ask_omarchy_inspired_preset(cfg: InstallConfig) -> None:
+    """Thin optional preset: Hyprland + encrypt + mise invite. Still Gentoo handbook."""
+    snap = _omarchy_snapshot()
+    ui.info(
+        "Optional preset (inspired by Omarchy, not Omarchy): Hyprland + LUKS on wipe paths "
+        "+ optional mise/agent invite. Extra compositors, DE metas, Plymouth, and Flatpak stay available."
+    )
+    cfg.omarchy_inspired = ui.ask_yes_no(
+        "Apply the Omarchy-inspired thin preset defaults for this run?",
+        bool(cfg.omarchy_inspired),
+    )
+    if not cfg.omarchy_inspired:
+        return
+    ui.ok("Inspired by Omarchy — handbook Gentoo path with adjusted defaults (OpenRC-safe).")
+    cfg.luks = True if snap.encrypt_default_on else cfg.luks
+    if "gui-wm/hyprland" not in cfg.window_managers:
+        cfg.window_managers = list(cfg.window_managers) + ["gui-wm/hyprland"]
+    cfg.mise_agents = True
+    cfg.mise_agent_tools = snap.agent_tools_for_invite()
+    # Prefer UFW defaults when the Omarchy firewall leaf says deny-in/allow-out.
+    if snap.ufw_deny_incoming and snap.ufw_allow_outgoing:
+        cfg.nftables = False
+        cfg.ufw = True
+        ui.info("Preset prefers UFW (deny incoming / allow outgoing). LocalSend holes stay opt-in.")
+    ui.info(
+        "mise is not in the official Gentoo tree — the installer writes a first-login invite "
+        f"for: {', '.join(cfg.mise_agent_tools)}. No Quickshell agents panel; no passwordless sudo."
+    )
+    mapped = [
+        atom
+        for atom in snap.mapped_gentoo_atoms
+        if atom
+        not in {
+            "gui-wm/hyprland",
+            "net-firewall/ufw",
+            "net-misc/networkmanager",
+            "net-misc/openssh",
+        }
+    ][:8]
+    if mapped:
+        ui.info(
+            "Mapped Omarchy package cues (Gentoo atoms you may tick later): "
+            + ", ".join(mapped)
+        )
+    skipped_notable = [
+        s
+        for s in snap.skipped_packages
+        if any(k in s for k in ("mise", "quickshell", "localsend", "yay", "chromium"))
+    ][:6]
+    if skipped_notable:
+        ui.info("Skipped Arch/Omarchy-only packages (not emerged): " + "; ".join(skipped_notable))
 
 
 def _media(cfg: InstallConfig) -> None:
@@ -647,15 +729,24 @@ def _disks(cfg: InstallConfig) -> None:
             cfg.encrypted_swap = False
             cfg.tpm2_unlock = False
     else:
+        # Wipe / full-disk paths: LUKS default ON (Omarchy-inspired); clear opt-out.
+        snap = _omarchy_snapshot()
+        luks_default = bool(snap.encrypt_default_on) or bool(cfg.omarchy_inspired)
         if cfg.layout != "lvm-luks":
             ui.guru_note(
                 "Encrypting root (and home on that volume) keeps the disk unreadable if "
                 "the machine is lost or stolen — cold plugs cannot read your files."
             )
+            ui.info(
+                "Default is Yes for wipe/full-disk installs. Say No only for VMs, "
+                "throwaway disks, or when you knowingly opt out of disk encryption."
+            )
         cfg.luks = cfg.layout == "lvm-luks" or ui.ask_yes_no(
             "LUKS2 encrypt the root (and home on it; optionally swap)?",
-            cfg.layout == "lvm-luks",
+            True if cfg.layout == "lvm-luks" else luks_default,
         )
+        if not cfg.luks and cfg.layout != "lvm-luks":
+            ui.warn("LUKS opted out — the root filesystem will be readable if the disk leaves your hands.")
         if cfg.luks:
             cfg.luks_passphrase = ui.ask_password("LUKS passphrase")
             ui.info(
@@ -1024,15 +1115,46 @@ def _tools(cfg: InstallConfig) -> None:
     cfg.sshd = ui.ask_yes_no("Install and enable sshd?", True)
     ui.info(
         "One firewall stack only: nftables here excludes catalogue net-firewall/ufw. "
-        "Say no if you want ufw from the package list instead."
+        "Say no if you want UFW (deny incoming / allow outgoing) instead."
     )
-    cfg.nftables = ui.ask_yes_no("Install nftables and drop unsolicited inbound connections?", True)
+    nft_default = False if (cfg.omarchy_inspired and cfg.ufw) else True
+    cfg.nftables = ui.ask_yes_no(
+        "Install nftables and drop unsolicited inbound connections?",
+        nft_default if not cfg.ufw else False,
+    )
     if cfg.nftables and cfg.sshd:
         ui.info("The firewall allows SSH on port 22. Other new inbound connections are dropped.")
+        cfg.ufw = False
+        cfg.ufw_localsend = False
     elif cfg.nftables:
         ui.info("The firewall drops new inbound connections. SSH is not opened.")
-    elif not cfg.nftables:
-        ui.info("nftables skipped — you may select net-firewall/ufw in the package catalogue.")
+        cfg.ufw = False
+        cfg.ufw_localsend = False
+    else:
+        snap = _omarchy_snapshot()
+        ui.info(
+            "nftables skipped. UFW (when chosen) uses deny-incoming / allow-outgoing"
+            + (" — matching current Omarchy firewall cues." if snap.ufw_deny_incoming else ".")
+        )
+        cfg.ufw = ui.ask_yes_no(
+            "Install and enable UFW with deny-incoming / allow-outgoing defaults?",
+            True if cfg.omarchy_inspired or cfg.ufw else False,
+        )
+        if cfg.ufw:
+            if cfg.sshd:
+                ui.info("UFW will allow SSH on port 22.")
+            ports = snap.localsend_ports or [
+                {"port": 53317, "proto": "udp"},
+                {"port": 53317, "proto": "tcp"},
+            ]
+            port_desc = ", ".join(f"{p['port']}/{p['proto']}" for p in ports)
+            cfg.ufw_localsend = ui.ask_yes_no(
+                f"Also open LocalSend-style ports ({port_desc})? (opt-in)",
+                False,
+            )
+        else:
+            cfg.ufw_localsend = False
+            ui.info("No installer firewall — you may still type net-firewall/ufw later in the catalogue.")
     cfg.cups = ui.ask_yes_no("Install CUPS printing?", False)
     cfg.chrony = ui.ask_yes_no("Install chrony for NTP?", True)
     cfg.syslog = ui.menu(
@@ -1282,6 +1404,7 @@ def _finalize(cfg: InstallConfig) -> None:
         if cfg.window_managers:
             ui.info("dwm and i3 start from the text console with startx.")
     ui.info("The next chapter is suckless tools and popular apps. There is no desktop list.")
+    _ask_mise_agents(cfg)
 
 
 def _ask_nonfree_codecs(cfg: InstallConfig) -> None:
@@ -1346,11 +1469,20 @@ def _packages_locked_from_earlier_steps(cfg: InstallConfig) -> set[str]:
         locked.update({"x11-misc/lightdm", "x11-misc/sddm", "x11-misc/slim"})
     # M9: hide catalogue ufw (and duplicate nftables) when installer nftables is on.
     locked.update(catalog.firewall_catalogue_hidden(bool(cfg.nftables)))
+    # When the tools chapter chose UFW, do not re-offer catalogue nftables.
+    if cfg.ufw and not cfg.nftables:
+        locked.add(catalog.NFTABLES_ATOM)
     return locked
 
 
 def _apply_firewall_exclusion(cfg: InstallConfig) -> None:
     """M9: keep one firewall stack after catalogue / typed-atom picks."""
+    # Wizard UFW path queues the atom before mutual-exclusion runs.
+    if cfg.ufw and not cfg.nftables:
+        if not catalog.atom_list_has(cfg.selected_packages, catalog.UFW_ATOM):
+            cfg.selected_packages = list(cfg.selected_packages or []) + [catalog.UFW_ATOM]
+        if not catalog.atom_list_has(cfg.extra_packages, catalog.UFW_ATOM):
+            cfg.extra_packages = list(cfg.extra_packages or []) + [catalog.UFW_ATOM]
     nftables, selected, extra, warnings = catalog.enforce_firewall_mutual_exclusion(
         bool(cfg.nftables),
         list(cfg.selected_packages or []),
@@ -1359,8 +1491,43 @@ def _apply_firewall_exclusion(cfg: InstallConfig) -> None:
     cfg.nftables = nftables
     cfg.selected_packages = selected
     cfg.extra_packages = extra
+    if cfg.nftables:
+        cfg.ufw = False
+        cfg.ufw_localsend = False
+    elif catalog.atom_list_has(selected, catalog.UFW_ATOM) or catalog.atom_list_has(
+        extra, catalog.UFW_ATOM
+    ):
+        cfg.ufw = True
     for message in warnings:
         ui.warn(message)
+
+
+def _ask_mise_agents(cfg: InstallConfig) -> None:
+    """Optional mise + small agent set — invite only; never force a panel or passwordless sudo."""
+    snap = _omarchy_snapshot()
+    tools = cfg.mise_agent_tools or snap.agent_tools_for_invite()
+    print()
+    ui.info("—— Optional AI agents (mise) — inspired by Omarchy, Gentoo-safe ——")
+    ui.info(
+        "Omarchy uses mise for lazy agent CLIs and invites once at first login. "
+        "Oops does the same invite pattern only — no Quickshell agents panel, "
+        "no passwordless sudo, and no Arch pacstrap of agent packages."
+    )
+    ui.info(
+        "dev-util/mise is not in the official Gentoo tree; the invite documents the "
+        "upstream mise install. Agents stay optional after first boot."
+    )
+    default = bool(cfg.mise_agents or cfg.omarchy_inspired)
+    cfg.mise_agents = ui.ask_yes_no(
+        f"Write a first-login invite for mise + agents ({', '.join(tools)})?",
+        default,
+    )
+    if cfg.mise_agents:
+        cfg.mise_agent_tools = tools
+        ui.ok("First-login invite will be placed in the user home (and HOWTO note).")
+    else:
+        cfg.mise_agent_tools = []
+        ui.info("mise/agent invite skipped.")
 
 
 def _packages(cfg: InstallConfig) -> None:
@@ -1403,6 +1570,9 @@ def _packages(cfg: InstallConfig) -> None:
 
     locked = _packages_locked_from_earlier_steps(cfg)
     picked: list[str] = [atom for atom in cfg.selected_packages if atom not in locked]
+    if cfg.ufw and not cfg.nftables and catalog.UFW_ATOM not in picked:
+        picked.append(catalog.UFW_ATOM)
+        ui.info(f"{catalog.UFW_ATOM} queued from the firewall step (deny-in / allow-out).")
     niri_rows = catalog.niri_app_rows() if "gui-wm/niri" in cfg.window_managers else []
     if niri_rows and not getattr(cfg, "_software_loaded", False):
         for atom in catalog.niri_preselected(cfg.shell):
@@ -1757,8 +1927,10 @@ def _review(cfg: InstallConfig) -> None:
                 "nftables"
                 if cfg.nftables
                 else (
-                    "ufw"
-                    if catalog.atom_list_has(cfg.selected_packages, catalog.UFW_ATOM)
+                    "ufw deny-in/allow-out"
+                    + (" + LocalSend ports" if cfg.ufw_localsend else "")
+                    if cfg.ufw
+                    or catalog.atom_list_has(cfg.selected_packages, catalog.UFW_ATOM)
                     or catalog.atom_list_has(cfg.extra_packages, catalog.UFW_ATOM)
                     else "none"
                 )
@@ -1778,6 +1950,25 @@ def _review(cfg: InstallConfig) -> None:
         ("Browsers", catalog.browser_review_label(cfg.browser)),
         ("Non-free codecs", "yes (license accepted)" if cfg.nonfree_codecs else "no"),
         ("ZRAM", "yes" if cfg.zram else "no"),
+        (
+            "Omarchy-inspired",
+            "yes (Hyprland+LUKS+mise invite)" if cfg.omarchy_inspired else "no",
+        ),
+        (
+            "mise/agents invite",
+            (
+                "yes (" + ", ".join(cfg.mise_agent_tools) + ")"
+                if cfg.mise_agents and cfg.mise_agent_tools
+                else ("yes" if cfg.mise_agents else "no")
+            ),
+        ),
+        (
+            "Omarchy cues",
+            (
+                f"{cfg.omarchy_sync_source} {cfg.omarchy_sync_ref}".strip()
+                or "not fetched"
+            ),
+        ),
         (
             "Login manager",
             _login_manager_label(cfg),
