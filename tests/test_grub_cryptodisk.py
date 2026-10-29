@@ -71,14 +71,14 @@ class GrubCryptodiskTests(unittest.TestCase):
         )
         self.assertIn("GRUB_ENABLE_CRYPTODISK=y", script)
         self.assertIn("LUKS+GRUB requires GRUB_ENABLE_CRYPTODISK=y", script)
-        self.assertIn("LUKS+GRUB requires /boot/grub/grub.cfg", script)
+        self.assertIn("missing /boot/grub/grub.cfg", script)
 
     def test_final_checks_luks_grub_missing_cryptodisk_fatal(self) -> None:
         cfg = _cfg(luks=True, luks_passphrase="secret")
         text = _final_tool_checks(cfg, ["grub"])
         self.assertIn("LUKS+GRUB requires GRUB_ENABLE_CRYPTODISK=y", text)
         self.assertIn("missing=1", text)
-        self.assertIn("LUKS+GRUB requires /boot/grub/grub.cfg", text)
+        self.assertIn("missing /boot/grub/grub.cfg", text)
 
     def test_final_checks_non_luks_skips_cryptodisk(self) -> None:
         cfg = _cfg(luks=False)
