@@ -1,15 +1,16 @@
-"""Omarchy-inspired UX: live sync fallback, LUKS default, UFW, mise invite, banner."""
+"""Keepers from PR #25: LUKS Yes default, UFW LocalSend, mise invite, banner polish.
+
+Omarchy live sync / snapshot / inspired-by preset are intentionally absent.
+"""
 
 from __future__ import annotations
 
+import inspect
 import io
-import json
-import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
-from gentoo_installer import catalog, omarchy_sync, ui
+from gentoo_installer import catalog, ui
 from gentoo_installer.config import InstallConfig
 from gentoo_installer.execute import (
     _mise_agents_invite_block,
@@ -17,66 +18,24 @@ from gentoo_installer.execute import (
     render_chroot_script,
     required_atom_plan,
 )
-from gentoo_installer.wizard import _apply_firewall_exclusion, _packages_locked_from_earlier_steps
-
-
-class OmarchySyncTests(unittest.TestCase):
-    def test_bundled_snapshot_loads_offline(self) -> None:
-        snap = omarchy_sync.load_omarchy_snapshot(offline=True)
-        self.assertIn(snap.source, {"bundled", "cache", "builtin"})
-        self.assertTrue(snap.encrypt_default_on)
-        self.assertTrue(snap.ufw_deny_incoming)
-        self.assertTrue(snap.ufw_allow_outgoing)
-        tools = snap.agent_tools_for_invite()
-        self.assertTrue(tools)
-        self.assertLessEqual(len(tools), 4)
-        for name in tools:
-            self.assertIn(name, omarchy_sync.SAFE_AGENT_TOOLS)
-
-    def test_map_arch_packages_maps_and_skips(self) -> None:
-        mapped, skipped = omarchy_sync.map_arch_packages(
-            ["hyprland", "git", "mise", "quickshell", "ufw", "unknown-omarchy-pkg"]
-        )
-        self.assertIn("gui-wm/hyprland", mapped)
-        self.assertIn("dev-vcs/git", mapped)
-        self.assertIn("net-firewall/ufw", mapped)
-        self.assertTrue(any("mise" in s for s in skipped))
-        self.assertTrue(any("quickshell" in s for s in skipped))
-        self.assertTrue(any("unknown-omarchy-pkg" in s for s in skipped))
-
-    def test_live_failure_falls_back_without_raising(self) -> None:
-        with mock.patch.object(
-            omarchy_sync,
-            "_fetch_live",
-            side_effect=TimeoutError("boom"),
-        ):
-            with tempfile.TemporaryDirectory() as tmp:
-                cache = Path(tmp) / "cache.json"
-                with mock.patch.object(omarchy_sync, "cache_path", return_value=cache):
-                    snap = omarchy_sync.load_omarchy_snapshot(timeout=0.1)
-        self.assertIn(snap.source, {"bundled", "cache", "builtin"})
-        self.assertIn("live", snap.error)
-
-    def test_bundle_file_present(self) -> None:
-        path = omarchy_sync.bundle_path()
-        self.assertTrue(path.is_file(), msg=str(path))
-        data = json.loads(path.read_text(encoding="utf-8"))
-        self.assertEqual(data.get("repo"), "omacom/omarchy")
-        self.assertTrue(data.get("mise_tools"))
+from gentoo_installer.wizard import (
+    _apply_firewall_exclusion,
+    _packages_locked_from_earlier_steps,
+)
 
 
 class LuksWizardDefaultTests(unittest.TestCase):
     def test_disks_source_defaults_luks_yes_on_wipe_paths(self) -> None:
-        import inspect
-
         from gentoo_installer import wizard
 
         src = inspect.getsource(wizard._disks)
         self.assertIn("clear opt-out", src)
         self.assertIn("LUKS2 encrypt the root", src)
-        # ask_yes_no(..., luks_default) with encrypt_default_on → Yes on wipe paths.
-        self.assertIn("luks_default", src)
         self.assertIn("LUKS opted out", src)
+        self.assertIn("Default is Yes for wipe/full-disk", src)
+        # ask_yes_no(..., True) on wipe paths — not driven by a live snapshot.
+        self.assertNotIn("omarchy", src.lower())
+        self.assertNotIn("_omarchy_snapshot", src)
 
 
 class UfwBlockTests(unittest.TestCase):
@@ -146,6 +105,8 @@ class MiseInviteTests(unittest.TestCase):
         self.assertNotIn("NOPASSWD", block)
         self.assertIn("no passwordless sudo", block.lower())
         self.assertIn("no Quickshell agents panel", block)
+        self.assertNotIn("Omarchy", block)
+        self.assertNotIn("omarchy", block.lower())
 
     def test_invite_skipped_without_flag(self) -> None:
         cfg = InstallConfig()
@@ -184,14 +145,29 @@ class BannerPolishTests(unittest.TestCase):
             self.assertIn(line.rstrip(), text)
 
 
-class OmarchyPresetFieldsTests(unittest.TestCase):
-    def test_config_has_omarchy_fields(self) -> None:
+class KeptConfigFieldsTests(unittest.TestCase):
+    def test_config_has_keeper_fields_not_omarchy_ux(self) -> None:
         cfg = InstallConfig()
-        self.assertFalse(cfg.omarchy_inspired)
+        self.assertFalse(hasattr(cfg, "omarchy_inspired"))
+        self.assertFalse(hasattr(cfg, "omarchy_sync_source"))
+        self.assertFalse(hasattr(cfg, "omarchy_sync_ref"))
         self.assertFalse(cfg.mise_agents)
         self.assertEqual(cfg.mise_agent_tools, [])
         self.assertFalse(cfg.ufw)
         self.assertFalse(cfg.ufw_localsend)
+
+
+class OmarchyUxGoneTests(unittest.TestCase):
+    def test_omarchy_sync_module_removed(self) -> None:
+        with self.assertRaises(ImportError):
+            from gentoo_installer import omarchy_sync  # noqa: F401
+
+    def test_wizard_has_no_omarchy_preset_or_sync(self) -> None:
+        from gentoo_installer import wizard
+
+        self.assertFalse(hasattr(wizard, "refresh_omarchy_cues"))
+        self.assertFalse(hasattr(wizard, "_ask_omarchy_inspired_preset"))
+        self.assertFalse(hasattr(wizard, "_omarchy_snapshot"))
 
 
 if __name__ == "__main__":

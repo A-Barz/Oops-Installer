@@ -6033,23 +6033,25 @@ cp -f /etc/nftables.conf /var/lib/nftables/rules-save
 """
 
 
+# LocalSend-style ports when cfg.ufw_localsend is True (opt-in).
+_LOCALSEND_UFW_PORTS = (
+    {"port": 53317, "proto": "udp"},
+    {"port": 53317, "proto": "tcp"},
+)
+
+# Default mise agent names when the invite is enabled without an explicit list.
+_DEFAULT_MISE_AGENT_TOOLS = ("claude", "codex", "opencode", "cursor-agent")
+
+
 def _ufw_block(cfg: InstallConfig) -> str:
     """Configure UFW deny-incoming / allow-outgoing when UFW is the chosen stack.
 
-    LocalSend-style holes are opt-in only. Docker DNS holes from Omarchy are not
-    copied (Gentoo/OpenRC-safe minimal defaults).
+    LocalSend-style holes are opt-in only (Gentoo/OpenRC-safe minimal defaults).
     """
     if cfg.nftables or not cfg.ufw:
         return ""
-    from . import omarchy_sync
 
-    ports = []
-    if cfg.ufw_localsend:
-        snap_ports = omarchy_sync.load_omarchy_snapshot(offline=True).localsend_ports
-        ports = snap_ports or [
-            {"port": 53317, "proto": "udp"},
-            {"port": 53317, "proto": "tcp"},
-        ]
+    ports = list(_LOCALSEND_UFW_PORTS) if cfg.ufw_localsend else []
     allow_lines = []
     if cfg.sshd:
         allow_lines.append("ufw allow OpenSSH || ufw allow 22/tcp || true")
@@ -6089,7 +6091,7 @@ def _mise_agents_invite_block(cfg: InstallConfig) -> str:
     """First-login invite for optional mise + small agent set (no panel / NOPASSWD)."""
     if not cfg.mise_agents:
         return ""
-    tools = list(cfg.mise_agent_tools) or list(omarchy_sync_safe_agents())
+    tools = list(cfg.mise_agent_tools) or list(_DEFAULT_MISE_AGENT_TOOLS)
     tools_csv = ", ".join(tools)
     tools_toml = "\n".join(
         f'{name} = {{ version = "latest", lazy = true }}' for name in tools
@@ -6101,7 +6103,7 @@ echo ">> mise/agents invite skipped (no non-root user)"
 """
     # Invite + sample mise config only — never enable passwordless sudo for agents.
     return f"""
-echo ">> first-login mise/agents invite (inspired by Omarchy; Gentoo handbook path)"
+echo ">> first-login mise/agents invite"
 userhome=$(getent passwd {shlex.quote(user)} | cut -d: -f6 || true)
 if [ -n "$userhome" ] && [ -d "$userhome" ]; then
   install -d -m 755 "$userhome/.config/mise" "$userhome/.config/oops-installer"
@@ -6131,14 +6133,10 @@ Suggested tools for this install: {tools_csv}
 
 3. Decline anytime: delete ~/.config/oops-installer/mise-agents-invite.txt and
    ~/.config/mise/config.toml (or edit tools out).
-
-Omarchy cues used for this run were sync'd at install time when the network
-allowed; offline installs used the bundled/cached snapshot. Handbook Gentoo
-remains the source of truth — this is inspired by Omarchy, not Omarchy.
 INVITE
   if [ ! -f "$userhome/.config/mise/config.toml" ]; then
     cat > "$userhome/.config/mise/config.toml" << 'MISE'
-# Optional Oops-Installer sample (inspired by Omarchy mise tools).
+# Optional Oops-Installer sample mise tools.
 # Safe to delete. No passwordless sudo is configured by the installer.
 [tools]
 {tools_toml}
@@ -6152,12 +6150,6 @@ MISE
   fi
 fi
 """
-
-
-def omarchy_sync_safe_agents() -> list[str]:
-    from .omarchy_sync import SAFE_AGENT_TOOLS
-
-    return list(SAFE_AGENT_TOOLS)
 
 
 def _fstrim_block(cfg: InstallConfig) -> str:

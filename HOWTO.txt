@@ -142,15 +142,6 @@ disk until the review at the end.
                   optional mise/agent first-login invite
  12. Packages     Shared Wayland utilities, suckless tools, popular apps
 
-Chapter 1 can apply a thin "inspired by Omarchy" preset (Hyprland + LUKS +
-mise invite). That is still a Gentoo handbook install — not Omarchy.
-
-At startup the installer fetches Omarchy cues from GitHub (omacom/omarchy,
-preferring the quattro install tree when present). On network failure it
-uses a cache under /var/tmp, then a bundled snapshot. Install never blocks
-solely because GitHub is unreachable. Arch packages are mapped to Gentoo
-atoms or skipped with a clear note — never pacstrapped.
-
 Menus (shown again at the start of the installer):
 
   Up / Down     move the highlight
@@ -268,8 +259,6 @@ Limits you should know
   * Encrypted swap is a separate LUKS volume (/dev/mapper/swap) when you
     use a swap partition or LV. LVM-on-LUKS already encrypts the volume
     group, so swap is not wrapped twice. A swap FILE is not encrypted.
-  * Omarchy-inspired options never remove Extra Compositors, DE metas,
-    Plymouth themes, Flatpak, or chrony from the Gentoo target.
   * TPM2 auto-unlock is not completed during install. Enroll after first
     boot (helper: /usr/local/sbin/gentoo-tpm-enroll.sh on the new system).
   * Static IP and OpenRC netifrc use the NIC you choose; they do not

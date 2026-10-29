@@ -69,11 +69,8 @@ Defaults are `InstallConfig` values unless noted. Conditional steps are marked.
 
 ### 1 — About the installation
 
-Before chapter 1 the wizard refreshes **Omarchy cues** from GitHub (`omacom/omarchy`, prefer `quattro` install tree) with a short TLS timeout. Offline → cache → bundled snapshot; never blocks the handbook install.
-
 | Ask | Options / notes | Default |
 |-----|-----------------|---------|
-| Omarchy-inspired thin preset? | Hyprland + LUKS + mise invite (still Gentoo handbook; *inspired by*, not Omarchy) | No |
 | Dry-run only? | yes/no | No |
 | Resume interrupted install? | yes/no (skipped if already decided) | No |
 | Target mountpoint | prompt | `/mnt/gentoo` |
@@ -176,7 +173,7 @@ There is no Ubuntu LTS ebuild and no fake `*-lts` package.
 |-----|-----------------|---------|
 | Networking stack | `networkmanager`, `dhcpcd`, `netifrc`; + `systemd-networkd` if systemd | NM on desktop |
 | Wireless tools / sshd / nftables | yes/no (nftables excludes catalogue `ufw`; one firewall stack) | Yes (nftables) |
-| UFW (when nftables No) | deny-incoming / allow-outgoing; LocalSend-style ports **opt-in** | Off unless Omarchy-inspired preset |
+| UFW (when nftables No) | deny-incoming / allow-outgoing; LocalSend-style ports **opt-in** | Off |
 | CUPS | yes/no | No |
 | chrony | yes/no | Yes |
 | Syslog | `sysklogd`, `metalog`, `rsyslog`, `none` | `sysklogd` |
@@ -209,7 +206,7 @@ No desktop environment. Browsers are optional (Firefox ESR soft-default in chapt
 
 **If a Wayland compositor or shell is chosen**, login is **greetd** (gtkgreet+labwc, or noctalia-greeter with Noctalia). X11-only dwm/i3 → text console / startx (no greeter). Shell without a WM → `labwc` is added.
 
-Optional **mise + small agent set** invite (inspired by Omarchy): first-login note only — no Quickshell panel, no passwordless sudo. `dev-util/mise` is not emerged from ::gentoo; the invite documents a user install. Agent names track the live Omarchy mise tools snapshot when possible.
+Optional **mise + small agent set** invite: first-login note only — no Quickshell panel, no passwordless sudo. `dev-util/mise` is not emerged from ::gentoo; the invite documents a user install.
 
 **Compositors / WMs offered**
 
