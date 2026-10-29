@@ -553,14 +553,22 @@ def _unmount_path(runner: Runner, path: str) -> None:
     )
 
 
-def _disk_teardown_script(cfg: InstallConfig) -> str:
-    """Bash that swapoffs, unmounts, and deactivates dm/LVM before wipe/mkfs.
+def _disk_teardown_script(cfg: InstallConfig, mode: str = "full") -> str:
+    """Bash that swapoffs, unmounts, and optionally deactivates dm/LVM.
 
     Order matters: a swap *file* on btrfs `@swap` (or partition swap) keeps the
     device busy if umount runs first — the resume→reformat path hit that and
     mkfs.btrfs / subvolume create failed with device busy. Fail closed if the
     target mountpoint or any partition of the target disk stays busy.
+
+    mode:
+      full — pre-wipe / resume-fresh / unmount-for-reuse: also cryptsetup close,
+             vgchange -an, and md stop.
+      mounts_only — pre-mkfs: swapoff + umount only. Do **not** close LUKS or
+             deactivate LVM/MD maps this phase just opened (H1).
     """
+    if mode not in {"full", "mounts_only"}:
+        raise ValueError(f"unknown disk teardown mode: {mode!r}")
     root = (cfg.mountpoint or "/mnt/gentoo").rstrip("/") or "/mnt/gentoo"
     disks = [d for d in (cfg.target_disk, cfg.extra_raid_disk) if d and str(d).startswith("/dev/")]
     qroot = shlex.quote(root)
@@ -601,16 +609,26 @@ def _disk_teardown_script(cfg: InstallConfig) -> str:
         "    done",
         "  done",
         "done",
-        'echo ">> teardown: close LUKS / deactivate LVM / stop MD if used"',
-        "cryptsetup close swap 2>/dev/null || true",
-        "cryptsetup close root 2>/dev/null || true",
     ]
-    if lvm:
-        lines.append("vgchange -an vg0 2>/dev/null || true")
-        lines.append("vgchange -an 2>/dev/null || true")
-    if md:
-        lines.append("mdadm --stop /dev/md/root 2>/dev/null || true")
-        lines.append("mdadm --stop --scan 2>/dev/null || true")
+    if mode == "full":
+        lines.extend(
+            [
+                'echo ">> teardown: close LUKS / deactivate LVM / stop MD if used"',
+                "cryptsetup close swap 2>/dev/null || true",
+                "cryptsetup close root 2>/dev/null || true",
+            ]
+        )
+        if lvm:
+            lines.append("vgchange -an vg0 2>/dev/null || true")
+            lines.append("vgchange -an 2>/dev/null || true")
+        if md:
+            lines.append("mdadm --stop /dev/md/root 2>/dev/null || true")
+            lines.append("mdadm --stop --scan 2>/dev/null || true")
+    else:
+        # Keep mapper/VG/MD nodes this phase owns so mkfs can target them.
+        lines.append(
+            'echo ">> teardown: mounts-only (keeping LUKS/LVM/MD maps open for mkfs)"'
+        )
     lines.extend(
         [
             "udevadm settle --timeout=8 2>/dev/null || udevadm settle 2>/dev/null || true",
@@ -656,15 +674,48 @@ def _disk_teardown_script(cfg: InstallConfig) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _teardown_disk_for_reformat(cfg: InstallConfig, runner: Runner) -> None:
-    """Fail-closed teardown before wipe/mkfs (including resume → format again)."""
+def _teardown_disk_for_reformat(
+    cfg: InstallConfig, runner: Runner, mode: str = "full"
+) -> None:
+    """Fail-closed teardown before wipe/mkfs (including resume → format again).
+
+    Use mode=\"full\" before wipe / unmount-for-reuse. Use mode=\"mounts_only\"
+    immediately before mkfs so LUKS/LVM maps opened in this phase stay open.
+    """
     root = cfg.mountpoint.rstrip("/") or "/"
     _leave_tree(root)
-    ui.info(
-        f"Tearing down swap and mounts under {root} before wipe/format "
-        "(required after a previous install / resume restart)"
-    )
-    runner.shell(_disk_teardown_script(cfg), check=True)
+    if mode == "mounts_only":
+        ui.info(
+            f"Unmounting swap and mounts under {root} before format "
+            "(keeping LUKS/LVM maps open)"
+        )
+    else:
+        ui.info(
+            f"Tearing down swap and mounts under {root} before wipe/format "
+            "(required after a previous install / resume restart)"
+        )
+    runner.shell(_disk_teardown_script(cfg, mode=mode), check=True)
+
+
+def _assert_mkfs_block_devices(runner: Runner, devices: dict[str, str], cfg: InstallConfig) -> None:
+    """Fail closed if root (and swap, when formatting it) is not a live block device."""
+    nodes: list[tuple[str, str]] = []
+    root = devices.get("root") or ""
+    if root and str(root).startswith("/dev/"):
+        nodes.append(("root", str(root)))
+    swap = devices.get("swap") or ""
+    if (
+        swap
+        and str(swap).startswith("/dev/")
+        and cfg.swap_mode in {"partition", "both"}
+    ):
+        nodes.append(("swap", str(swap)))
+    for role, node in nodes:
+        quoted = shlex.quote(node)
+        runner.shell(
+            f'test -b {quoted} || {{ echo ">> mkfs: expected {role} block device missing: {node}" >&2; exit 1; }}',
+            check=True,
+        )
 
 
 def _unmount_target(cfg: InstallConfig, runner: Runner) -> None:
@@ -672,7 +723,7 @@ def _unmount_target(cfg: InstallConfig, runner: Runner) -> None:
 
     Used before wipe/reformat and when declining resume. Fail closed if busy.
     """
-    _teardown_disk_for_reformat(cfg, runner)
+    _teardown_disk_for_reformat(cfg, runner, mode="full")
 
 
 class RestartFromBeginning(Exception):
@@ -1121,9 +1172,11 @@ def _mkfs_xfs(device: str) -> str:
 
 def _mkfs(cfg: InstallConfig, runner: Runner, devices: dict[str, str]) -> None:
     """Format ESP as FAT32, swap with mkswap, root with the chosen filesystem."""
-    # Always tear down before mkfs: resume→fresh restart often leaves swap and
-    # btrfs subvols mounted even when wipefs already ran earlier in this phase.
-    _teardown_disk_for_reformat(cfg, runner)
+    # Mounts-only teardown: resume→fresh restart often leaves swap and btrfs
+    # subvols mounted even when wipefs already ran earlier in this phase. Do
+    # not cryptsetup close / vgchange -an maps this phase just opened (H1).
+    _teardown_disk_for_reformat(cfg, runner, mode="mounts_only")
+    _assert_mkfs_block_devices(runner, devices, cfg)
     for node in (devices.get("esp"), devices.get("boot"), devices.get("swap"), devices.get("root")):
         if not node or not str(node).startswith("/dev/"):
             continue
