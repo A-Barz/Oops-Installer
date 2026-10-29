@@ -58,8 +58,6 @@ class DefaultSelectionKeywordTests(unittest.TestCase):
         "acct-user/greetd",
         "acct-group/greetd",
         "gui-libs/display-manager-init",
-        "www-client/firefox-bin:esr",
-        "www-client/google-chrome",
         "sys-kernel/gentoo-kernel-bin",
         "net-misc/networkmanager",
         "sys-apps/dbus",
@@ -95,14 +93,26 @@ class DefaultSelectionKeywordTests(unittest.TestCase):
         self.assertEqual(missing_kw, [], msg=f"not keyworded: {missing_kw}")
         self.assertEqual(missing_un, [], msg=f"not unmasked: {missing_un}")
 
-    def test_chrome_license_and_accept_star(self) -> None:
-        cfg = _typical_niri()
+    def test_chrome_license_only_when_selected(self) -> None:
+        bare = _typical_niri(browser="none")
+        self.assertFalse(
+            any(line.startswith("www-client/google-chrome") for line in _package_license_lines(bare))
+        )
+        cfg = _typical_niri(browser="chrome", accept_license="@FREE @BINARY-REDISTRIBUTABLE *")
         lines = _package_license_lines(cfg)
         self.assertTrue(any(line.startswith("www-client/google-chrome") for line in lines))
         script = render_chroot_script(cfg, {"root": "/dev/vda2", "esp": "/dev/vda1"})
         self.assertIn("package.license/apps", script)
         self.assertIn("www-client/google-chrome google-chrome", script)
         self.assertIn("*", cfg.accept_license)
+
+    def test_soft_default_firefox_is_keyworded_when_selected(self) -> None:
+        cfg = _typical_niri(browser="firefox-esr")
+        planned = set(_atoms_to_unmask(cfg))
+        self.assertIn("www-client/firefox-bin:esr", planned)
+        self.assertNotIn("www-client/google-chrome", planned)
+        keywords = _keyword_text(cfg)
+        self.assertIn("www-client/firefox-bin:esr ~amd64", keywords)
 
     def test_selected_proprietary_editors_get_license_lines(self) -> None:
         cfg = _typical_niri(

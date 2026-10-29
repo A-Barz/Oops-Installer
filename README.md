@@ -193,7 +193,7 @@ There is no Ubuntu LTS ebuild and no fake `*-lts` package.
 
 ### 11 — Wayland session
 
-No desktop environment. Forced: browsers = Chrome + Firefox ESR.
+No desktop environment. Browsers are optional (Firefox ESR soft-default in chapter 12; Chrome opt-in).
 
 | Ask | Options / notes | Default |
 |-----|-----------------|---------|
@@ -230,10 +230,9 @@ GURU is enabled when a GURU compositor or Noctalia/DMS is selected — not as a 
 ### 12 — Suckless tools and popular apps
 
 1. Optional **extra Portage overlays** (featured + community list; GURU not listed here).
-2. **Browsers** — info only: always `www-client/firefox-bin:esr` and `www-client/google-chrome`.
-3. If Niri: **Niri apps** checklist (preticks waybar/wofi/mako/swaybg/swayidle/swaylock when shell is `none`).
-4. Linear category walk (Space toggle, Enter next, Select all). Categories already decided earlier are skipped: window-managers, browsers, display-managers (and there is no games / DE category).
-5. Extra free-typed emerge atoms.
+2. If Niri: **Niri apps** checklist (preticks waybar/wofi/mako/swaybg/swayidle/swaylock when shell is `none`).
+3. Linear category walk (Space toggle, Enter next, Select all), including **Browsers** — Firefox ESR soft-default (untick to skip); Google Chrome opt-in. Categories already decided earlier are skipped: window-managers, display-managers (and there is no games / DE category).
+4. Extra free-typed emerge atoms.
 
 ### Review → confirm → nap
 
@@ -243,10 +242,10 @@ Summary table and time estimate → wipe warning → “Proceed?” → **re-typ
 
 ## Default and auto-queued packages
 
-### Always installed
+### Optional browsers (chapter 12)
 
-- `www-client/firefox-bin:esr` — Firefox ESR (mandatory)
-- `www-client/google-chrome` — Google Chrome (mandatory; `ACCEPT_LICENSE` expanded)
+- `www-client/firefox-bin:esr` — Firefox ESR (soft-default; untick to skip)
+- `www-client/google-chrome` — Google Chrome (opt-in; expands `ACCEPT_LICENSE` when chosen)
 
 ### When a Wayland compositor or shell is selected
 

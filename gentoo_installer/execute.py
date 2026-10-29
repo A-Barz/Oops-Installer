@@ -3279,15 +3279,6 @@ def ensure_boot_to_greeter(cfg: InstallConfig) -> None:
         )
         if not sessions and catalog.FALLBACK_WAYLAND_WM not in (cfg.window_managers or []):
             cfg.window_managers = list(cfg.window_managers or []) + [catalog.FALLBACK_WAYLAND_WM]
-    # Chrome is mandatory; Portage rejects it under a free-only ACCEPT_LICENSE.
-    tokens = (cfg.accept_license or "").split()
-    if "*" not in tokens:
-        tokens.append("*")
-        cfg.accept_license = " ".join(tokens)
-    if not (cfg.browser or "").strip() or cfg.browser == "none":
-        cfg.browser = "chrome+firefox-esr"
-
-
 def greeter_boot_failures(cfg: InstallConfig) -> list[str]:
     """Return reasons this config would not reboot to a usable login greeter.
 
@@ -3363,10 +3354,6 @@ def greeter_boot_failures(cfg: InstallConfig) -> list[str]:
         if cfg.init_system != "openrc":
             if "default.target" not in script and "graphical.target" not in script:
                 failures.append("systemd graphical boot target would not be set")
-    queued = set(_desktop_packages(cfg)) | set(_atoms_to_unmask(cfg))
-    for atom in catalog.required_browser_atoms():
-        if atom not in queued:
-            failures.append(f"mandatory browser {atom} is not queued for emerge")
     return failures
 
 
@@ -4302,7 +4289,6 @@ def _atoms_to_unmask(cfg: InstallConfig) -> list[str]:
     )
     if getattr(cfg, "nonfree_codecs", False):
         atoms.extend(catalog.nonfree_codec_atoms())
-    atoms.extend(catalog.required_browser_atoms())
     atoms.extend(_desktop_packages(cfg))
     out: list[str] = []
     seen: set[str] = set()
@@ -4318,19 +4304,16 @@ def _atoms_to_unmask(cfg: InstallConfig) -> list[str]:
 def _package_license_lines(cfg: InstallConfig) -> list[str]:
     """package.license entries for proprietary / binary apps this install may emerge."""
     planned = set(_atoms_to_unmask(cfg))
-    # Always allow Chrome — required_browser_atoms forces it onto every desktop path.
-    lines = [
-        "www-client/google-chrome google-chrome",
-    ]
     # Map planned atoms → license tokens Portage needs beyond ACCEPT_LICENSE=* .
     extra = {
         "app-editors/sublime-text": "app-editors/sublime-text *",
         "app-editors/vscode": "app-editors/vscode *",
         "app-editors/logseq-desktop-bin": "app-editors/logseq-desktop-bin *",
-        "www-client/google-chrome": "www-client/google-chrome google-chrome",
+        catalog.CHROME_ATOM: f"{catalog.CHROME_ATOM} google-chrome",
         "sys-kernel/linux-firmware": "sys-kernel/linux-firmware @BINARY-REDISTRIBUTABLE",
     }
-    seen = {"www-client/google-chrome google-chrome"}
+    lines: list[str] = []
+    seen: set[str] = set()
     for atom, line in extra.items():
         if atom in planned and line not in seen:
             lines.append(line)
@@ -5836,11 +5819,8 @@ def _user_session_script(cfg: InstallConfig) -> str:
 
 
 def _desktop_packages(cfg: InstallConfig) -> list[str]:
-    """Mandatory browsers, PipeWire, and Flatpak. Desktop metas are not installed."""
-    pkgs: list[str] = list(catalog.required_browser_atoms())
-    # Legacy saved profiles that only asked for one browser still get the pair.
-    if cfg.browser == "firefox":
-        pkgs.append("www-client/firefox")
+    """Optional browsers (from cfg.browser), PipeWire, and Flatpak. No DE metas."""
+    pkgs: list[str] = list(catalog.browser_atoms_for(cfg.browser))
     if cfg.pipewire:
         pkgs.extend(["media-video/pipewire", "media-video/wireplumber"])
     if cfg.flatpak:

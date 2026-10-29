@@ -1224,8 +1224,6 @@ def _finalize(cfg: InstallConfig) -> None:
     ui.chapter("11", "Wayland session", f"{HANDBOOK}/Installation/Finalizing")
     cfg.desktop = "none"
     cfg.kde_games = False
-    # Mandatory pair: Chrome + Firefox ESR (firefox-bin:esr). See catalog.REQUIRED_BROWSERS.
-    cfg.browser = "chrome+firefox-esr"
     ui.info("Each compositor installs its own required packages (portal, wallpaper, lock, terminal).")
     ui.info("Utilities that work on every compositor are a separate list in the next chapter.")
     ui.info(
@@ -1346,9 +1344,6 @@ def _packages_locked_from_earlier_steps(cfg: InstallConfig) -> set[str]:
         # Entire greetd stack — do not ask again in display-managers.
         # tuigreet is REMOVED_GURU (blocked if typed); gtkgreet/labwc is the path.
         locked.update({"x11-misc/lightdm", "x11-misc/sddm", "x11-misc/slim"})
-    locked.update(catalog.required_browser_atoms())
-    # Bare firefox-bin / chrome aliases also stay hidden if a list still has them.
-    locked.update({"www-client/firefox-bin", "www-client/google-chrome", "www-client/firefox"})
     # M9: hide catalogue ufw (and duplicate nftables) when installer nftables is on.
     locked.update(catalog.firewall_catalogue_hidden(bool(cfg.nftables)))
     return locked
@@ -1381,15 +1376,15 @@ def _packages(cfg: InstallConfig) -> None:
     )
     ui.info("Compositor requirements are already queued. This chapter is optional apps.")
     ui.info(
-        "Browsers: only Firefox ESR and Google Chrome — both are always installed "
-        "(no other browsers in that list)."
+        "Browsers are optional: Firefox ESR is soft-default (untick to skip); "
+        "Google Chrome is opt-in only (proprietary)."
     )
     ui.info(
         "Flatpak is suggested for most desktop apps (Flathub). Tick sys-apps/flatpak or a "
         "flatpak-app/* row (Pulsar, etc.), or install from Flathub after first boot."
     )
     ui.info(
-        "Packages already chosen earlier (compositors, greetd, deps, browsers, dotfiles) "
+        "Packages already chosen earlier (compositors, greetd, deps, dotfiles) "
         "are hidden so you are not asked twice."
     )
     ui.info("Each category: Space toggles, Enter continues to the next category.")
@@ -1414,19 +1409,28 @@ def _packages(cfg: InstallConfig) -> None:
             if atom not in picked and atom not in locked:
                 picked.append(atom)
 
-    # Browsers step: show the mandatory pair only (no checklist of extras).
-    ui.info("—— Browsers (mandatory pair; nothing else in this list) ——")
-    for atom in catalog.required_browser_atoms():
-        ui.ok(f"  {atom}")
-        if atom not in picked:
-            picked.append(atom)
+    # Soft-default Firefox ESR on fresh installs; honor saved browser id on resume.
+    offered_browsers = set(catalog.offered_browser_atoms())
+    browser_aliases = offered_browsers | {
+        "www-client/firefox-bin",
+        "www-client/firefox",
+        catalog.CHROME_ATOM,
+    }
+    have_browser = any((a.split("::", 1)[0]) in browser_aliases for a in picked)
+    if not have_browser:
+        if getattr(cfg, "_software_loaded", False):
+            seed = catalog.browser_atoms_for(cfg.browser)
+        else:
+            seed = catalog.default_browser_atoms()
+        for atom in seed:
+            if atom not in picked:
+                picked.append(atom)
 
     # Linear category walk. Enter finishes one list and continues to the next.
     skip = {
         "window-managers",
         "desktop-environments",
         "wayland-utils",
-        "browsers",  # handled above — Firefox ESR + Chrome only
         "display-managers",  # greetd (or none) already decided in chapter 11
         "games",  # games category removed from package selection
     }
@@ -1448,6 +1452,10 @@ def _packages(cfg: InstallConfig) -> None:
         if not visible:
             ui.info(f"{title}: every package here was already chosen earlier — continuing.")
             continue
+        if key == "browsers":
+            ui.info(
+                "Firefox ESR starts selected. Untick for no browser; tick Chrome only if you want it."
+            )
         if key == "editors":
             ui.info("Editors include Sublime Text and Pulsar (Atom’s Flatpak successor) near the top.")
         selected = ui.paged_checklist(
@@ -1498,16 +1506,22 @@ def _packages(cfg: InstallConfig) -> None:
     needed += catalog.dotfile_package_atoms(cfg.shell, cfg.window_managers, cfg.wm_dotfiles)
     if cfg.nonfree_codecs:
         needed += catalog.nonfree_codec_atoms()
-    # Mandatory browsers need ACCEPT_LICENSE beyond @FREE (Chrome is proprietary).
-    cfg.browser = "chrome+firefox-esr"
-    for atom in catalog.required_browser_atoms():
-        if atom not in picked:
-            picked.append(atom)
-    tokens = (cfg.accept_license or "").split()
-    if "*" not in tokens:
-        tokens.append("*")
-        cfg.accept_license = " ".join(tokens)
-        ui.info("ACCEPT_LICENSE was expanded so Google Chrome and other proprietary apps can emerge.")
+    cfg.browser = catalog.browser_id_from_atoms(picked)
+    # Chrome (and similar proprietary picks) need ACCEPT_LICENSE beyond @FREE.
+    proprietary_picks = {
+        catalog.CHROME_ATOM,
+        "app-editors/sublime-text",
+        "app-editors/vscode",
+        "app-editors/logseq-desktop-bin",
+    }
+    if proprietary_picks & {a.split("::", 1)[0] for a in picked}:
+        tokens = (cfg.accept_license or "").split()
+        if "*" not in tokens:
+            tokens.append("*")
+            cfg.accept_license = " ".join(tokens)
+            ui.info(
+                "ACCEPT_LICENSE was expanded so Google Chrome and other proprietary apps can emerge."
+            )
     # extra_packages is the emerge set: catalogue picks + WMs + compositor requirements.
     cfg.extra_packages = list(dict.fromkeys(cfg.window_managers + needed + picked))
     _apply_firewall_exclusion(cfg)
@@ -1761,7 +1775,7 @@ def _review(cfg: InstallConfig) -> None:
         ("Compositors", ", ".join(cfg.window_managers) or "none"),
         ("Dotfiles", _dotfile_review(cfg)),
         ("Shell", cfg.shell or "none"),
-        ("Browsers", "Chrome + Firefox ESR (mandatory)"),
+        ("Browsers", catalog.browser_review_label(cfg.browser)),
         ("Non-free codecs", "yes (license accepted)" if cfg.nonfree_codecs else "no"),
         ("ZRAM", "yes" if cfg.zram else "no"),
         (

@@ -35,15 +35,16 @@ def _base_cfg(**kwargs) -> InstallConfig:
     return cfg
 
 
-class MandatoryBrowserTests(unittest.TestCase):
-    def test_required_pair_is_chrome_and_firefox_esr_slot(self) -> None:
-        atoms = catalog.required_browser_atoms()
+class OptionalBrowserTests(unittest.TestCase):
+    def test_offered_pair_is_firefox_esr_and_chrome(self) -> None:
+        atoms = catalog.offered_browser_atoms()
         self.assertEqual(
             atoms,
             ["www-client/firefox-bin:esr", "www-client/google-chrome"],
         )
+        self.assertEqual(catalog.default_browser_atoms(), ["www-client/firefox-bin:esr"])
 
-    def test_browser_category_is_only_firefox_esr_and_chrome(self) -> None:
+    def test_browser_category_is_optional_firefox_and_chrome(self) -> None:
         browsers = next(pkgs for key, _title, pkgs in catalog.CATEGORIES if key == "browsers")
         atoms = [atom for atom, _ in browsers]
         self.assertEqual(
@@ -53,17 +54,36 @@ class MandatoryBrowserTests(unittest.TestCase):
         self.assertNotIn("www-client/qutebrowser", atoms)
         self.assertNotIn("www-client/firefox", atoms)
 
-    def test_desktop_packages_always_queue_pair(self) -> None:
+    def test_desktop_packages_respect_browser_none(self) -> None:
         cfg = _base_cfg(browser="none", pipewire=False)
         pkgs = _desktop_packages(cfg)
-        self.assertIn("www-client/firefox-bin:esr", pkgs)
-        self.assertIn("www-client/google-chrome", pkgs)
+        self.assertNotIn("www-client/firefox-bin:esr", pkgs)
+        self.assertNotIn("www-client/google-chrome", pkgs)
 
-    def test_locked_includes_mandatory_browsers(self) -> None:
+    def test_desktop_packages_honor_firefox_esr_only(self) -> None:
+        cfg = _base_cfg(browser="firefox-esr", pipewire=False)
+        pkgs = _desktop_packages(cfg)
+        self.assertIn("www-client/firefox-bin:esr", pkgs)
+        self.assertNotIn("www-client/google-chrome", pkgs)
+
+    def test_locked_does_not_include_browsers(self) -> None:
         cfg = _base_cfg(window_managers=["gui-wm/sway"], display_manager="greetd")
         locked = _packages_locked_from_earlier_steps(cfg)
-        self.assertIn("www-client/firefox-bin:esr", locked)
-        self.assertIn("www-client/google-chrome", locked)
+        self.assertNotIn("www-client/firefox-bin:esr", locked)
+        self.assertNotIn("www-client/google-chrome", locked)
+
+    def test_browser_id_from_atoms(self) -> None:
+        self.assertEqual(catalog.browser_id_from_atoms([]), "none")
+        self.assertEqual(
+            catalog.browser_id_from_atoms(["www-client/firefox-bin:esr"]),
+            "firefox-esr",
+        )
+        self.assertEqual(
+            catalog.browser_id_from_atoms(
+                ["www-client/firefox-bin:esr", "www-client/google-chrome"]
+            ),
+            "chrome+firefox-esr",
+        )
 
 
 class GreeterResolutionTests(unittest.TestCase):
@@ -254,10 +274,6 @@ class RandomComboGreeterTests(unittest.TestCase):
             if catalog.needs_login_greeter(cfg.window_managers, cfg.shell):
                 if "login manager: greetd" not in script and ">> login manager: greetd" not in script:
                     failures.append(f"combo {i}: chroot script missing greetd setup")
-                if "www-client/firefox-bin:esr" not in script and "firefox-bin:esr" not in script:
-                    # May appear only in keyword/unmask files inside the script.
-                    if "firefox-bin:esr" not in script:
-                        failures.append(f"combo {i}: firefox ESR not in chroot script")
         self.assertEqual(failures, [], msg="\n".join(failures[:20]))
 
     def test_rich_vs_minimal_hyprland_profiles(self) -> None:

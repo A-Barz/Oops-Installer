@@ -70,12 +70,13 @@ class CodecsOfferTests(unittest.TestCase):
 
 
 class PackageCategoryTests(unittest.TestCase):
-    def test_browsers_category_only_mandatory_pair(self) -> None:
+    def test_browsers_category_optional_firefox_and_chrome(self) -> None:
         rows = next(pkgs for key, _t, pkgs in catalog.CATEGORIES if key == "browsers")
         self.assertEqual(
             [a for a, _ in rows],
             ["www-client/firefox-bin:esr", "www-client/google-chrome"],
         )
+        self.assertEqual(catalog.default_browser_atoms(), ["www-client/firefox-bin:esr"])
 
     def test_greetd_locked_hides_display_manager_rows(self) -> None:
         cfg = InstallConfig()

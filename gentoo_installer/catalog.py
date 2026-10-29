@@ -37,17 +37,72 @@ def _p(atom: str, desc: str, overlay: str = "gentoo") -> tuple[str, str]:
     return (atom, desc + tag)
 
 
-# Always emerged. Gentoo has no www-client/firefox-esr; ESR is the :esr slot of
-# firefox-bin. Chrome needs ACCEPT_LICENSE beyond @FREE (handled in the wizard).
-REQUIRED_BROWSERS: tuple[Pkg, ...] = (
-    Pkg("www-client/firefox-bin:esr", "Firefox ESR — official binary (mandatory)"),
-    Pkg("www-client/google-chrome", "Google Chrome — official binary (mandatory)"),
+# Optional browsers (OI-42). Gentoo has no www-client/firefox-esr; ESR is the
+# :esr slot of firefox-bin. Chrome needs ACCEPT_LICENSE beyond @FREE when chosen.
+FIREFOX_ESR_ATOM = "www-client/firefox-bin:esr"
+CHROME_ATOM = "www-client/google-chrome"
+
+OPTIONAL_BROWSERS: tuple[Pkg, ...] = (
+    Pkg(FIREFOX_ESR_ATOM, "Firefox ESR — official binary (soft-default; untick to skip)"),
+    Pkg(CHROME_ATOM, "Google Chrome — official binary (opt-in; proprietary)"),
 )
 
 
-def required_browser_atoms() -> list[str]:
-    """Chrome + Firefox ESR atoms every install receives."""
-    return [pkg.atom for pkg in REQUIRED_BROWSERS]
+def offered_browser_atoms() -> list[str]:
+    """Browser atoms shown in the chapter 12 checklist."""
+    return [pkg.atom for pkg in OPTIONAL_BROWSERS]
+
+
+def default_browser_atoms() -> list[str]:
+    """Soft-default for a fresh interactive install: Firefox ESR only."""
+    return [FIREFOX_ESR_ATOM]
+
+
+def browser_atoms_for(browser: str) -> list[str]:
+    """Map InstallConfig.browser id → emerge atoms (legacy profiles included)."""
+    key = (browser or "none").strip().lower()
+    mapping: dict[str, list[str]] = {
+        "none": [],
+        "firefox-esr": [FIREFOX_ESR_ATOM],
+        "firefox": ["www-client/firefox"],
+        "chrome": [CHROME_ATOM],
+        "chrome+firefox-esr": [FIREFOX_ESR_ATOM, CHROME_ATOM],
+        "chrome+firefox": ["www-client/firefox", CHROME_ATOM],
+    }
+    return list(mapping.get(key, []))
+
+
+def browser_id_from_atoms(atoms: list[str]) -> str:
+    """Derive browser id from selected emerge atoms."""
+    bare = {((a or "").split("::", 1)[0]).strip() for a in atoms}
+    have_esr = FIREFOX_ESR_ATOM in bare
+    have_ff = "www-client/firefox" in bare or "www-client/firefox-bin" in bare
+    have_chrome = CHROME_ATOM in bare
+    if have_chrome and have_esr:
+        return "chrome+firefox-esr"
+    if have_chrome and have_ff:
+        return "chrome+firefox"
+    if have_chrome:
+        return "chrome"
+    if have_esr:
+        return "firefox-esr"
+    if have_ff:
+        return "firefox"
+    return "none"
+
+
+def browser_review_label(browser: str) -> str:
+    """Human summary for the pre-install review table."""
+    labels = {
+        "none": "none (optional)",
+        "firefox-esr": "Firefox ESR",
+        "firefox": "Firefox (source)",
+        "chrome": "Google Chrome",
+        "chrome+firefox-esr": "Chrome + Firefox ESR",
+        "chrome+firefox": "Chrome + Firefox (source)",
+    }
+    key = (browser or "none").strip().lower()
+    return labels.get(key, key or "none (optional)")
 
 
 # Roughly the top Wayland compositors people actually use, plus previously
@@ -861,13 +916,8 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
     ),
     (
         "browsers",
-        "Web browsers (Firefox ESR + Chrome only)",
-        _pkgs(
-            # Only the mandatory pair. Gentoo has no www-client/firefox-esr;
-            # ESR is the :esr slot of firefox-bin. No other browsers are listed.
-            Pkg("www-client/firefox-bin:esr", "Firefox ESR — official binary (always installed)"),
-            Pkg("www-client/google-chrome", "Google Chrome — official binary (always installed)"),
-        ),
+        "Web browsers (optional; Firefox ESR soft-default)",
+        _pkgs(*OPTIONAL_BROWSERS),
     ),
     (
         "editors",
@@ -1351,7 +1401,7 @@ def offerable_portage_atoms() -> list[str]:
 
     for pkg in _known_packages():
         add(pkg.atom)
-    for atom in required_browser_atoms():
+    for atom in offered_browser_atoms():
         add(atom)
     for atom in nonfree_codec_atoms():
         add(atom)
