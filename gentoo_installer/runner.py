@@ -17,7 +17,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Iterable, Sequence
 
 from . import ui
 
@@ -42,20 +42,43 @@ def _safe_cwd(preferred: str | None) -> str:
         return "/"
 
 
+def redact_secrets(text: str, secrets: Sequence[str]) -> str:
+    """Replace known secret substrings before logging or TTY step lines."""
+    out = text
+    for secret in secrets:
+        if secret and secret in out:
+            out = out.replace(secret, "***")
+    return out
+
+
 class Runner:
-    def __init__(self, dry_run: bool = False, log_path: str = "/var/tmp/gentoo-live-installer.log") -> None:
+    def __init__(
+        self,
+        dry_run: bool = False,
+        log_path: str = "/var/tmp/gentoo-live-installer.log",
+        secrets: Iterable[str] | None = None,
+    ) -> None:
         self.dry_run = dry_run
         self.log_path = Path(log_path)
+        # Longest first so a passphrase that is a prefix of another still redacts fully.
+        self._secrets = sorted({s for s in (secrets or []) if s}, key=len, reverse=True)
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
         except OSError:
             # Live USB /var/tmp might be read-only in odd setups; fall back to CWD.
             self.log_path = Path("gentoo-live-installer.log")
 
+    def set_secrets(self, secrets: Iterable[str] | None) -> None:
+        """Refresh redaction values (e.g. after resume fills missing passwords)."""
+        self._secrets = sorted({s for s in (secrets or []) if s}, key=len, reverse=True)
+
+    def _safe_text(self, text: str) -> str:
+        return redact_secrets(text, self._secrets)
+
     def log(self, line: str) -> None:
         try:
             with self.log_path.open("a", encoding="utf-8") as fh:
-                fh.write(line.rstrip() + "\n")
+                fh.write(self._safe_text(line).rstrip() + "\n")
         except OSError:
             pass
 
@@ -68,7 +91,8 @@ class Runner:
         cwd: str | None = None,
         input_text: str | None = None,
     ) -> subprocess.CompletedProcess:
-        pretty = " ".join(argv)
+        # Never interpolate input_text into the logged/pretty command (LUKS keys, etc.).
+        pretty = self._safe_text(" ".join(argv))
         ui.step(pretty)
         self.log("$ " + pretty)
         if self.dry_run:
@@ -90,7 +114,7 @@ class Runner:
         if check and proc.returncode != 0:
             ui.error(f"Command failed ({proc.returncode}): {pretty}")
             if proc.stderr:
-                print(proc.stderr)
+                print(self._safe_text(proc.stderr))
             sys.exit(proc.returncode)
         return proc
 
@@ -100,8 +124,9 @@ class Runner:
         Uses non-login bash so /etc/profile cannot export a stale FEATURES into
         host commands (chroot itself is started with env -i).
         """
-        ui.step(script if len(script) < 200 else script[:200] + "…")
-        self.log("$ " + script)
+        shown = self._safe_text(script)
+        ui.step(shown if len(shown) < 200 else shown[:200] + "…")
+        self.log("$ " + shown)
         if self.dry_run:
             return subprocess.CompletedProcess(["bash", "-c", script], 0, "", "")
         proc = subprocess.run(
@@ -123,7 +148,7 @@ class Runner:
         until the buffer filled. If a pty is not available, fall back to run().
         on_line is optional bookkeeping; there is no percent / sticky progress UI.
         """
-        pretty = " ".join(argv)
+        pretty = self._safe_text(" ".join(argv))
         ui.step(pretty)
         self.log("$ " + pretty)
         if self.dry_run:

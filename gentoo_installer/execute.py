@@ -21,14 +21,64 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 import textwrap
 from pathlib import Path
 
 from . import catalog, detect, ui
-from .config import InstallConfig, part_name
+from .config import SECRET_FIELDS, InstallConfig, part_name
 from .estimate import estimate_minutes, format_duration
 from .rev import INSTALLER_REV
 from .runner import Runner, State
+
+
+def _secret_values(cfg: InstallConfig) -> list[str]:
+    """Non-empty secret field values for Runner log/step redaction."""
+    values: list[str] = []
+    for name in SECRET_FIELDS:
+        value = getattr(cfg, name, "") or ""
+        if value:
+            values.append(value)
+    return values
+
+
+def _install_secrets_path(mountpoint: str) -> Path:
+    return Path(mountpoint) / "root" / ".install-secrets"
+
+
+def _shred_install_secrets(mountpoint: str) -> None:
+    """Overwrite and unlink $mountpoint/root/.install-secrets when present.
+
+    Fail-closed hygiene: chroot failures, resume prompts, and unmount paths must
+    not leave root/user/LUKS/GRUB passwords on the target.
+    """
+    if not mountpoint:
+        return
+    path = _install_secrets_path(mountpoint)
+    if not path.is_file():
+        return
+    try:
+        subprocess.run(
+            ["shred", "-u", "-n", "1", "--", str(path)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        pass
+    if path.exists():
+        try:
+            size = path.stat().st_size
+            with path.open("r+b", buffering=0) as fh:
+                fh.write(b"\0" * max(size, 1))
+                fh.flush()
+                os.fsync(fh.fileno())
+        except OSError:
+            pass
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            ui.warn(f"Could not remove {path}: {exc}")
 
 # Same integer as the startup banner. Bump INSTALLER_REV in rev.py on each change.
 CHROOT_SCRIPT_REV = INSTALLER_REV
@@ -100,7 +150,7 @@ def execute(cfg: InstallConfig) -> None:
 
     queue_saved_software(cfg)
 
-    runner = Runner(dry_run=cfg.dry_run)
+    runner = Runner(dry_run=cfg.dry_run, secrets=_secret_values(cfg))
     state = State(cfg.state_file)
     root = cfg.mountpoint
     profiles = [Path("gentoo-install.yaml")]
@@ -317,12 +367,29 @@ def phase_network(cfg: InstallConfig, runner: Runner) -> None:
 
 
 def _luks_format_open(cfg: InstallConfig, runner: Runner, device: str, name: str) -> None:
-    """LUKS2-format a partition/LV and open it as /dev/mapper/<name>."""
-    runner.shell(
-        f"printf '%s' {shlex.quote(cfg.luks_passphrase)} | cryptsetup luksFormat --type luks2 --batch-mode {shlex.quote(device)}"
+    """LUKS2-format a partition/LV and open it as /dev/mapper/<name>.
+
+    Passphrase is fed on stdin via --key-file=- so it never appears in the
+    logged argv / shell script (H4).
+    """
+    if not cfg.luks_passphrase:
+        raise SystemExit(f"LUKS passphrase missing; cannot format {device}.")
+    runner.set_secrets(_secret_values(cfg))
+    runner.run(
+        [
+            "cryptsetup",
+            "luksFormat",
+            "--type",
+            "luks2",
+            "--batch-mode",
+            "--key-file=-",
+            device,
+        ],
+        input_text=cfg.luks_passphrase,
     )
-    runner.shell(
-        f"printf '%s' {shlex.quote(cfg.luks_passphrase)} | cryptsetup open {shlex.quote(device)} {shlex.quote(name)}"
+    runner.run(
+        ["cryptsetup", "open", "--key-file=-", device, name],
+        input_text=cfg.luks_passphrase,
     )
 
 
@@ -786,7 +853,8 @@ def _clear_install_state(cfg: InstallConfig) -> None:
 
 def _unmount_failed_target(cfg: InstallConfig) -> None:
     """Unmount a failed chroot. Stop if the tree is still mounted."""
-    runner = Runner(dry_run=False)
+    _shred_install_secrets(cfg.mountpoint)
+    runner = Runner(dry_run=False, secrets=_secret_values(cfg))
     _unmount_target(cfg, runner)
     if _target_mounted(cfg.mountpoint):
         ui.error(
@@ -830,10 +898,15 @@ def ask_resume_or_unmount(cfg: InstallConfig) -> str:
 
     Returns "resume", "fresh", or "none". "fresh" means the target was unmounted
     and the caller should start the wizard from the first question.
+
+    Always shreds `.install-secrets` on the failed mount (including resume) so
+    passwords are not left on-disk while the tree stays mounted for debugging.
     """
     mounted = _find_failed_mount(cfg)
     if mounted is None:
         return "none"
+    # Default fail-closed: shred before resume/unmount (H3).
+    _shred_install_secrets(mounted.mountpoint)
     if _chroot_binds_mounted(mounted.mountpoint):
         ui.warn(f"The install did not finish. {mounted.mountpoint} is still chrooted and mounted.")
     else:
@@ -860,9 +933,10 @@ def _luks_open_only(cfg: InstallConfig, runner: Runner, device: str, name: str) 
         return
     if not cfg.luks_passphrase:
         raise SystemExit(f"LUKS passphrase missing; cannot open {device} as {name}.")
-    runner.shell(
-        f"printf '%s' {shlex.quote(cfg.luks_passphrase)} | cryptsetup open "
-        f"{shlex.quote(device)} {shlex.quote(name)}"
+    runner.set_secrets(_secret_values(cfg))
+    runner.run(
+        ["cryptsetup", "open", "--key-file=-", device, name],
+        input_text=cfg.luks_passphrase,
     )
 
 
@@ -1534,7 +1608,8 @@ def phase_chroot(
     for i, line in enumerate(script.splitlines()[:12], 1):
         ui.info(f"  {i:3} {line}")
     _generate_locales(cfg, runner, root)
-    secrets = Path(root) / "root" / ".install-secrets"
+    secrets = _install_secrets_path(root)
+    secrets.parent.mkdir(parents=True, exist_ok=True)
     secrets.write_text(
         "\n".join(
             [
@@ -1550,6 +1625,7 @@ def phase_chroot(
     secrets.chmod(0o600)
     cfg.save(str(Path(root) / "root" / "install-config.json"), include_secrets=False)
     cfg.save(str(Path(root) / "root" / "install-config.yaml"), include_secrets=False)
+    runner.set_secrets(_secret_values(cfg))
     # Handbook + wiki "Installation alternatives": LiveCDs leak a messy env.
     # Never bash --login / never source /etc/profile in the installer process.
     # Locales were just generated above — launch the install script under UTF-8,
@@ -1562,10 +1638,12 @@ def phase_chroot(
         locale=_installer_utf8_locale(cfg),
     )
     # Stream emerge output; no percent / sticky bar — the pre-install nap notice
-    # is the UX for the long wait.
-    runner.run_live(chroot_argv, lambda _line: None)
-    if secrets.exists():
-        secrets.unlink()
+    # is the UX for the long wait. Always shred secrets afterward — Runner may
+    # sys.exit on failure, and finally still runs for SystemExit (H3).
+    try:
+        runner.run_live(chroot_argv, lambda _line: None)
+    finally:
+        _shred_install_secrets(root)
 
 
 # Not a Portage FEATURE. Valid relatives: getbinpkg, binpkg-request-signature.
