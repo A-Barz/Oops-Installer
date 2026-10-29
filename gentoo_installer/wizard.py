@@ -531,6 +531,10 @@ def _disks(cfg: InstallConfig) -> None:
     )
     if cfg.luks:
         cfg.luks_passphrase = ui.ask_password("LUKS passphrase")
+        ui.info(
+            "With GRUB (handbook UEFI), the first unlock is at the GRUB prompt "
+            "(cryptodisk); the initramfs may ask again until single-pass unlock is designed."
+        )
         if cfg.swap_mode in {"partition", "both"}:
             if cfg.layout == "lvm-luks":
                 ui.info("LVM-on-LUKS already encrypts the volume group, so the swap LV is not wrapped a second time.")
@@ -948,6 +952,11 @@ def _bootloader(cfg: InstallConfig) -> None:
         ui.info("The kernel is installed on /efi. systemd-boot and EFI stub load it from the EFI System Partition.")
     elif cfg.firmware == "uefi" and cfg.bootloader == "grub":
         ui.info("GRUB keeps the kernel on /boot, on the root filesystem. The ESP stays mounted at /efi.")
+        if cfg.luks:
+            ui.info(
+                "LUKS + GRUB enables GRUB_ENABLE_CRYPTODISK so GRUB can read encrypted /boot. "
+                "You type the disk passphrase at GRUB first; initramfs may prompt again."
+            )
     cfg.plymouth = ui.ask_yes_no("Install Plymouth boot splash?", cfg.install_type == "desktop")
     if cfg.plymouth:
         _ask_plymouth_theme(cfg)

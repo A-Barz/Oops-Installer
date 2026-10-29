@@ -104,7 +104,7 @@ Defaults are `InstallConfig` values unless noted. Conditional steps are marked.
 | Swap size | GiB | ~RAM-based (2–8) |
 | ZRAM | Asked or implied by swap mode | Often yes with partition/file |
 | Console keymap | e.g. `us` | `us` |
-| LUKS2 | Forced on `lvm-luks`; else yes/no; passphrase; encrypt swap; TPM2 helper scripts | Off unless lvm-luks |
+| LUKS2 | Forced on `lvm-luks`; else yes/no; passphrase; encrypt swap; TPM2 helper scripts. With GRUB+UEFI, first unlock is at the GRUB cryptodisk prompt (`GRUB_ENABLE_CRYPTODISK=y`); initramfs may ask again | Off unless lvm-luks |
 | ESP size | MiB (UEFI) | `1024` |
 
 SSD detection enables weekly `fstrim`. Disks under ~40 GiB get a warning. Dual boot is not supported.
@@ -383,6 +383,7 @@ Live `lspci` / `lsusb` / `/proc/cpuinfo` / `ld.so --help` seed defaults only (bi
 
 - The package catalogue is handbook-sized plus overlays, not the entire Portage tree.
 - **Encrypted swap** is a separate LUKS2 volume when using a swap partition/LV. LVM-on-LUKS does not wrap swap twice. A **swap file** is not LUKS-wrapped.
+- **LUKS + GRUB (UEFI):** kernels stay on encrypted `/boot`; the installer sets `GRUB_ENABLE_CRYPTODISK=y` so GRUB can unlock and load them. First unlock is at the GRUB prompt; the initramfs may ask again until single-pass unlock is designed.
 - **TPM2** only writes a helper script; enroll after first boot.
 - **Limine** needs `limine.conf` / `vmlinuz` refreshed on kernel upgrades.
 - **netifrc** uses the NIC you pick, not a hardcoded `eth0`.
