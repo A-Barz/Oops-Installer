@@ -146,9 +146,11 @@ def execute(cfg: InstallConfig) -> None:
     os.environ.pop("PORTAGE_FEATURES", None)
     os.environ.pop("USE", None)
 
-    from .wizard import queue_saved_software
+    from .wizard import _apply_firewall_exclusion, queue_saved_software
 
     queue_saved_software(cfg)
+    # M9: YAML/--config profiles can still list ufw alongside default nftables.
+    _apply_firewall_exclusion(cfg)
 
     runner = Runner(dry_run=cfg.dry_run, secrets=_secret_values(cfg))
     state = State(cfg.state_file)

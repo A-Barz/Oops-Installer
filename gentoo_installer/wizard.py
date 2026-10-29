@@ -952,11 +952,17 @@ def _tools(cfg: InstallConfig) -> None:
         )
     cfg.wireless = ui.ask_yes_no("Install wireless tools (iw, wpa_supplicant)?", True)
     cfg.sshd = ui.ask_yes_no("Install and enable sshd?", True)
+    ui.info(
+        "One firewall stack only: nftables here excludes catalogue net-firewall/ufw. "
+        "Say no if you want ufw from the package list instead."
+    )
     cfg.nftables = ui.ask_yes_no("Install nftables and drop unsolicited inbound connections?", True)
     if cfg.nftables and cfg.sshd:
         ui.info("The firewall allows SSH on port 22. Other new inbound connections are dropped.")
     elif cfg.nftables:
         ui.info("The firewall drops new inbound connections. SSH is not opened.")
+    elif not cfg.nftables:
+        ui.info("nftables skipped — you may select net-firewall/ufw in the package catalogue.")
     cfg.cups = ui.ask_yes_no("Install CUPS printing?", False)
     cfg.chrony = ui.ask_yes_no("Install chrony for NTP?", True)
     cfg.syslog = ui.menu(
@@ -1272,7 +1278,23 @@ def _packages_locked_from_earlier_steps(cfg: InstallConfig) -> set[str]:
     locked.update(catalog.required_browser_atoms())
     # Bare firefox-bin / chrome aliases also stay hidden if a list still has them.
     locked.update({"www-client/firefox-bin", "www-client/google-chrome", "www-client/firefox"})
+    # M9: hide catalogue ufw (and duplicate nftables) when installer nftables is on.
+    locked.update(catalog.firewall_catalogue_hidden(bool(cfg.nftables)))
     return locked
+
+
+def _apply_firewall_exclusion(cfg: InstallConfig) -> None:
+    """M9: keep one firewall stack after catalogue / typed-atom picks."""
+    nftables, selected, extra, warnings = catalog.enforce_firewall_mutual_exclusion(
+        bool(cfg.nftables),
+        list(cfg.selected_packages or []),
+        list(cfg.extra_packages or []),
+    )
+    cfg.nftables = nftables
+    cfg.selected_packages = selected
+    cfg.extra_packages = extra
+    for message in warnings:
+        ui.warn(message)
 
 
 def _packages(cfg: InstallConfig) -> None:
@@ -1417,6 +1439,7 @@ def _packages(cfg: InstallConfig) -> None:
         ui.info("ACCEPT_LICENSE was expanded so Google Chrome and other proprietary apps can emerge.")
     # extra_packages is the emerge set: catalogue picks + WMs + compositor requirements.
     cfg.extra_packages = list(dict.fromkeys(cfg.window_managers + needed + picked))
+    _apply_firewall_exclusion(cfg)
     cfg.overlays = [name for name in cfg.overlays if name != "guru"]
     cfg.overlays = catalog.overlays_required_by(cfg.extra_packages, cfg.overlays)
     if cfg.window_managers or any("wayland" in a or "gui-wm/" in a for a in cfg.extra_packages):
@@ -1628,7 +1651,19 @@ def _review(cfg: InstallConfig) -> None:
         ("Profile", cfg.profile),
         ("Kernel", cfg.kernel),
         ("Bootloaders", ", ".join(cfg.bootloaders) + f" (primary {cfg.bootloader})"),
-        ("Firewall", "nftables" if cfg.nftables else "none"),
+        (
+            "Firewall",
+            (
+                "nftables"
+                if cfg.nftables
+                else (
+                    "ufw"
+                    if catalog.atom_list_has(cfg.selected_packages, catalog.UFW_ATOM)
+                    or catalog.atom_list_has(cfg.extra_packages, catalog.UFW_ATOM)
+                    else "none"
+                )
+            ),
+        ),
         ("TRIM", "weekly" if cfg.fstrim else "no"),
         ("Mirrors", cfg.gentoo_mirrors or "mirrorselect"),
         ("Plymouth", _plymouth_review(cfg)),

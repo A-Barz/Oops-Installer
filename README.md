@@ -172,7 +172,7 @@ There is no Ubuntu LTS ebuild and no fake `*-lts` package.
 | Ask | Options / notes | Default |
 |-----|-----------------|---------|
 | Networking stack | `networkmanager`, `dhcpcd`, `netifrc`; + `systemd-networkd` if systemd | NM on desktop |
-| Wireless tools / sshd / nftables | yes/no | Yes |
+| Wireless tools / sshd / nftables | yes/no (nftables excludes catalogue `ufw`; one firewall stack) | Yes |
 | CUPS | yes/no | No |
 | chrony | yes/no | Yes |
 | Syslog | `sysklogd`, `metalog`, `rsyslog`, `none` | `sysklogd` |
@@ -316,7 +316,7 @@ Order and atoms match `catalog.CATEGORIES` (plus conditional Niri apps). There i
 
 ### Networking & remote access
 
-`net-misc/networkmanager`, `net-misc/dhcpcd`, `net-vpn/wireguard-tools`, `net-vpn/openvpn`, `net-misc/openssh`, `net-misc/chrony`, `net-misc/wget`, `net-misc/curl`, `net-misc/rsync`, `net-ftp/filezilla`, `net-im/telegram-desktop-bin`, `net-im/signal-desktop-bin`, `net-analyzer/wireshark`, `net-firewall/ufw`, `net-firewall/nftables`
+`net-misc/networkmanager`, `net-misc/dhcpcd`, `net-vpn/wireguard-tools`, `net-vpn/openvpn`, `net-misc/openssh`, `net-misc/chrony`, `net-misc/wget`, `net-misc/curl`, `net-misc/rsync`, `net-ftp/filezilla`, `net-im/telegram-desktop-bin`, `net-im/signal-desktop-bin`, `net-analyzer/wireshark`, `net-firewall/ufw` (exclusive with installer nftables), `net-firewall/nftables`
 
 ### Containers & virtualisation
 
