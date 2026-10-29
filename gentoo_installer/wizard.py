@@ -11,37 +11,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import catalog, detect, omarchy_sync, ui
+from . import catalog, detect, ui
 from .config import InstallConfig, part_name
 from .estimate import estimate_minutes, format_duration
-from .omarchy_sync import OmarchySnapshot
 
 HANDBOOK = "https://wiki.gentoo.org/wiki/Handbook:AMD64"
 
-# Per-run Omarchy cue snapshot (live → cache → bundled). Never blocks install.
-_OMARCHY_SNAP: OmarchySnapshot | None = None
+# Default mise agent names for the optional first-login invite.
+DEFAULT_MISE_AGENT_TOOLS = ("claude", "codex", "opencode", "cursor-agent")
 
-
-def _omarchy_snapshot() -> OmarchySnapshot:
-    """Lazy-load Omarchy cues once per wizard process."""
-    global _OMARCHY_SNAP
-    if _OMARCHY_SNAP is None:
-        _OMARCHY_SNAP = omarchy_sync.load_omarchy_snapshot()
-    return _OMARCHY_SNAP
-
-
-def refresh_omarchy_cues(cfg: InstallConfig) -> OmarchySnapshot:
-    """Fetch/inspect Omarchy GitHub cues and record source on the config."""
-    snap = _omarchy_snapshot()
-    cfg.omarchy_sync_source = snap.source
-    cfg.omarchy_sync_ref = f"{snap.repo}@{snap.ref}"
-    ui.info(omarchy_sync.summarize_for_ui(snap))
-    if snap.source != "live":
-        ui.info(
-            "Offline fallback: using cached/bundled Omarchy cues. "
-            "Handbook install continues; optional package picks may be less current."
-        )
-    return snap
+# LocalSend-style ports offered when UFW is chosen (opt-in).
+LOCALSEND_UFW_PORTS = (
+    {"port": 53317, "proto": "udp"},
+    {"port": 53317, "proto": "tcp"},
+)
 
 
 def profile_has_software(cfg: InstallConfig) -> bool:
@@ -194,8 +177,6 @@ def run_wizard(cfg: InstallConfig) -> InstallConfig:
         "Limine kernel upgrades need a limine.conf refresh; a swap *file* is not LUKS-wrapped."
     )
     print()
-    # Live Omarchy sync first so later chapters can adjust optional defaults for this run.
-    refresh_omarchy_cues(cfg)
 
     _about(cfg)
     _media(cfg)
@@ -214,11 +195,10 @@ def run_wizard(cfg: InstallConfig) -> InstallConfig:
 
 
 def _about(cfg: InstallConfig) -> None:
-    """Handbook: About — dry-run, resume, mountpoint, optional Omarchy-inspired preset."""
+    """Handbook: About — dry-run, resume, mountpoint."""
     ui.chapter("1", "About the installation", f"{HANDBOOK}/Installation/About")
     ui.info("A live Ubuntu Boot Image session is used as the host instead of the Gentoo minimal ISO.")
     ui.info("After you answer every chapter, a summary is shown before any disk is touched.")
-    _ask_omarchy_inspired_preset(cfg)
     cfg.dry_run = ui.ask_yes_no("Dry-run only (print commands, do not change disks)?", False)
     if getattr(cfg, "_resume_decided", False):
         if cfg.resume:
@@ -228,59 +208,6 @@ def _about(cfg: InstallConfig) -> None:
     else:
         cfg.resume = ui.ask_yes_no("Resume a previous interrupted install?", False)
     cfg.mountpoint = ui.prompt("Target mountpoint", cfg.mountpoint)
-
-
-def _ask_omarchy_inspired_preset(cfg: InstallConfig) -> None:
-    """Thin optional preset: Hyprland + encrypt + mise invite. Still Gentoo handbook."""
-    snap = _omarchy_snapshot()
-    ui.info(
-        "Optional preset (inspired by Omarchy, not Omarchy): Hyprland + LUKS on wipe paths "
-        "+ optional mise/agent invite. Extra compositors, DE metas, Plymouth, and Flatpak stay available."
-    )
-    cfg.omarchy_inspired = ui.ask_yes_no(
-        "Apply the Omarchy-inspired thin preset defaults for this run?",
-        bool(cfg.omarchy_inspired),
-    )
-    if not cfg.omarchy_inspired:
-        return
-    ui.ok("Inspired by Omarchy — handbook Gentoo path with adjusted defaults (OpenRC-safe).")
-    cfg.luks = True if snap.encrypt_default_on else cfg.luks
-    if "gui-wm/hyprland" not in cfg.window_managers:
-        cfg.window_managers = list(cfg.window_managers) + ["gui-wm/hyprland"]
-    cfg.mise_agents = True
-    cfg.mise_agent_tools = snap.agent_tools_for_invite()
-    # Prefer UFW defaults when the Omarchy firewall leaf says deny-in/allow-out.
-    if snap.ufw_deny_incoming and snap.ufw_allow_outgoing:
-        cfg.nftables = False
-        cfg.ufw = True
-        ui.info("Preset prefers UFW (deny incoming / allow outgoing). LocalSend holes stay opt-in.")
-    ui.info(
-        "mise is not in the official Gentoo tree — the installer writes a first-login invite "
-        f"for: {', '.join(cfg.mise_agent_tools)}. No Quickshell agents panel; no passwordless sudo."
-    )
-    mapped = [
-        atom
-        for atom in snap.mapped_gentoo_atoms
-        if atom
-        not in {
-            "gui-wm/hyprland",
-            "net-firewall/ufw",
-            "net-misc/networkmanager",
-            "net-misc/openssh",
-        }
-    ][:8]
-    if mapped:
-        ui.info(
-            "Mapped Omarchy package cues (Gentoo atoms you may tick later): "
-            + ", ".join(mapped)
-        )
-    skipped_notable = [
-        s
-        for s in snap.skipped_packages
-        if any(k in s for k in ("mise", "quickshell", "localsend", "yay", "chromium"))
-    ][:6]
-    if skipped_notable:
-        ui.info("Skipped Arch/Omarchy-only packages (not emerged): " + "; ".join(skipped_notable))
 
 
 def _media(cfg: InstallConfig) -> None:
@@ -729,9 +656,7 @@ def _disks(cfg: InstallConfig) -> None:
             cfg.encrypted_swap = False
             cfg.tpm2_unlock = False
     else:
-        # Wipe / full-disk paths: LUKS default ON (Omarchy-inspired); clear opt-out.
-        snap = _omarchy_snapshot()
-        luks_default = bool(snap.encrypt_default_on) or bool(cfg.omarchy_inspired)
+        # Wipe / full-disk paths: LUKS default ON; clear opt-out.
         if cfg.layout != "lvm-luks":
             ui.guru_note(
                 "Encrypting root (and home on that volume) keeps the disk unreadable if "
@@ -743,7 +668,7 @@ def _disks(cfg: InstallConfig) -> None:
             )
         cfg.luks = cfg.layout == "lvm-luks" or ui.ask_yes_no(
             "LUKS2 encrypt the root (and home on it; optionally swap)?",
-            True if cfg.layout == "lvm-luks" else luks_default,
+            True,
         )
         if not cfg.luks and cfg.layout != "lvm-luks":
             ui.warn("LUKS opted out — the root filesystem will be readable if the disk leaves your hands.")
@@ -1117,10 +1042,9 @@ def _tools(cfg: InstallConfig) -> None:
         "One firewall stack only: nftables here excludes catalogue net-firewall/ufw. "
         "Say no if you want UFW (deny incoming / allow outgoing) instead."
     )
-    nft_default = False if (cfg.omarchy_inspired and cfg.ufw) else True
     cfg.nftables = ui.ask_yes_no(
         "Install nftables and drop unsolicited inbound connections?",
-        nft_default if not cfg.ufw else False,
+        False if cfg.ufw else True,
     )
     if cfg.nftables and cfg.sshd:
         ui.info("The firewall allows SSH on port 22. Other new inbound connections are dropped.")
@@ -1131,23 +1055,15 @@ def _tools(cfg: InstallConfig) -> None:
         cfg.ufw = False
         cfg.ufw_localsend = False
     else:
-        snap = _omarchy_snapshot()
-        ui.info(
-            "nftables skipped. UFW (when chosen) uses deny-incoming / allow-outgoing"
-            + (" — matching current Omarchy firewall cues." if snap.ufw_deny_incoming else ".")
-        )
+        ui.info("nftables skipped. UFW (when chosen) uses deny-incoming / allow-outgoing.")
         cfg.ufw = ui.ask_yes_no(
             "Install and enable UFW with deny-incoming / allow-outgoing defaults?",
-            True if cfg.omarchy_inspired or cfg.ufw else False,
+            True if cfg.ufw else False,
         )
         if cfg.ufw:
             if cfg.sshd:
                 ui.info("UFW will allow SSH on port 22.")
-            ports = snap.localsend_ports or [
-                {"port": 53317, "proto": "udp"},
-                {"port": 53317, "proto": "tcp"},
-            ]
-            port_desc = ", ".join(f"{p['port']}/{p['proto']}" for p in ports)
+            port_desc = ", ".join(f"{p['port']}/{p['proto']}" for p in LOCALSEND_UFW_PORTS)
             cfg.ufw_localsend = ui.ask_yes_no(
                 f"Also open LocalSend-style ports ({port_desc})? (opt-in)",
                 False,
@@ -1504,23 +1420,20 @@ def _apply_firewall_exclusion(cfg: InstallConfig) -> None:
 
 def _ask_mise_agents(cfg: InstallConfig) -> None:
     """Optional mise + small agent set — invite only; never force a panel or passwordless sudo."""
-    snap = _omarchy_snapshot()
-    tools = cfg.mise_agent_tools or snap.agent_tools_for_invite()
+    tools = list(cfg.mise_agent_tools) or list(DEFAULT_MISE_AGENT_TOOLS)
     print()
-    ui.info("—— Optional AI agents (mise) — inspired by Omarchy, Gentoo-safe ——")
+    ui.info("—— Optional AI agents (mise) ——")
     ui.info(
-        "Omarchy uses mise for lazy agent CLIs and invites once at first login. "
-        "Oops does the same invite pattern only — no Quickshell agents panel, "
-        "no passwordless sudo, and no Arch pacstrap of agent packages."
+        "Optional first-login invite for mise + a small agent set — "
+        "no Quickshell agents panel, no passwordless sudo, and no forced agent packages."
     )
     ui.info(
         "dev-util/mise is not in the official Gentoo tree; the invite documents the "
         "upstream mise install. Agents stay optional after first boot."
     )
-    default = bool(cfg.mise_agents or cfg.omarchy_inspired)
     cfg.mise_agents = ui.ask_yes_no(
         f"Write a first-login invite for mise + agents ({', '.join(tools)})?",
-        default,
+        bool(cfg.mise_agents),
     )
     if cfg.mise_agents:
         cfg.mise_agent_tools = tools
@@ -1951,22 +1864,11 @@ def _review(cfg: InstallConfig) -> None:
         ("Non-free codecs", "yes (license accepted)" if cfg.nonfree_codecs else "no"),
         ("ZRAM", "yes" if cfg.zram else "no"),
         (
-            "Omarchy-inspired",
-            "yes (Hyprland+LUKS+mise invite)" if cfg.omarchy_inspired else "no",
-        ),
-        (
             "mise/agents invite",
             (
                 "yes (" + ", ".join(cfg.mise_agent_tools) + ")"
                 if cfg.mise_agents and cfg.mise_agent_tools
                 else ("yes" if cfg.mise_agents else "no")
-            ),
-        ),
-        (
-            "Omarchy cues",
-            (
-                f"{cfg.omarchy_sync_source} {cfg.omarchy_sync_ref}".strip()
-                or "not fetched"
             ),
         ),
         (
