@@ -2486,11 +2486,67 @@ def _required_tool_repairs(cfg: InstallConfig, loaders: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _esp_removable_efi_name(cfg: InstallConfig) -> str:
+    return "BOOTAA64.EFI" if cfg.architecture == "arm64" else "BOOTX64.EFI"
+
+
+def _grub_branded_efi_name(cfg: InstallConfig) -> str:
+    return "grubaa64.efi" if cfg.architecture == "arm64" else "grubx64.efi"
+
+
+def _grub_boot_ok_test(cfg: InstallConfig) -> str:
+    """GRUB success needs binaries plus grub.cfg (and ESP EFI on UEFI) — not command -v alone (M13)."""
+    parts = [
+        "command -v grub-install >/dev/null 2>&1",
+        "command -v grub-mkconfig >/dev/null 2>&1",
+        "[ -s /boot/grub/grub.cfg ]",
+    ]
+    if cfg.firmware == "uefi":
+        rem = _esp_removable_efi_name(cfg)
+        branded = _grub_branded_efi_name(cfg)
+        parts.append(
+            "{ "
+            f"[ -s /efi/EFI/BOOT/{rem} ] || "
+            f"[ -s /efi/EFI/Gentoo/{branded} ] || "
+            f"[ -s /efi/EFI/gentoo/{branded} ]"
+            "; }"
+        )
+    return " && ".join(parts)
+
+
+def _bootloader_boot_ok_tests(cfg: InstallConfig, loaders: list[str]) -> list[str]:
+    """Per-loader shell conditions for boot_ok — artifacts when the loader writes them (M13)."""
+    tests: list[str] = []
+    if "grub" in loaders:
+        tests.append(_grub_boot_ok_test(cfg))
+    if "systemd-boot" in loaders:
+        tests.append(
+            "command -v bootctl >/dev/null 2>&1 && "
+            "{ [ -d /efi/loader ] || [ -d /boot/loader ] || [ -d /efi/EFI/systemd ]; }"
+        )
+    if "refind" in loaders:
+        tests.append("command -v refind-install >/dev/null 2>&1")
+    if "syslinux" in loaders:
+        tests.append("command -v syslinux >/dev/null 2>&1")
+    if "limine" in loaders:
+        rem = _esp_removable_efi_name(cfg)
+        tests.append(
+            "command -v limine >/dev/null 2>&1 && "
+            f"{{ [ -s /efi/limine.conf ] || [ -s /efi/EFI/BOOT/{rem} ]; }}"
+        )
+    if "lilo" in loaders:
+        tests.append("command -v lilo >/dev/null 2>&1")
+    if "efistub" in loaders or not tests:
+        tests.append('[ "$kernel_ok" -eq 1 ]')
+    return tests
+
+
 def _final_tool_checks(cfg: InstallConfig, loaders: list[str]) -> str:
     """Fail closed when kernel, bootloader, required services, or greeter/WM are absent.
 
     The script runs under `set +e`. Optional catalogue packages may still be missing;
     critical services and the selected Wayland WM must not be (H5/H6).
+    Bootloader checks require written artifacts (grub.cfg / ESP EFI), not only binaries (M13).
     """
     warn_checks: list[tuple[str, str]] = []
     if cfg.username:
@@ -2521,35 +2577,39 @@ def _final_tool_checks(cfg: InstallConfig, loaders: list[str]) -> str:
         lines.append(
             f'if ! {{ {test}; }}; then echo ">> required service missing: {label}" >&2; missing=1; fi'
         )
-    boot_tests = []
-    if "grub" in loaders:
-        boot_tests.append("command -v grub-install >/dev/null 2>&1 && command -v grub-mkconfig >/dev/null 2>&1")
-    if "systemd-boot" in loaders:
-        boot_tests.append("command -v bootctl >/dev/null 2>&1")
-    if "refind" in loaders:
-        boot_tests.append("command -v refind-install >/dev/null 2>&1")
-    if "syslinux" in loaders:
-        boot_tests.append("command -v syslinux >/dev/null 2>&1")
-    if "limine" in loaders:
-        boot_tests.append("command -v limine >/dev/null 2>&1")
-    if "lilo" in loaders:
-        boot_tests.append("command -v lilo >/dev/null 2>&1")
-    if "efistub" in loaders or not boot_tests:
-        boot_tests.append('[ "$kernel_ok" -eq 1 ]')
+    boot_tests = _bootloader_boot_ok_tests(cfg, loaders)
     joined = " || ".join(boot_tests)
-    lines.append(f"if {joined}; then boot_ok=1; else echo '>> no selected bootloader was installed' >&2; fi")
+    lines.append(
+        f"if {joined}; then boot_ok=1; else "
+        "echo '>> no selected bootloader left bootable artifacts' >&2; fi"
+    )
     lines.append('if [ "$kernel_ok" -eq 0 ]; then echo ">> no kernel image was installed" >&2; missing=1; fi')
     lines.append('if [ "$boot_ok" -eq 0 ]; then missing=1; fi')
+    # Explicit grub.cfg probe (clearer than boot_ok alone) — required for every GRUB install.
+    if "grub" in loaders:
+        lines.append(
+            'if [ ! -s /boot/grub/grub.cfg ]; then '
+            'echo ">> missing /boot/grub/grub.cfg" >&2; missing=1; fi'
+        )
+        if cfg.firmware == "uefi":
+            rem = _esp_removable_efi_name(cfg)
+            branded = _grub_branded_efi_name(cfg)
+            lines.append(
+                "if ! { "
+                f"[ -s /efi/EFI/BOOT/{rem} ] || "
+                f"[ -s /efi/EFI/Gentoo/{branded} ] || "
+                f"[ -s /efi/EFI/gentoo/{branded} ]"
+                "; }; then "
+                f'echo ">> missing ESP EFI payload '
+                f'(/efi/EFI/BOOT/{rem} or /efi/EFI/Gentoo/{branded})" >&2; '
+                "missing=1; fi"
+            )
     # LUKS + GRUB: kernels live on encrypted /boot; cryptodisk must be enabled or first boot fails.
     if cfg.luks and "grub" in loaders:
         lines.append(
             "if ! grep -Eq '^[[:space:]]*GRUB_ENABLE_CRYPTODISK=y' "
             "/etc/default/grub 2>/dev/null; then "
             'echo ">> LUKS+GRUB requires GRUB_ENABLE_CRYPTODISK=y" >&2; missing=1; fi'
-        )
-        lines.append(
-            'if [ ! -s /boot/grub/grub.cfg ]; then '
-            'echo ">> LUKS+GRUB requires /boot/grub/grub.cfg" >&2; missing=1; fi'
         )
     # Selected WM session binaries — labwc as greeter helper is not a substitute (H6).
     wm_atoms = _window_managers(cfg)
