@@ -1268,7 +1268,8 @@ def _packages_locked_from_earlier_steps(cfg: InstallConfig) -> set[str]:
             locked.add("gui-apps/gtkgreet")
             locked.add("gui-wm/labwc")
         # Entire greetd stack — do not ask again in display-managers.
-        locked.update({"gui-apps/tuigreet", "x11-misc/lightdm", "x11-misc/sddm", "x11-misc/slim"})
+        # tuigreet is REMOVED_GURU (blocked if typed); gtkgreet/labwc is the path.
+        locked.update({"x11-misc/lightdm", "x11-misc/sddm", "x11-misc/slim"})
     locked.update(catalog.required_browser_atoms())
     # Bare firefox-bin / chrome aliases also stay hidden if a list still has them.
     locked.update({"www-client/firefox-bin", "www-client/google-chrome", "www-client/firefox"})

@@ -2502,7 +2502,7 @@ def _final_tool_checks(cfg: InstallConfig, loaders: list[str]) -> str:
                 "session .desktop",
             )
         )
-        if not _greetd_uses_noctalia(cfg) and not _greetd_uses_tuigreet(cfg):
+        if not _greetd_uses_noctalia(cfg):
             greeter_fatal.append(("command -v gtkgreet >/dev/null 2>&1", "gtkgreet"))
             greeter_fatal.append(("command -v labwc >/dev/null 2>&1", "labwc"))
     for test, label in greeter_fatal:
@@ -3150,9 +3150,6 @@ def greeter_boot_failures(cfg: InstallConfig) -> list[str]:
         if _greetd_uses_noctalia(cfg):
             if catalog.NOCTALIA_GREETER.atom not in tools:
                 failures.append("noctalia-greeter missing while Noctalia shell is selected")
-        elif _greetd_uses_tuigreet(cfg):
-            if "gui-apps/tuigreet" not in tools:
-                failures.append("tuigreet selected but not in display-manager tools")
         else:
             if "gui-apps/gtkgreet" not in tools:
                 failures.append("gtkgreet missing for greetd greeter")
@@ -3172,7 +3169,7 @@ def greeter_boot_failures(cfg: InstallConfig) -> list[str]:
             failures.append("greetd config.toml would not be written")
         if "ensure greetd system user" not in script and "getent passwd greetd" not in script:
             failures.append("greetd system user would not be ensured before greeter enablement")
-        if not _greetd_uses_noctalia(cfg) and not _greetd_uses_tuigreet(cfg):
+        if not _greetd_uses_noctalia(cfg):
             if "/etc/greetd/environments" not in script:
                 failures.append("greetd environments file would not be written")
             else:
@@ -3224,18 +3221,6 @@ def _greetd_uses_noctalia(cfg: InstallConfig) -> bool:
     return "gui-apps/noctalia-shell" in set(_graphical_atoms(cfg))
 
 
-def _greetd_uses_tuigreet(cfg: InstallConfig) -> bool:
-    """tuigreet is a GURU package. Use it only when a saved profile already names it."""
-    if _greetd_uses_noctalia(cfg):
-        return False
-    atoms = set(_graphical_atoms(cfg))
-    return (
-        "gui-apps/tuigreet" in atoms
-        and "gui-apps/gtkgreet" not in atoms
-        and _atom_allowed(cfg, "gui-apps/tuigreet")
-    )
-
-
 def _accounts_daemon_probe() -> tuple[str, ...]:
     return (
         "bash",
@@ -3277,8 +3262,6 @@ def _display_manager_tools(cfg: InstallConfig) -> list[tuple[str, tuple[str, ...
             )
         if _greetd_uses_noctalia(cfg):
             tools.append(("gui-apps/noctalia-greeter", ("command", "-v", "noctalia-greeter-session")))
-        elif _greetd_uses_tuigreet(cfg):
-            tools.append(("gui-apps/tuigreet", ("command", "-v", "tuigreet")))
         else:
             tools.append(("gui-apps/gtkgreet", ("command", "-v", "gtkgreet")))
             tools.append(("gui-wm/labwc", ("command", "-v", "labwc")))
@@ -3347,7 +3330,7 @@ def _display_manager_script(cfg: InstallConfig) -> str:
     for atom, test in _display_manager_tools(cfg):
         lines.append(_emerge_checked_call(atom, test, required=True))
     # When gtkgreet needs a session host and labwc was only a fallback, emerge it.
-    if dm == "greetd" and not _greetd_uses_noctalia(cfg) and not _greetd_uses_tuigreet(cfg):
+    if dm == "greetd" and not _greetd_uses_noctalia(cfg):
         if not any(atom == "gui-wm/labwc" for atom, _ in _display_manager_tools(cfg)):
             lines.append(
                 _emerge_checked_call("gui-wm/labwc", ("command", "-v", "labwc"), required=True)
@@ -3495,7 +3478,7 @@ def _display_manager_script(cfg: InstallConfig) -> str:
                 "fi",
             ]
         )
-        if not _greetd_uses_noctalia(cfg) and not _greetd_uses_tuigreet(cfg):
+        if not _greetd_uses_noctalia(cfg):
             lines.extend(
                 [
                     "if ! [ -s /etc/greetd/environments ]; then",
@@ -3512,7 +3495,7 @@ def _display_manager_script(cfg: InstallConfig) -> str:
                     "fi",
                 ]
             )
-        elif _greetd_uses_noctalia(cfg):
+        else:
             lines.extend(
                 [
                     "if ! command -v noctalia-greeter-session >/dev/null 2>&1; then",
@@ -3633,7 +3616,7 @@ def _ensure_greetd_user_lines() -> list[str]:
 
 
 def _greetd_config_lines(cfg: InstallConfig, sessions: list[tuple[str, str, str]]) -> list[str]:
-    """gtkgreet lists compositor commands. tuigreet lists the user and the desktop files."""
+    """Write greetd environments + gtkgreet/labwc (or Noctalia) default_session."""
     if _greetd_uses_noctalia(cfg):
         return _noctalia_greeter_lines(cfg, sessions)
     lines = [
@@ -3643,60 +3626,34 @@ def _greetd_config_lines(cfg: InstallConfig, sessions: list[tuple[str, str, str]
     for _title, command, _kind in sessions:
         lines.append(command)
     lines.append("EOF")
-    if _greetd_uses_tuigreet(cfg):
-        command = (
-            "/usr/bin/tuigreet --time --user-menu --remember --remember-user-session "
-            "--sessions /usr/share/wayland-sessions:/usr/share/xsessions"
-        )
-        lines.extend(
-            [
-                "cat > /etc/greetd/config.toml << 'EOF'",
-                "[terminal]",
-                "vt = 1",
-                "",
-                "[default_session]",
-                f'command = "{command}"',
-                'user = "greetd"',
-                "EOF",
-                'if [ -n "$login_user" ]; then',
-                "  install -d -o greetd -g greetd -m 755 /var/cache/tuigreet",
-                '  printf "%s\\n" "$login_user" > /var/cache/tuigreet/lastuser',
-                "  chown greetd:greetd /var/cache/tuigreet/lastuser || true",
-                '  if [ -n "$session_file" ]; then',
-                '    printf "%s\\n" "$session_file" > /var/cache/tuigreet/lastsession-path',
-                "    chown greetd:greetd /var/cache/tuigreet/lastsession-path || true",
-                "  fi",
-                "fi",
-            ]
-        )
-    else:
-        lines.extend(
-            [
-                "mkdir -p /etc/greetd/labwc",
-                "cat > /etc/greetd/labwc/autostart << 'EOF'",
-                "#!/bin/sh",
-                "if gtkgreet -h 2>&1 | grep -q -- '--layer-shell'; then",
-                "  gtkgreet -l",
-                "else",
-                "  gtkgreet",
-                "fi",
-                "labwc --exit || true",
-                "EOF",
-                "chmod 755 /etc/greetd/labwc/autostart",
-                "greeter_cmd='labwc --config-dir /etc/greetd/labwc'",
-                "if ! labwc --help 2>&1 | grep -q -- '--config-dir'; then",
-                "  greeter_cmd='labwc -s /etc/greetd/labwc/autostart'",
-                "fi",
-                "cat > /etc/greetd/config.toml << EOF",
-                "[terminal]",
-                "vt = 1",
-                "",
-                "[default_session]",
-                'command = "${greeter_cmd}"',
-                'user = "greetd"',
-                "EOF",
-            ]
-        )
+    # gui-apps/tuigreet stays in REMOVED_GURU_ATOMS — gtkgreet/labwc is the greetd path.
+    lines.extend(
+        [
+            "mkdir -p /etc/greetd/labwc",
+            "cat > /etc/greetd/labwc/autostart << 'EOF'",
+            "#!/bin/sh",
+            "if gtkgreet -h 2>&1 | grep -q -- '--layer-shell'; then",
+            "  gtkgreet -l",
+            "else",
+            "  gtkgreet",
+            "fi",
+            "labwc --exit || true",
+            "EOF",
+            "chmod 755 /etc/greetd/labwc/autostart",
+            "greeter_cmd='labwc --config-dir /etc/greetd/labwc'",
+            "if ! labwc --help 2>&1 | grep -q -- '--config-dir'; then",
+            "  greeter_cmd='labwc -s /etc/greetd/labwc/autostart'",
+            "fi",
+            "cat > /etc/greetd/config.toml << EOF",
+            "[terminal]",
+            "vt = 1",
+            "",
+            "[default_session]",
+            'command = "${greeter_cmd}"',
+            'user = "greetd"',
+            "EOF",
+        ]
+    )
     lines.append(
         'for grp in video input render seat; do '
         'getent group "$grp" >/dev/null || continue; '
@@ -3808,7 +3765,7 @@ def _package_use_text(cfg: InstallConfig) -> str:
         lines.append("x11-misc/sddm systemd -elogind")
     elif dm == "gdm":
         lines.append("gnome-base/gdm systemd -elogind")
-    if dm == "greetd" and not _greetd_uses_tuigreet(cfg) and not _greetd_uses_noctalia(cfg):
+    if dm == "greetd" and not _greetd_uses_noctalia(cfg):
         lines.append("gui-apps/gtkgreet layer-shell")
     queued = set(_graphical_atoms(cfg))
     if "gui-wm/niri" in queued and "gui-apps/waybar" in queued:

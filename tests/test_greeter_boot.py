@@ -111,6 +111,26 @@ class GreeterResolutionTests(unittest.TestCase):
         self.assertIn("verify greeter can present a login", script)
         self.assertIn("boot-to-greeter checks failed", script)
 
+    def test_tuigreet_stays_removed_and_never_selected(self) -> None:
+        """Saved profiles naming tuigreet must not revive a dead greeter path."""
+        self.assertIn("gui-apps/tuigreet", catalog.REMOVED_GURU_ATOMS)
+        self.assertNotIn("gui-apps/tuigreet", catalog.offered_guru_atoms("none"))
+        cfg = _base_cfg(
+            window_managers=["gui-wm/sway"],
+            display_manager="greetd",
+            shell="none",
+            extra_packages=["gui-apps/tuigreet"],
+        )
+        from gentoo_installer.execute import _display_manager_tools
+
+        tools = {atom for atom, _ in _display_manager_tools(cfg)}
+        self.assertNotIn("gui-apps/tuigreet", tools)
+        self.assertIn("gui-apps/gtkgreet", tools)
+        script = _display_manager_script(cfg)
+        self.assertNotIn("tuigreet", script)
+        self.assertIn("gtkgreet", script)
+        self.assertEqual(greeter_boot_failures(cfg), [])
+
     def test_noctalia_uses_noctalia_greeter(self) -> None:
         cfg = _base_cfg(
             window_managers=["gui-wm/hyprland"],

@@ -118,6 +118,7 @@ SHELL_EXEC: dict[str, str] = {
 # Previously offered from GURU but not restored as menu options. A saved profile
 # or typed atom must not emerge them. Wizard-offered GURU WMs/shells are the
 # exception (see offered_guru_atoms). vscode/vscodium/helix now live in ::gentoo.
+# gui-apps/tuigreet stays here — greetd uses gtkgreet/labwc (no tuigreet branch).
 REMOVED_GURU_ATOMS = frozenset(
     {
         "gui-wm/cage",
