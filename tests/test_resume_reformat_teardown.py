@@ -230,7 +230,12 @@ class H1LuksMkfsTeardownTests(unittest.TestCase):
             calls.append(script)
             return mock.MagicMock(returncode=0)
 
+        def capture_run(argv, check: bool = True, **kwargs):  # noqa: ARG001, ANN001
+            calls.append(" ".join(str(a) for a in argv))
+            return mock.MagicMock(returncode=0)
+
         runner.shell.side_effect = capture_shell
+        runner.run.side_effect = capture_run
         with (
             mock.patch("gentoo_installer.execute._leave_tree"),
             mock.patch("gentoo_installer.execute._sgdisk_gpt"),
