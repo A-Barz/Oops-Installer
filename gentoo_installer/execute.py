@@ -2184,6 +2184,17 @@ def _final_tool_checks(cfg: InstallConfig, loaders: list[str]) -> str:
     lines.append(f"if {joined}; then boot_ok=1; else echo '>> no selected bootloader was installed' >&2; fi")
     lines.append('if [ "$kernel_ok" -eq 0 ]; then echo ">> no kernel image was installed" >&2; missing=1; fi')
     lines.append('if [ "$boot_ok" -eq 0 ]; then missing=1; fi')
+    # LUKS + GRUB: kernels live on encrypted /boot; cryptodisk must be enabled or first boot fails.
+    if cfg.luks and "grub" in loaders:
+        lines.append(
+            "if ! grep -Eq '^[[:space:]]*GRUB_ENABLE_CRYPTODISK=y' "
+            "/etc/default/grub 2>/dev/null; then "
+            'echo ">> LUKS+GRUB requires GRUB_ENABLE_CRYPTODISK=y" >&2; missing=1; fi'
+        )
+        lines.append(
+            'if [ ! -s /boot/grub/grub.cfg ]; then '
+            'echo ">> LUKS+GRUB requires /boot/grub/grub.cfg" >&2; missing=1; fi'
+        )
     # Greeter presence is fatal when a greeter was requested — same as kernel/bootloader.
     greeter_fatal: list[tuple[str, str]] = []
     dm = _resolved_dm(cfg)
@@ -2691,18 +2702,87 @@ def _emerge_each_block(title: str, atoms: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _grub_uefi_install(target: str) -> str:
+def _grub_cryptodisk_default_script() -> str:
+    """Write GRUB_ENABLE_CRYPTODISK=y so grub-install embeds LUKS/cryptodisk modules.
+
+    Handbook UEFI keeps kernels on encrypted /boot (ESP at /efi only). Without
+    cryptodisk, GRUB cannot read grub.cfg or the kernel after reboot. Modules
+    expected via this flag: cryptodisk, luks, luks2, and needed gcry_* hashes.
+    """
+    return """
+mkdir -p /etc/default
+export GRUB_ENABLE_CRYPTODISK=y
+if [ ! -f /etc/default/grub ]; then
+  echo 'GRUB_ENABLE_CRYPTODISK=y' > /etc/default/grub
+elif grep -q '^[[:space:]]*GRUB_ENABLE_CRYPTODISK=' /etc/default/grub; then
+  sed -i -E 's/^[[:space:]]*GRUB_ENABLE_CRYPTODISK=.*/GRUB_ENABLE_CRYPTODISK=y/' /etc/default/grub
+else
+  echo 'GRUB_ENABLE_CRYPTODISK=y' >> /etc/default/grub
+fi
+echo ">> GRUB_ENABLE_CRYPTODISK=y (LUKS: embed cryptodisk/luks2 modules at grub-install)"
+"""
+
+
+def _grub_uefi_install(target: str, *, fail_closed: bool = False) -> str:
     """Install GRUB for UEFI. efivarfs is often read-only in an Ubuntu chroot.
 
     That makes efibootmgr exit with "No such file or directory". The removable
     fallback still writes EFI/BOOT/BOOTX64.EFI so the firmware can boot.
     A binpkg built without GRUB_PLATFORMS=efi-64 has no modinfo.sh; rebuild it.
+    When fail_closed (LUKS), grub-install/grub-mkconfig failures abort the chroot.
     """
+    rebuild_fail = (
+        "echo '>> grub rebuild failed' >&2; exit 1"
+        if fail_closed
+        else "echo '>> grub rebuild failed' >&2"
+    )
+    source_fail = (
+        "echo '>> grub source build failed' >&2; exit 1"
+        if fail_closed
+        else "echo '>> grub source build failed' >&2"
+    )
+    removable_fail = (
+        "{ echo '>> grub-install failed' >&2; exit 1; }"
+        if fail_closed
+        else "echo '>> grub-install failed' >&2"
+    )
+    after_install = [
+        'if [ "$grub_status" -ne 0 ]; then',
+        '  echo ">> grub-install could not register NVRAM; writing the removable EFI fallback"',
+        f"  grub-install --target={target} --efi-directory=/efi --bootloader-id=Gentoo --removable --no-nvram || {removable_fail}",
+    ]
+    if fail_closed:
+        after_install += [
+            "  grub_status=$?",
+            "fi",
+            'if [ "$grub_status" -ne 0 ]; then',
+            '  echo ">> grub-install failed" >&2',
+            "  exit 1",
+            "fi",
+        ]
+    else:
+        after_install.append("fi")
+    mkconfig = [
+        "if command -v grub-mkconfig >/dev/null 2>&1; then",
+        (
+            "  grub-mkconfig -o /boot/grub/grub.cfg || "
+            "{ echo '>> grub-mkconfig failed' >&2; exit 1; }"
+            if fail_closed
+            else "  grub-mkconfig -o /boot/grub/grub.cfg || echo '>> grub-mkconfig failed' >&2"
+        ),
+        "else",
+        (
+            '  echo ">> grub-mkconfig does not exist" >&2; exit 1'
+            if fail_closed
+            else '  echo ">> grub-mkconfig does not exist" >&2'
+        ),
+        "fi",
+    ]
     return "\n".join(
         [
             f"if [ ! -e /usr/lib/grub/{target}/modinfo.sh ]; then",
             '  echo ">> GRUB EFI modules missing; rebuilding sys-boot/grub from source"',
-            "  emerge --ask=n --usepkg=n --getbinpkg=n sys-boot/grub || echo '>> grub rebuild failed' >&2",
+            f"  emerge --ask=n --usepkg=n --getbinpkg=n sys-boot/grub || {rebuild_fail}",
             "fi",
             "if [ -d /sys/firmware/efi ]; then",
             "  mkdir -p /sys/firmware/efi/efivars",
@@ -2713,26 +2793,19 @@ def _grub_uefi_install(target: str) -> str:
             "if ! mountpoint -q /efi; then echo '>> /efi is not mounted; the ESP belongs there (handbook)' >&2; fi",
             "if ! command -v grub-install >/dev/null 2>&1; then",
             '  echo ">> grub-install does not exist; building sys-boot/grub from source"',
-            "  emerge --ask=n --usepkg=n --getbinpkg=n sys-boot/grub || echo '>> grub source build failed' >&2",
+            f"  emerge --ask=n --usepkg=n --getbinpkg=n sys-boot/grub || {source_fail}",
             "fi",
             f"grub-install --target={target} --efi-directory=/efi --bootloader-id=Gentoo",
             "grub_status=$?",
             'if [ "$grub_status" -eq 132 ]; then',
             '  echo ">> grub-install: illegal instruction; rebuilding sys-boot/grub from source"',
             "  disable_binpkgs",
-            "  emerge --ask=n --usepkg=n --getbinpkg=n sys-boot/grub || echo '>> grub source build failed' >&2",
+            f"  emerge --ask=n --usepkg=n --getbinpkg=n sys-boot/grub || {source_fail}",
             f"  grub-install --target={target} --efi-directory=/efi --bootloader-id=Gentoo",
             "  grub_status=$?",
             "fi",
-            'if [ "$grub_status" -ne 0 ]; then',
-            '  echo ">> grub-install could not register NVRAM; writing the removable EFI fallback"',
-            f"  grub-install --target={target} --efi-directory=/efi --bootloader-id=Gentoo --removable --no-nvram || echo '>> grub-install failed' >&2",
-            "fi",
-            "if command -v grub-mkconfig >/dev/null 2>&1; then",
-            "  grub-mkconfig -o /boot/grub/grub.cfg || echo '>> grub-mkconfig failed' >&2",
-            "else",
-            '  echo ">> grub-mkconfig does not exist" >&2',
-            "fi",
+            *after_install,
+            *mkconfig,
         ]
     )
 
@@ -4947,6 +5020,10 @@ def _retry_sigill(atom: str, command: str) -> str:
 def _install_bootloaders(cfg: InstallConfig, devices: dict[str, str], loaders: list[str]) -> str:
     """Chroot commands to install every selected bootloader (not only the primary)."""
     cmds: list[str] = []
+    luks_grub = bool(cfg.luks and "grub" in loaders)
+    if luks_grub:
+        # Before grub-install: cryptodisk must be on so EFI payload embeds LUKS modules.
+        cmds.append(_grub_cryptodisk_default_script())
     for bl in loaders:
         if bl == "grub":
             if cfg.firmware == "uefi":
@@ -4956,9 +5033,25 @@ def _install_bootloaders(cfg: InstallConfig, devices: dict[str, str], loaders: l
                     grub_target = "i386-efi"
                 else:
                     grub_target = "x86_64-efi"
-                cmds.append(_grub_uefi_install(grub_target))
+                cmds.append(_grub_uefi_install(grub_target, fail_closed=luks_grub))
             else:
                 disk = shlex.quote(cfg.target_disk)
+                bios_source_fail = (
+                    "echo '>> grub source build failed' >&2; exit 1"
+                    if luks_grub
+                    else "echo '>> grub source build failed' >&2"
+                )
+                bios_install_fail = (
+                    'echo ">> grub-install failed" >&2; exit 1'
+                    if luks_grub
+                    else 'echo ">> grub-install failed" >&2'
+                )
+                bios_mkconfig = (
+                    "grub-mkconfig -o /boot/grub/grub.cfg || "
+                    "{ echo '>> grub-mkconfig failed' >&2; exit 1; }"
+                    if luks_grub
+                    else "grub-mkconfig -o /boot/grub/grub.cfg || echo '>> grub-mkconfig failed' >&2"
+                )
                 cmds.append(
                     "\n".join(
                         [
@@ -4968,12 +5061,12 @@ def _install_bootloaders(cfg: InstallConfig, devices: dict[str, str], loaders: l
                             'if [ "$grub_status" -eq 132 ]; then',
                             '  echo ">> grub-install: illegal instruction; rebuilding sys-boot/grub from source"',
                             "  disable_binpkgs",
-                            "  emerge --ask=n --usepkg=n --getbinpkg=n sys-boot/grub || echo '>> grub source build failed' >&2",
+                            f"  emerge --ask=n --usepkg=n --getbinpkg=n sys-boot/grub || {bios_source_fail}",
                             f"  grub-install {disk}",
                             "  grub_status=$?",
                             "fi",
-                            'if [ "$grub_status" -ne 0 ]; then echo ">> grub-install failed" >&2; fi',
-                            "grub-mkconfig -o /boot/grub/grub.cfg || echo '>> grub-mkconfig failed' >&2",
+                            f'if [ "$grub_status" -ne 0 ]; then {bios_install_fail}; fi',
+                            bios_mkconfig,
                         ]
                     )
                 )
