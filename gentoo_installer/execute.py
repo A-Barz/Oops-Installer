@@ -4974,6 +4974,24 @@ if ! command -v git >/dev/null 2>&1; then
   echo ">> git missing before Portage tree sync (sync_method=git)" >&2
   exit 1
 fi
+# Stage3 often ships /var/db/repos/gentoo without .git. Git sync-type cannot
+# convert that tree in place — move it aside first so Portage can clone into
+# an empty location. webrsync remains the default.
+if [ -e /var/db/repos/gentoo ] && [ ! -e /var/db/repos/gentoo/.git ]; then
+  if [ -n "$(ls -A /var/db/repos/gentoo 2>/dev/null)" ]; then
+    aside="/var/db/repos/gentoo.pre-git.$$"
+    echo ">> move aside non-git stage3 tree -> $aside"
+    mv /var/db/repos/gentoo "$aside" || {
+      echo ">> failed to move aside non-git /var/db/repos/gentoo for sync_method=git" >&2
+      exit 1
+    }
+    mkdir -p /var/db/repos/gentoo
+    if [ ! -d /var/db/repos/gentoo ]; then
+      echo ">> failed to recreate /var/db/repos/gentoo after move-aside" >&2
+      exit 1
+    fi
+  fi
+fi
 # Location directory exists — now safe to point repos.conf at it.
 mkdir -p /etc/portage/repos.conf
 cat > /etc/portage/repos.conf/gentoo.conf << 'EOF'
