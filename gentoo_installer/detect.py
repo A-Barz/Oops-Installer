@@ -121,6 +121,19 @@ def blkid_ids(node: str) -> tuple[str, str]:
     return uuid, partuuid
 
 
+def blkid_type(node: str) -> str:
+    """Filesystem/crypto TYPE from blkid (lowercased), or empty when unknown."""
+    if not node or not is_linux() or not shutil.which("blkid"):
+        return ""
+    proc = subprocess.run(
+        ["blkid", "-o", "value", "-s", "TYPE", node],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return (proc.stdout or "").strip().lower()
+
+
 def detect_amd_cpu() -> bool:
     cpu = Path("/proc/cpuinfo")
     if not cpu.exists():

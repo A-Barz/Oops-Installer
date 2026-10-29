@@ -66,8 +66,10 @@ class InstallConfig:
     wipe_disk: bool = True
     # disk = whole target; partitions = wipe_partitions only;
     # none = keep partition table, but still mkfs/mkswap (and luksFormat if LUKS)
-    # the selected ESP/root/swap — not a data-preserving mount.
-    wipe_mode: str = "disk"  # disk | partitions | none
+    # the selected ESP/root/swap — not a data-preserving mount;
+    # mount = expert: mount existing filesystems only (no mkfs / no luksFormat;
+    # fail-closed on fstype mismatch).
+    wipe_mode: str = "disk"  # disk | partitions | none | mount
     # When wipe_mode == "partitions", wipe these block devices with wipefs before install.
     wipe_partitions: list[str] = field(default_factory=list)
     # handbook = ESP/boot + swap + root (wiki default scheme)

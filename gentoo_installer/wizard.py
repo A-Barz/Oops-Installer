@@ -332,8 +332,8 @@ def _refuse_live_installer_path(path: str, *, action: str = "select") -> None:
         )
 
 
-def _confirm_reformat_existing(cfg: InstallConfig) -> None:
-    """H8: wipe_mode none keeps the table but still formats named ESP/root/swap."""
+def _existing_role_devices(cfg: InstallConfig) -> list[tuple[str, str]]:
+    """Named ESP/boot/root/swap nodes for existing-layout confirms."""
     roles: list[tuple[str, str]] = []
     if cfg.existing_esp:
         roles.append(("ESP", cfg.existing_esp))
@@ -343,6 +343,12 @@ def _confirm_reformat_existing(cfg: InstallConfig) -> None:
         roles.append(("root", cfg.existing_root))
     if cfg.existing_swap:
         roles.append(("swap", cfg.existing_swap))
+    return roles
+
+
+def _confirm_reformat_existing(cfg: InstallConfig) -> None:
+    """H8: wipe_mode none keeps the table but still formats named ESP/root/swap."""
+    roles = _existing_role_devices(cfg)
     if not roles:
         raise SystemExit("No ESP/root/swap devices named to reformat.")
     ui.danger("Keep-partition-table mode still formats these devices (mkfs/mkswap):")
@@ -351,6 +357,20 @@ def _confirm_reformat_existing(cfg: InstallConfig) -> None:
     ui.info("If you enable LUKS later, luksFormat also runs on the root (and swap if chosen).")
     if not ui.ask_yes_no("Reformat the named ESP/root/swap devices above?", False):
         raise SystemExit("Aborted before reformatting existing partitions.")
+
+
+def _confirm_mount_existing(cfg: InstallConfig) -> None:
+    """H8-B: wipe_mode mount never mkfs/luksFormat — confirm named nodes only."""
+    roles = _existing_role_devices(cfg)
+    if not roles:
+        raise SystemExit("No ESP/root/swap devices named to mount.")
+    ui.warn("Expert mount-existing: no wipefs, mkfs, mkswap, or luksFormat.")
+    ui.info("These devices will be opened (if LUKS) and mounted as-is:")
+    for role, path in roles:
+        ui.warn(f"  {role}: {path}")
+    ui.info("Install aborts if the on-disk filesystem type does not match your choice.")
+    if not ui.ask_yes_no("Mount the named ESP/root/swap devices without formatting?", False):
+        raise SystemExit("Aborted before mounting existing partitions.")
 
 
 def _disks(cfg: InstallConfig) -> None:
@@ -385,6 +405,14 @@ def _disks(cfg: InstallConfig) -> None:
     _warn_small_disk(cfg)
     _note_ssd_trim(cfg)
 
+    wipe_default = "disk"
+    if not cfg.wipe_disk:
+        if getattr(cfg, "wipe_partitions", None):
+            wipe_default = "partitions"
+        elif cfg.wipe_mode == "mount":
+            wipe_default = "mount"
+        else:
+            wipe_default = "none"
     cfg.wipe_mode = ui.menu(
         "What should be wiped before install?",
         [
@@ -394,8 +422,12 @@ def _disks(cfg: InstallConfig) -> None:
                 "none",
                 "Keep partition table; reformat selected ESP/root/swap for Gentoo",
             ),
+            (
+                "mount",
+                "Expert: mount existing filesystems (no mkfs / no luksFormat)",
+            ),
         ],
-        "disk" if cfg.wipe_disk else ("partitions" if getattr(cfg, "wipe_partitions", None) else "none"),
+        wipe_default,
     )
     cfg.wipe_partitions = []
     if cfg.wipe_mode == "disk":
@@ -446,6 +478,12 @@ def _disks(cfg: InstallConfig) -> None:
             for part in cfg.wipe_partitions:
                 _refuse_live_installer_path(part, action="wipe")
             ui.ok("Will wipe: " + ", ".join(cfg.wipe_partitions))
+    elif cfg.wipe_mode == "mount":
+        cfg.wipe_disk = False
+        ui.warn(
+            "Expert mount-existing: partition table and filesystems stay. "
+            "No wipefs, mkfs, mkswap, or luksFormat — fstype must already match."
+        )
     else:
         cfg.wipe_disk = False
         ui.info(
@@ -463,23 +501,29 @@ def _disks(cfg: InstallConfig) -> None:
             "mbr",
         )
 
-    layout_default = "existing" if cfg.wipe_mode in {"partitions", "none"} else "handbook"
-    cfg.layout = ui.menu(
-        "Disk layout (merged from oddlama, GForge, l0rdg3x, handbook)",
-        [
-            ("handbook", "Handbook default: ESP/boot + swap + root"),
-            (
-                "btrfs-subvols",
-                "GPT + Btrfs subvolumes (@ @home @log @cache @tmp + @swap mount for a swapfile)",
-            ),
-            ("lvm", "LVM: ESP + PV with root and optional swap LVs"),
-            ("lvm-luks", "LVM-on-LUKS (ESP unencrypted)"),
-            ("mdraid1", "Software RAID1 of two disks, then handbook layout"),
-            ("zfs", "ZFS root pool (needs zfsutils-linux on Ubuntu)"),
-            ("existing", "Use partitions you already created (or wiped above)"),
-        ],
-        layout_default,
-    )
+    existing_wipes = {"partitions", "none", "mount"}
+    layout_default = "existing" if cfg.wipe_mode in existing_wipes else "handbook"
+    if cfg.wipe_mode == "mount":
+        # Expert path is always existing-layout; skip the full layout menu.
+        cfg.layout = "existing"
+        ui.info("Mount-existing forces layout=existing (named ESP/root/swap).")
+    else:
+        cfg.layout = ui.menu(
+            "Disk layout (merged from oddlama, GForge, l0rdg3x, handbook)",
+            [
+                ("handbook", "Handbook default: ESP/boot + swap + root"),
+                (
+                    "btrfs-subvols",
+                    "GPT + Btrfs subvolumes (@ @home @log @cache @tmp + @swap mount for a swapfile)",
+                ),
+                ("lvm", "LVM: ESP + PV with root and optional swap LVs"),
+                ("lvm-luks", "LVM-on-LUKS (ESP unencrypted)"),
+                ("mdraid1", "Software RAID1 of two disks, then handbook layout"),
+                ("zfs", "ZFS root pool (needs zfsutils-linux on Ubuntu)"),
+                ("existing", "Use partitions you already created (or wiped above)"),
+            ],
+            layout_default,
+        )
     if cfg.layout == "mdraid1":
         others = [c for c in choices if c[0] != cfg.target_disk]
         if len(others) >= 1:
@@ -487,7 +531,7 @@ def _disks(cfg: InstallConfig) -> None:
         else:
             cfg.extra_raid_disk = ui.prompt("Second RAID1 disk", "/dev/sdb")
         _refuse_live_installer_path(cfg.extra_raid_disk, action="select")
-    if cfg.layout == "existing" or cfg.wipe_mode in {"partitions", "none"}:
+    if cfg.layout == "existing" or cfg.wipe_mode in existing_wipes:
         if cfg.layout != "existing" and cfg.wipe_mode != "disk":
             ui.info(
                 "Selected-partition / keep-table installs use your existing partition layout."
@@ -497,11 +541,14 @@ def _disks(cfg: InstallConfig) -> None:
         cfg.existing_esp = ui.prompt("ESP / boot partition", cfg.existing_esp or "/dev/sda1")
         cfg.existing_root = ui.prompt("Root partition (or LUKS container)", cfg.existing_root or "/dev/sda3")
         cfg.existing_swap = ui.prompt("Swap partition (empty to skip)", cfg.existing_swap)
+        refuse_action = "mount" if cfg.wipe_mode == "mount" else "format"
         for path in (cfg.existing_esp, cfg.existing_root, cfg.existing_swap):
-            _refuse_live_installer_path(path, action="format")
+            _refuse_live_installer_path(path, action=refuse_action)
         # H8: wipe_mode none still mkfs's these nodes — confirm by name.
         if cfg.wipe_mode == "none":
             _confirm_reformat_existing(cfg)
+        elif cfg.wipe_mode == "mount":
+            _confirm_mount_existing(cfg)
 
     if cfg.layout in {"btrfs-subvols"}:
         cfg.filesystem = "btrfs"
@@ -577,40 +624,63 @@ def _disks(cfg: InstallConfig) -> None:
     elif cfg.keymap and cfg.keymap != "us":
         ui.info("A graphical terminal keeps the desktop layout. loadkeys only changes a text console.")
 
-    if cfg.layout != "lvm-luks":
-        ui.guru_note(
-            "Encrypting root (and home on that volume) keeps the disk unreadable if "
-            "the machine is lost or stolen — cold plugs cannot read your files."
+    if cfg.wipe_mode == "mount":
+        # H8-B: open existing containers only — never luksFormat in this path.
+        cfg.luks = ui.ask_yes_no(
+            "Open an existing LUKS2 container on the named root partition?",
+            False,
         )
-    cfg.luks = cfg.layout == "lvm-luks" or ui.ask_yes_no(
-        "LUKS2 encrypt the root (and home on it; optionally swap)?",
-        cfg.layout == "lvm-luks",
-    )
-    if cfg.luks:
-        cfg.luks_passphrase = ui.ask_password("LUKS passphrase")
-        ui.info(
-            "With GRUB (handbook UEFI), the first unlock is at the GRUB prompt "
-            "(cryptodisk); the initramfs may ask again until single-pass unlock is designed."
-        )
-        if cfg.swap_mode in {"partition", "both"}:
-            if cfg.layout == "lvm-luks":
-                ui.info("LVM-on-LUKS already encrypts the volume group, so the swap LV is not wrapped a second time.")
-                cfg.encrypted_swap = True
-            else:
-                ui.info("Encrypted swap is a separate LUKS2 volume opened as /dev/mapper/swap (same passphrase as root).")
-                ui.guru_note(
-                    "Unencrypted swap can leak passwords and keys from RAM to disk — "
-                    "encrypting swap closes that hole when the drive leaves your hands."
+        if cfg.luks:
+            cfg.luks_passphrase = ui.ask_password("LUKS passphrase (open existing)")
+            if cfg.existing_swap and cfg.swap_mode in {"partition", "both"}:
+                cfg.encrypted_swap = ui.ask_yes_no(
+                    "Also open an existing LUKS2 swap volume (same passphrase)?",
+                    False,
                 )
-                cfg.encrypted_swap = ui.ask_yes_no("Encrypt the swap partition/LV as well?", True)
+            else:
+                cfg.encrypted_swap = False
+            cfg.tpm2_unlock = ui.ask_yes_no(
+                "Prepare TPM2 auto-unlock scripts (PCR 7+14, after first boot)?",
+                detect.has_tpm2(),
+            )
         else:
             cfg.encrypted_swap = False
-            if cfg.swap_mode == "file":
-                ui.warn("A swap *file* is not LUKS-wrapped. Use a swap partition or LVM if you need encrypted swap.")
-        cfg.tpm2_unlock = ui.ask_yes_no(
-            "Prepare TPM2 auto-unlock scripts (PCR 7+14, after first boot)?",
-            detect.has_tpm2(),
+            cfg.tpm2_unlock = False
+    else:
+        if cfg.layout != "lvm-luks":
+            ui.guru_note(
+                "Encrypting root (and home on that volume) keeps the disk unreadable if "
+                "the machine is lost or stolen — cold plugs cannot read your files."
+            )
+        cfg.luks = cfg.layout == "lvm-luks" or ui.ask_yes_no(
+            "LUKS2 encrypt the root (and home on it; optionally swap)?",
+            cfg.layout == "lvm-luks",
         )
+        if cfg.luks:
+            cfg.luks_passphrase = ui.ask_password("LUKS passphrase")
+            ui.info(
+                "With GRUB (handbook UEFI), the first unlock is at the GRUB prompt "
+                "(cryptodisk); the initramfs may ask again until single-pass unlock is designed."
+            )
+            if cfg.swap_mode in {"partition", "both"}:
+                if cfg.layout == "lvm-luks":
+                    ui.info("LVM-on-LUKS already encrypts the volume group, so the swap LV is not wrapped a second time.")
+                    cfg.encrypted_swap = True
+                else:
+                    ui.info("Encrypted swap is a separate LUKS2 volume opened as /dev/mapper/swap (same passphrase as root).")
+                    ui.guru_note(
+                        "Unencrypted swap can leak passwords and keys from RAM to disk — "
+                        "encrypting swap closes that hole when the drive leaves your hands."
+                    )
+                    cfg.encrypted_swap = ui.ask_yes_no("Encrypt the swap partition/LV as well?", True)
+            else:
+                cfg.encrypted_swap = False
+                if cfg.swap_mode == "file":
+                    ui.warn("A swap *file* is not LUKS-wrapped. Use a swap partition or LVM if you need encrypted swap.")
+            cfg.tpm2_unlock = ui.ask_yes_no(
+                "Prepare TPM2 auto-unlock scripts (PCR 7+14, after first boot)?",
+                detect.has_tpm2(),
+            )
     if cfg.firmware == "uefi":
         cfg.esp_size_mib = int(ui.prompt("EFI System Partition size in MiB", str(cfg.esp_size_mib)))
         ui.info(
@@ -1498,6 +1568,9 @@ def _wipe_devices(cfg: InstallConfig) -> list[str]:
     """Disks and partitions this commit will destroy. Empty on resume."""
     if cfg.resume:
         return []
+    # H8-B: mount-existing never destroys; confirmation uses a separate path.
+    if cfg.wipe_mode == "mount":
+        return []
     if getattr(cfg, "wipe_partitions", None):
         # Explicit partition wipe list wins for the confirmation banner.
         return list(dict.fromkeys(cfg.wipe_partitions))
@@ -1526,6 +1599,14 @@ def _warn_before_wipe(cfg: InstallConfig) -> None:
     ui.danger("Oops-Installer does not support dual boot.")
     if cfg.resume:
         ui.info("Resume keeps the files already on the target. This confirmation will not wipe it.")
+        return
+    if cfg.wipe_mode == "mount":
+        roles = _existing_role_devices(cfg)
+        ui.info("Expert mount-existing: no wipe or mkfs. Devices to mount:")
+        for role, path in roles:
+            ui.warn(f"  {role}: {path}")
+        if not ui.ask_yes_no("Continue and mount existing filesystems without formatting?", False):
+            raise SystemExit("Aborted before mounting existing partitions.")
         return
     if cfg.dry_run:
         ui.info("Dry-run prints the wipe commands and does not change the disk.")
@@ -1605,7 +1686,11 @@ def _review(cfg: InstallConfig) -> None:
                 else (
                     "partitions: " + ", ".join(cfg.wipe_partitions)
                     if getattr(cfg, "wipe_partitions", None)
-                    else "keep table; reformat ESP/root/swap"
+                    else (
+                        "expert mount-existing (no mkfs)"
+                        if cfg.wipe_mode == "mount"
+                        else "keep table; reformat ESP/root/swap"
+                    )
                 )
             ),
         ),
