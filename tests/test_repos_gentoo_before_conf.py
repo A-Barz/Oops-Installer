@@ -37,7 +37,7 @@ class ReposGentooBeforeConfTests(unittest.TestCase):
         mkdir = script.find("mkdir -p /var/db/repos/gentoo")
         conf = script.find("/etc/portage/repos.conf/gentoo.conf")
         location = script.find("location = /var/db/repos/gentoo")
-        sync = script.find("emerge --sync")
+        sync = script.find("\nemerge --sync")
         self.assertGreaterEqual(mkdir, 0)
         self.assertGreaterEqual(conf, 0)
         self.assertLess(mkdir, conf)
@@ -46,15 +46,37 @@ class ReposGentooBeforeConfTests(unittest.TestCase):
         # Fail closed if create failed.
         self.assertIn("exit 1", script)
 
+    def test_git_moves_aside_non_git_stage3_tree(self) -> None:
+        script = _portage_tree_sync_script(_cfg(sync_method="git"))
+        aside = script.find("move aside non-git stage3 tree")
+        conf = script.find("/etc/portage/repos.conf/gentoo.conf")
+        sync = script.find("\nemerge --sync")
+        self.assertGreaterEqual(aside, 0)
+        self.assertIn("gentoo.pre-git.", script)
+        self.assertIn("[ ! -e /var/db/repos/gentoo/.git ]", script)
+        self.assertLess(aside, conf)
+        self.assertLess(aside, sync)
+        # webrsync / rsync stay untouched — git-only move-aside.
+        for method in ("webrsync", "rsync"):
+            other = _portage_tree_sync_script(_cfg(sync_method=method))
+            self.assertNotIn("move aside non-git stage3 tree", other, method)
+            self.assertNotIn("gentoo.pre-git.", other, method)
+
+    def test_default_sync_method_remains_webrsync(self) -> None:
+        cfg = InstallConfig()
+        self.assertEqual(cfg.sync_method, "webrsync")
+
     def test_chroot_git_order_mkdir_then_conf_then_verify(self) -> None:
         script = render_chroot_script(
             _cfg(sync_method="git"),
             {"root": "/dev/vda2", "esp": "/dev/vda1"},
         )
         mkdir = script.find("mkdir -p /var/db/repos/gentoo")
+        aside = script.find("move aside non-git stage3 tree")
         conf = script.find("repos.conf/gentoo.conf")
         verify = script.find("verify Portage tree at /var/db/repos/gentoo")
         self.assertLess(mkdir, conf)
+        self.assertLess(aside, conf)
         self.assertLess(conf, verify)
         self.assertIn("failed to create /var/db/repos/gentoo before Portage tree sync", script)
 
