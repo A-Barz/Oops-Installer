@@ -39,6 +39,8 @@ class WaylandWmTests(unittest.TestCase):
         self.assertIn("gui-wm/mangowm", allowed)
         self.assertIn("gui-wm/miracle-wm", allowed)
         self.assertNotIn("gui-wm/cage", allowed)
+        self.assertNotIn("gui-apps/tuigreet", allowed)
+        self.assertIn("gui-apps/tuigreet", catalog.REMOVED_GURU_ATOMS)
 
 
 class CodecLicenseTests(unittest.TestCase):
