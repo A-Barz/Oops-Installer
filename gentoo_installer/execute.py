@@ -989,6 +989,41 @@ def _ensure_target_mounted(cfg: InstallConfig, runner: Runner) -> None:
     ui.ok("Target filesystems are mounted")
 
 
+def _disk_phase_target_paths(cfg: InstallConfig) -> list[str]:
+    """Block devices phase_disks may wipefs / partition / mkfs / luksFormat."""
+    paths = [
+        cfg.target_disk,
+        cfg.extra_raid_disk,
+        cfg.existing_esp,
+        cfg.existing_boot,
+        cfg.existing_root,
+        cfg.existing_swap,
+    ]
+    paths.extend(getattr(cfg, "wipe_partitions", None) or [])
+    return [p for p in paths if p]
+
+
+def refuse_live_installer_targets(cfg: InstallConfig) -> None:
+    """H7: fail closed before wipefs/sgdisk/mkfs if any target is the live USB."""
+    for path in _disk_phase_target_paths(cfg):
+        if detect.is_live_installer_disk(path):
+            raise SystemExit(
+                f"Refusing to wipe or format the live installer medium ({path}). "
+                "Choose a different target disk."
+            )
+
+
+def assert_wipe_layout_consistent(cfg: InstallConfig) -> None:
+    """M14: wipe_disk=false must use layout=existing (no silent handbook geometry)."""
+    if cfg.wipe_disk or cfg.layout == "existing":
+        return
+    raise SystemExit(
+        f"wipe_disk is false but layout is {cfg.layout!r}. "
+        "Set layout to existing (and name ESP/root/swap) or enable wipe_disk "
+        "to create a new partition table."
+    )
+
+
 def phase_disks(cfg: InstallConfig, runner: Runner) -> None:
     """Wipe/partition/LUKS/LVM, mkfs, and mount at cfg.mountpoint (handbook /mnt/gentoo)."""
     disk = cfg.target_disk
@@ -996,6 +1031,8 @@ def phase_disks(cfg: InstallConfig, runner: Runner) -> None:
         ui.info("Resume: not wiping or formatting; ensuring the target is mounted.")
         _ensure_target_mounted(cfg, runner)
         return
+    refuse_live_installer_targets(cfg)
+    assert_wipe_layout_consistent(cfg)
     # Selected-partition wipe (one, several, or all listed) before using existing layout.
     wipe_parts = [p for p in (getattr(cfg, "wipe_partitions", None) or []) if p]
     if wipe_parts and cfg.layout == "existing":

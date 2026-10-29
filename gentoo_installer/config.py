@@ -64,7 +64,9 @@ class InstallConfig:
     firmware: str = "uefi"  # uefi | bios — drives ESP vs BIOS-boot partition
     uefi_bits: int = 64  # 64, 32 (IA32/mixed mode), or 0 when firmware is BIOS
     wipe_disk: bool = True
-    # disk = whole target; partitions = wipe_partitions only; none = leave data.
+    # disk = whole target; partitions = wipe_partitions only;
+    # none = keep partition table, but still mkfs/mkswap (and luksFormat if LUKS)
+    # the selected ESP/root/swap — not a data-preserving mount.
     wipe_mode: str = "disk"  # disk | partitions | none
     # When wipe_mode == "partitions", wipe these block devices with wipefs before install.
     wipe_partitions: list[str] = field(default_factory=list)

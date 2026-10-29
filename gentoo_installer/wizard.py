@@ -323,24 +323,65 @@ def _ask_dns(cfg: InstallConfig) -> None:
     ui.ok(f"DNS: {cfg.dns_provider} → {cfg.dns_servers}")
 
 
+def _refuse_live_installer_path(path: str, *, action: str = "select") -> None:
+    """H7: wizard refuse for live Ubuntu Boot Image medium (typed path or menu)."""
+    if path and detect.is_live_installer_disk(path):
+        raise SystemExit(
+            f"Refusing to {action} the live installer medium ({path}). "
+            "Choose a different disk."
+        )
+
+
+def _confirm_reformat_existing(cfg: InstallConfig) -> None:
+    """H8: wipe_mode none keeps the table but still formats named ESP/root/swap."""
+    roles: list[tuple[str, str]] = []
+    if cfg.existing_esp:
+        roles.append(("ESP", cfg.existing_esp))
+    if cfg.existing_boot and cfg.existing_boot not in {cfg.existing_esp, ""}:
+        roles.append(("boot", cfg.existing_boot))
+    if cfg.existing_root:
+        roles.append(("root", cfg.existing_root))
+    if cfg.existing_swap:
+        roles.append(("swap", cfg.existing_swap))
+    if not roles:
+        raise SystemExit("No ESP/root/swap devices named to reformat.")
+    ui.danger("Keep-partition-table mode still formats these devices (mkfs/mkswap):")
+    for role, path in roles:
+        ui.warn(f"  {role}: {path}")
+    ui.info("If you enable LUKS later, luksFormat also runs on the root (and swap if chosen).")
+    if not ui.ask_yes_no("Reformat the named ESP/root/swap devices above?", False):
+        raise SystemExit("Aborted before reformatting existing partitions.")
+
+
 def _disks(cfg: InstallConfig) -> None:
     """Handbook: Disks — layout, filesystem, LUKS, swap. Most destructive choices."""
     ui.chapter("4", "Preparing the disks", f"{HANDBOOK}/Installation/Disks")
     disks = detect.list_disks()
     live = detect.live_boot_disk()
     choices = []
+    omitted_live: list[str] = []
     for d in disks:
         tag = f"{d['size']}  {d['model']}  {d['tran']}"
         if d["removable"]:
             tag += "  [removable]"
-        if live and d["path"].startswith(live):
-            tag += "  [possible live USB]"
+        # H7: omit the live installer medium from the wipe target menu.
+        if detect.is_live_installer_disk(d["path"]) or (live and d["path"] == live):
+            omitted_live.append(d["path"])
+            continue
         choices.append((d["path"], tag))
+    if omitted_live:
+        for path in omitted_live:
+            ui.warn(
+                f"Omitting {path} [possible live USB] — the live installer medium "
+                "cannot be wiped or formatted."
+            )
     if not choices:
-        ui.warn("No disks detected (expected on Windows). You can type a device path.")
+        ui.warn("No wipeable disks detected (or only the live USB). You can type a device path.")
         cfg.target_disk = ui.prompt("Target block device", cfg.target_disk or "/dev/sda")
+        _refuse_live_installer_path(cfg.target_disk, action="select")
     else:
         cfg.target_disk = ui.menu("Target disk (will be partitioned if wipe is enabled)", choices, choices[0][0])
+        _refuse_live_installer_path(cfg.target_disk, action="select")
     _warn_small_disk(cfg)
     _note_ssd_trim(cfg)
 
@@ -349,7 +390,10 @@ def _disks(cfg: InstallConfig) -> None:
         [
             ("disk", "Entire disk — new partition table (recommended)"),
             ("partitions", "Selected partitions only (pick one, several, or all) — then install"),
-            ("none", "Nothing — keep data; use existing partitions as-is"),
+            (
+                "none",
+                "Keep partition table; reformat selected ESP/root/swap for Gentoo",
+            ),
         ],
         "disk" if cfg.wipe_disk else ("partitions" if getattr(cfg, "wipe_partitions", None) else "none"),
     )
@@ -399,10 +443,15 @@ def _disks(cfg: InstallConfig) -> None:
             if not cfg.wipe_partitions:
                 ui.warn("No partitions selected — nothing will be wiped before install.")
         if cfg.wipe_partitions:
+            for part in cfg.wipe_partitions:
+                _refuse_live_installer_path(part, action="wipe")
             ui.ok("Will wipe: " + ", ".join(cfg.wipe_partitions))
     else:
         cfg.wipe_disk = False
-        ui.info("No wipe. You must point the installer at partitions that already exist.")
+        ui.info(
+            "Partition table stays. Selected ESP, root, and swap will still be "
+            "formatted (mkfs/mkswap; luksFormat if encryption is enabled)."
+        )
 
     if cfg.firmware == "uefi":
         cfg.partition_table = "gpt"
@@ -437,14 +486,22 @@ def _disks(cfg: InstallConfig) -> None:
             cfg.extra_raid_disk = ui.menu("Second RAID1 disk", others, others[0][0])
         else:
             cfg.extra_raid_disk = ui.prompt("Second RAID1 disk", "/dev/sdb")
+        _refuse_live_installer_path(cfg.extra_raid_disk, action="select")
     if cfg.layout == "existing" or cfg.wipe_mode in {"partitions", "none"}:
         if cfg.layout != "existing" and cfg.wipe_mode != "disk":
-            ui.info("Selected-partition / no-wipe installs use your existing partition layout.")
+            ui.info(
+                "Selected-partition / keep-table installs use your existing partition layout."
+            )
             cfg.layout = "existing"
         cfg.wipe_disk = False
         cfg.existing_esp = ui.prompt("ESP / boot partition", cfg.existing_esp or "/dev/sda1")
         cfg.existing_root = ui.prompt("Root partition (or LUKS container)", cfg.existing_root or "/dev/sda3")
         cfg.existing_swap = ui.prompt("Swap partition (empty to skip)", cfg.existing_swap)
+        for path in (cfg.existing_esp, cfg.existing_root, cfg.existing_swap):
+            _refuse_live_installer_path(path, action="format")
+        # H8: wipe_mode none still mkfs's these nodes — confirm by name.
+        if cfg.wipe_mode == "none":
+            _confirm_reformat_existing(cfg)
 
     if cfg.layout in {"btrfs-subvols"}:
         cfg.filesystem = "btrfs"
@@ -1548,7 +1605,7 @@ def _review(cfg: InstallConfig) -> None:
                 else (
                     "partitions: " + ", ".join(cfg.wipe_partitions)
                     if getattr(cfg, "wipe_partitions", None)
-                    else "none"
+                    else "keep table; reformat ESP/root/swap"
                 )
             ),
         ),
@@ -1609,6 +1666,9 @@ def _review(cfg: InstallConfig) -> None:
 
 def _confirm_disk(cfg: InstallConfig) -> None:
     """Require an exact re-type of the disk path (empty Enter used to skip this)."""
+    _refuse_live_installer_path(cfg.target_disk, action="confirm")
+    if cfg.extra_raid_disk:
+        _refuse_live_installer_path(cfg.extra_raid_disk, action="confirm")
     if cfg.dry_run:
         ui.info("Dry-run: skipping disk-path retype.")
         return
