@@ -2061,6 +2061,97 @@ def _emerge_checked_call(atom: str, test: tuple[str, ...], *, required: bool = F
     return f"emerge_checked {args} || true"
 
 
+def _probe_to_shell_test(test: tuple[str, ...]) -> str:
+    """Turn an emerge_checked argv probe into a bash condition for final checks."""
+    if not test:
+        return "false"
+    if test[0] == "command" and len(test) >= 3 and test[1] == "-v":
+        return f"command -v {shlex.quote(test[2])} >/dev/null 2>&1"
+    if test[0] == "test":
+        return " ".join(shlex.quote(part) for part in test)
+    if test[0] == "bash" and len(test) >= 3 and test[1] == "-c":
+        return f"{{ {test[2]}; }}"
+    if test[0] == "getent":
+        return " ".join(shlex.quote(part) for part in test) + " >/dev/null 2>&1"
+    return " ".join(shlex.quote(part) for part in test)
+
+
+def _critical_service_tools(cfg: InstallConfig) -> list[tuple[str, tuple[str, ...]]]:
+    """Network / chrony / firewall / syslog / cron — fail closed for install success (H5).
+
+    Target Gentoo chronyd when cfg.chrony is enabled. Never implies removing chrony.
+    """
+    tools: list[tuple[str, tuple[str, ...]]] = []
+    openrc = cfg.init_system == "openrc"
+    if cfg.network_stack == "networkmanager":
+        tools.append(("net-misc/networkmanager", _service_probe(openrc, "NetworkManager")))
+    elif cfg.network_stack == "dhcpcd":
+        tools.append(("net-misc/dhcpcd", _service_probe(openrc, "dhcpcd")))
+    elif cfg.network_stack == "systemd-networkd":
+        tools.append(("sys-apps/systemd", ("command", "-v", "networkctl")))
+    if cfg.chrony:
+        tools.append(("net-misc/chrony", _service_probe(openrc, "chronyd")))
+    if cfg.nftables:
+        tools.append(("net-firewall/nftables", ("command", "-v", "nft")))
+    if openrc and cfg.syslog != "none":
+        tools.append((f"app-admin/{cfg.syslog}", _service_probe(True, cfg.syslog)))
+    if openrc and cfg.cron != "none":
+        svc = "cronie" if cfg.cron == "cronie" else cfg.cron
+        tools.append((f"sys-process/{cfg.cron}", _service_probe(True, svc)))
+    return tools
+
+
+def _critical_service_final_checks(cfg: InstallConfig) -> list[tuple[str, str]]:
+    """(shell test, label) for H5 services — missing sets missing=1."""
+    checks: list[tuple[str, str]] = []
+    for atom, test in _critical_service_tools(cfg):
+        label = {
+            "net-misc/networkmanager": "NetworkManager",
+            "net-misc/dhcpcd": "dhcpcd",
+            "sys-apps/systemd": "systemd-networkd",
+            "net-misc/chrony": "chronyd",
+            "net-firewall/nftables": "nftables",
+        }.get(atom)
+        if label is None:
+            if atom.startswith("app-admin/"):
+                label = atom.rsplit("/", 1)[-1]
+            elif atom.startswith("sys-process/"):
+                label = "cronie" if atom.endswith("/cronie") else atom.rsplit("/", 1)[-1]
+            else:
+                label = atom
+        checks.append((_probe_to_shell_test(test), label))
+    openrc = cfg.init_system == "openrc"
+    if cfg.nftables and openrc:
+        checks.append(("[ -e /etc/init.d/nftables ]", "nftables init"))
+    return checks
+
+
+def _wm_exec_binary(cfg: InstallConfig, atom: str) -> str:
+    """First token of the session Exec= for this compositor/WM atom."""
+    sessions = catalog.login_sessions(
+        cfg.desktop, [atom], getattr(cfg, "shell", "") or ""
+    )
+    if sessions:
+        return (sessions[0][1] or "").split()[0] or atom.rsplit("/", 1)[-1]
+    return atom.split("::", 1)[0].rsplit("/", 1)[-1]
+
+
+def _required_window_manager_script(cfg: InstallConfig) -> str:
+    """Emerge selected WMs with emerge_checked (no --noreplace) before the greeter (H6/M3)."""
+    atoms = _window_managers(cfg)
+    if not atoms:
+        return ""
+    lines = ['echo ">> required window managers / compositors"']
+    for atom in atoms:
+        binary = _wm_exec_binary(cfg, atom)
+        if not binary:
+            continue
+        lines.append(
+            _emerge_checked_call(atom, ("command", "-v", binary), required=True)
+        )
+    return "\n".join(lines) + "\n"
+
+
 def _required_tools(cfg: InstallConfig, loaders: list[str]) -> list[tuple[str, tuple[str, ...]]]:
     """Packages that must be installed before dracut and rc-update run.
 
@@ -2169,8 +2260,12 @@ def _required_tool_repairs(cfg: InstallConfig, loaders: list[str]) -> str:
     A masked theme or a Plymouth build error used to sit in the same emerge
     as NetworkManager, chrony, rsyslog, cronie, and zram-init. Portage then
     aborted the whole calculation and rc-update reported every service missing.
+
+    Critical services (H5) use emerge_checked required=True. emerge_checked never
+    passes --noreplace, so resume still repairs packages that soft-failed earlier (M3).
     """
     tools = _required_tools(cfg, loaders)
+    critical_atoms = {atom for atom, _test in _critical_service_tools(cfg)}
     lines = ["echo '>> install tools before dracut and OpenRC services'"]
     if tools:
         atoms = " ".join(shlex.quote(atom) for atom, _test in tools)
@@ -2179,9 +2274,8 @@ def _required_tool_repairs(cfg: InstallConfig, loaders: list[str]) -> str:
             + atoms
             + " || echo '>> some required packages failed; retrying one at a time' >&2"
         )
-    for atom, test in tools:
-        lines.append(_emerge_checked_call(atom, test))
     openrc = cfg.init_system == "openrc"
+    # NM OpenRC recovery before the hard emerge_checked so dbus/elogind can land first.
     if cfg.network_stack == "networkmanager" and openrc:
         lines.append(
             "\n".join(
@@ -2190,50 +2284,41 @@ def _required_tool_repairs(cfg: InstallConfig, loaders: list[str]) -> str:
                     '  echo ">> NetworkManager init script still missing; installing dbus and elogind first"',
                     "  emerge --ask=n $RESPECT_USE sys-apps/dbus || true",
                     "  emerge --ask=n $RESPECT_USE sys-auth/elogind || true",
-                    "  emerge --ask=n --selective=n --usepkg=n --getbinpkg=n net-misc/networkmanager || echo '>> emerge failed: net-misc/networkmanager' >&2",
+                    "  emerge --ask=n --selective=n --usepkg=n --getbinpkg=n net-misc/networkmanager || "
+                    "echo '>> emerge failed: net-misc/networkmanager' >&2",
                     "fi",
                 ]
             )
+        )
+    for atom, test in tools:
+        lines.append(
+            _emerge_checked_call(atom, test, required=atom in critical_atoms)
         )
     return "\n".join(lines) + "\n"
 
 
 def _final_tool_checks(cfg: InstallConfig, loaders: list[str]) -> str:
-    """Warn when a service is absent. Exit only when the disk cannot boot.
+    """Fail closed when kernel, bootloader, required services, or greeter/WM are absent.
 
-    The script runs under `set +e`. A missing optional package must not hide a
-    finished kernel and bootloader, and a missing kernel must not be marked done.
+    The script runs under `set +e`. Optional catalogue packages may still be missing;
+    critical services and the selected Wayland WM must not be (H5/H6).
     """
-    checks: list[tuple[str, str]] = []
+    warn_checks: list[tuple[str, str]] = []
     if cfg.username:
-        checks.append(("[ -e /etc/sudoers.d/wheel ]", "/etc/sudoers.d/wheel"))
-    checks.append(("command -v nano >/dev/null 2>&1", "nano"))
+        warn_checks.append(("[ -e /etc/sudoers.d/wheel ]", "/etc/sudoers.d/wheel"))
+    warn_checks.append(("command -v nano >/dev/null 2>&1", "nano"))
     if cfg.plymouth:
-        checks.append(("command -v plymouth-set-default-theme >/dev/null 2>&1", "plymouth-set-default-theme"))
+        warn_checks.append(
+            ("command -v plymouth-set-default-theme >/dev/null 2>&1", "plymouth-set-default-theme")
+        )
     openrc = cfg.init_system == "openrc"
-    if cfg.network_stack == "networkmanager":
-        checks.append(
-            (
-                "[ -e /etc/init.d/NetworkManager ]" if openrc else _systemd_unit_test("NetworkManager"),
-                "NetworkManager",
-            )
-        )
-    if cfg.chrony:
-        checks.append(
-            ("[ -e /etc/init.d/chronyd ]" if openrc else _systemd_unit_test("chronyd"), "chronyd")
-        )
-    if openrc and cfg.syslog != "none":
-        checks.append((f"[ -e /etc/init.d/{cfg.syslog} ]", cfg.syslog))
-    if openrc and cfg.cron != "none":
-        svc = "cronie" if cfg.cron == "cronie" else cfg.cron
-        checks.append((f"[ -e /etc/init.d/{svc} ]", svc))
     if openrc and cfg.zram:
-        checks.append(("[ -e /etc/init.d/zram-init ]", "zram-init"))
-        checks.append(
+        warn_checks.append(("[ -e /etc/init.d/zram-init ]", "zram-init"))
+        warn_checks.append(
             ("grep -q '^size0=\"[0-9][0-9]*\"' /etc/conf.d/zram-init", "zram-init size0")
         )
     elif cfg.zram:
-        checks.append(("[ -s /etc/systemd/zram-generator.conf ]", "zram-generator.conf"))
+        warn_checks.append(("[ -s /etc/systemd/zram-generator.conf ]", "zram-generator.conf"))
     lines = [
         'echo ">> verify kernel, bootloader, and services"',
         "missing=0",
@@ -2241,8 +2326,12 @@ def _final_tool_checks(cfg: InstallConfig, loaders: list[str]) -> str:
         "boot_ok=0",
         _kernel_found_shell("kernel_ok").strip(),
     ]
-    for test, label in checks:
-        lines.append(f"if ! {{ {test}; }}; then echo \">> still missing: {label}\" >&2; fi")
+    for test, label in warn_checks:
+        lines.append(f'if ! {{ {test}; }}; then echo ">> still missing: {label}" >&2; fi')
+    for test, label in _critical_service_final_checks(cfg):
+        lines.append(
+            f'if ! {{ {test}; }}; then echo ">> required service missing: {label}" >&2; missing=1; fi'
+        )
     boot_tests = []
     if "grub" in loaders:
         boot_tests.append("command -v grub-install >/dev/null 2>&1 && command -v grub-mkconfig >/dev/null 2>&1")
@@ -2273,6 +2362,20 @@ def _final_tool_checks(cfg: InstallConfig, loaders: list[str]) -> str:
             'if [ ! -s /boot/grub/grub.cfg ]; then '
             'echo ">> LUKS+GRUB requires /boot/grub/grub.cfg" >&2; missing=1; fi'
         )
+    # Selected WM session binaries — labwc as greeter helper is not a substitute (H6).
+    wm_atoms = _window_managers(cfg)
+    if wm_atoms:
+        wm_probes = []
+        for atom in wm_atoms:
+            binary = _wm_exec_binary(cfg, atom)
+            if binary:
+                wm_probes.append(f"command -v {shlex.quote(binary)} >/dev/null 2>&1")
+        if wm_probes:
+            lines.append(
+                "if ! { "
+                + " || ".join(wm_probes)
+                + '; }; then echo ">> no selected window manager binary is installed" >&2; missing=1; fi'
+            )
     # Greeter presence is fatal when a greeter was requested — same as kernel/bootloader.
     greeter_fatal: list[tuple[str, str]] = []
     dm = _resolved_dm(cfg)
@@ -2330,9 +2433,11 @@ def _resume_prelude(cfg: InstallConfig) -> str:
     """Keep files already on the target, and skip emerge of installed packages.
 
     --noreplace leaves an already-merged package's files alone and still
-    installs anything that is missing. append_once does not duplicate a line
-    that is already in a config file. Stage3's stock /etc/fstab is not treated
-    as ours; a fstab this installer already wrote is kept.
+    installs anything that is missing. Critical services and selected WMs use
+    emerge_checked (no $NR) so resume still repairs soft-failed probes (M3).
+    append_once does not duplicate a line that is already in a config file.
+    Stage3's stock /etc/fstab is not treated as ours; a fstab this installer
+    already wrote is kept.
     """
     flag = "1" if cfg.resume else "0"
     return f"""
@@ -2341,6 +2446,7 @@ NR=
 if [ "$KEEP_EXISTING" = 1 ]; then
   NR="--noreplace"
   echo ">> resume: keep files already on the target; emerge skips packages already installed"
+  echo ">> resume: required services and window managers still use emerge_checked (no --noreplace)"
 fi
 append_once() {{
   local file="$1"
@@ -4279,6 +4385,8 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
     if blocked:
         ui.warn("Not installing GURU packages: " + ", ".join(blocked))
     codec_atoms = catalog.nonfree_codec_atoms() if getattr(cfg, "nonfree_codecs", False) else []
+    # Selected WMs are hard-required before the greeter (H6); keep them out of the soft late block.
+    required_wm_set = set(_window_managers(cfg))
     late_atoms = [
         atom
         for atom in dict.fromkeys(
@@ -4286,7 +4394,6 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
             + support_atoms
             + cfg.extra_packages
             + cfg.selected_packages
-            + _window_managers(cfg)
             + dm_atoms
             + catalog.dotfile_package_atoms(cfg.shell, cfg.window_managers, cfg.wm_dotfiles)
             + codec_atoms
@@ -4295,6 +4402,7 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
         and _atom_allowed(cfg, atom)
         and not atom.startswith("flatpak-app/")
         and atom not in required_set
+        and atom not in required_wm_set
         and atom not in set(theme_pkgs)
     ]
     fetch_atoms_extra = list(dict.fromkeys(required_atoms + missed + extra_fw + theme_pkgs + late_atoms))
@@ -4579,6 +4687,7 @@ EOF
     overlay_block = _overlay_script(cfg)
     stores_block = _app_stores_script(cfg)
     plymouth_block = _plymouth_script(cfg)
+    wm_required_block = _required_window_manager_script(cfg)
     dm_setup = _display_manager_script(cfg)
     level = getattr(cfg, "stage_level", "stage3") or "stage3"
     bootstrap = ""
@@ -4672,9 +4781,13 @@ world_status=$?
 if [ "$world_status" -eq 132 ]; then
   echo ">> @world died with Illegal instruction; rebuilding from source"
   disable_binpkgs
-  emerge --verbose --update --deep --newuse --keep-going --usepkg=n --getbinpkg=n @world || echo ">> @world source rebuild failed" >&2
+  emerge --verbose --update --deep --newuse --keep-going --usepkg=n --getbinpkg=n @world || {{
+    echo ">> @world source rebuild failed" >&2
+    exit 1
+  }}
 elif [ "$world_status" -ne 0 ]; then
-  echo ">> emerge @world failed ($world_status); continuing with the selected packages" >&2
+  echo ">> emerge @world failed ($world_status)" >&2
+  exit 1
 fi
 echo ">> emerge selected packages"
 unset FEATURES
@@ -4709,6 +4822,7 @@ emerge_with_source {kernel_atom} || echo ">> kernel emerge failed" >&2
 if [ "$kernel_found" -eq 0 ]; then
   echo ">> no kernel image in /boot or on /efi; building sys-kernel/gentoo-kernel from source"
   emerge --ask=n --usepkg=n --getbinpkg=n sys-kernel/gentoo-kernel || echo ">> gentoo-kernel source build failed" >&2
+  {kernel_seek}
 fi
 {late_block}
 {stores_block}
@@ -4724,6 +4838,7 @@ fi
 
 {grub_install}
 {plymouth_block}
+{wm_required_block}
 {dm_setup}
 
 if [ "{cfg.init_system}" = "openrc" ]; then
