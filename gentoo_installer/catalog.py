@@ -996,8 +996,14 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
             Pkg("net-im/telegram-desktop-bin", "Telegram Desktop bin"),
             Pkg("net-im/signal-desktop-bin", "Signal"),
             Pkg("net-analyzer/wireshark", "Wireshark"),
-            Pkg("net-firewall/ufw", "ufw"),
-            Pkg("net-firewall/nftables", "nftables"),
+            Pkg(
+                "net-firewall/ufw",
+                "ufw (exclusive with installer nftables — turn nftables off first)",
+            ),
+            Pkg(
+                "net-firewall/nftables",
+                "nftables (same stack as the firewall step; exclusive with ufw)",
+            ),
         ),
     ),
     (
@@ -1205,6 +1211,75 @@ def without_already_selected(
     if not already:
         return list(rows)
     return [(atom, desc) for atom, desc in rows if atom not in already]
+
+
+# M9: one firewall stack — catalogue ufw vs installer nftables (default on).
+UFW_ATOM = "net-firewall/ufw"
+NFTABLES_ATOM = "net-firewall/nftables"
+
+
+def bare_atom(atom: str) -> str:
+    """Strip ::overlay suffix for comparisons."""
+    return atom.split("::", 1)[0]
+
+
+def firewall_catalogue_hidden(nftables_enabled: bool) -> set[str]:
+    """Atoms to hide in the networking checklist given the firewall step choice.
+
+    When the installer nftables path is on, hide both catalogue firewall rows:
+    nftables is already emerged/enabled via that step, and ufw must not overlap.
+    """
+    if nftables_enabled:
+        return {UFW_ATOM, NFTABLES_ATOM}
+    return set()
+
+
+def atom_list_has(atoms: list[str] | None, wanted: str) -> bool:
+    return any(bare_atom(a) == wanted for a in (atoms or []))
+
+
+def drop_atom(atoms: list[str], wanted: str) -> list[str]:
+    return [a for a in atoms if bare_atom(a) != wanted]
+
+
+def enforce_firewall_mutual_exclusion(
+    nftables: bool,
+    selected: list[str],
+    extra: list[str],
+) -> tuple[bool, list[str], list[str], list[str]]:
+    """Keep a single firewall stack.
+
+    Returns (nftables, selected, extra, warning messages).
+    - nftables on → strip catalogue ufw (and redundant nftables atom).
+    - nftables off + ufw selected → strip catalogue nftables atom.
+    - nftables off + both ufw and nftables atoms → keep ufw, drop nftables atom.
+    """
+    warnings: list[str] = []
+    selected = list(selected or [])
+    extra = list(extra or [])
+    has_ufw = atom_list_has(selected, UFW_ATOM) or atom_list_has(extra, UFW_ATOM)
+    has_nft_pkg = atom_list_has(selected, NFTABLES_ATOM) or atom_list_has(extra, NFTABLES_ATOM)
+
+    if nftables:
+        if has_ufw:
+            warnings.append(
+                f"Removed {UFW_ATOM}: installer nftables is enabled (one firewall stack)."
+            )
+            selected = drop_atom(selected, UFW_ATOM)
+            extra = drop_atom(extra, UFW_ATOM)
+        if has_nft_pkg:
+            # Already emerged via cfg.nftables — drop the duplicate catalogue atom.
+            selected = drop_atom(selected, NFTABLES_ATOM)
+            extra = drop_atom(extra, NFTABLES_ATOM)
+        return True, selected, extra, warnings
+
+    if has_ufw and has_nft_pkg:
+        warnings.append(
+            f"Removed {NFTABLES_ATOM}: {UFW_ATOM} was selected (one firewall stack)."
+        )
+        selected = drop_atom(selected, NFTABLES_ATOM)
+        extra = drop_atom(extra, NFTABLES_ATOM)
+    return False, selected, extra, warnings
 
 
 # Noctalia and DMS already provide the bar, launcher, and their own config.
