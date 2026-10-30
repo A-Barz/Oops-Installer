@@ -276,10 +276,22 @@ class Runner:
         on_line(text)
 
     def _log_live_line(self, text: str) -> None:
-        """Keep the failure record. Compiler chatter would fill a live-USB tmpfs."""
+        """Keep the failure record. Compiler chatter would fill a live-USB tmpfs.
+
+        Portage calculation failures print ``!!!`` / ``emerge:`` / mask lines
+        without the substring ``error``; the chroot rev banner has none of the
+        older tokens either. Keep those so a paste can name the real one-liner.
+        """
         sample = text.lower()
         if (
             ">>" in text
+            or "!!!" in text
+            or sample.startswith("emerge:")
+            or " emerge:" in sample
+            or "masked" in sample
+            or "ebuild" in sample
+            or ">>>" in text
+            or "=== gentoo-live-installer" in sample
             or "jobs:" in sample
             or "installing (" in sample
             or "error" in sample

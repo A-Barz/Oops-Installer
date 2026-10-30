@@ -104,22 +104,35 @@ class GenerateLocalesUtf8Tests(unittest.TestCase):
 
 
 class EmergeGitBlockTests(unittest.TestCase):
-    def test_block_keywords_utf8_verbose_and_error_surface(self) -> None:
+    def test_block_keywords_utf8_emerge_one_and_error_surface(self) -> None:
         script = _emerge_git_block(_cfg(), reason="unit-test")
         self.assertIn("package.accept_keywords/git", script)
         self.assertIn("package.unmask/git", script)
         self.assertIn(f"{GIT_ATOM} ~amd64", script)
         self.assertIn("export LANG=en_US.UTF-8", script)
         self.assertIn("refuse emerge", script)
-        self.assertIn(f"emerge --ask=n --verbose --noreplace {GIT_ATOM}", script)
+        self.assertIn("gentoo tree/profile precondition", script)
+        self.assertIn("/var/db/repos/gentoo/profiles missing before emerge", script)
+        self.assertIn(f"no ebuilds for {GIT_ATOM}", script)
+        self.assertIn("make.profile not usable before emerge", script)
+        self.assertIn("emerge_one", script)
+        self.assertIn(f"emerge_one {GIT_ATOM}", script)
+        self.assertIn("--autounmask-write --autounmask-continue", script)
+        self.assertIn("keyword mask in emerge -pv", script)
         self.assertIn("git_emerge_status", script)
         self.assertIn("emerge -pv", script)
+        self.assertIn("emerge --info (head)", script)
         self.assertIn("build.log", script)
+        # Failure dump lines always carry >> so the host log filter keeps them.
+        self.assertIn('echo ">> $_line" >&2', script)
+        self.assertIn("sed 's/^/>> /' /etc/portage/package.accept_keywords/git", script)
         kw = script.find("package.accept_keywords/git")
-        emerge = script.find(f"emerge --ask=n --verbose --noreplace {GIT_ATOM}")
+        emerge = script.find(f"emerge_one {GIT_ATOM}")
         self.assertLess(kw, emerge)
         # UTF-8 export before emerge.
         self.assertLess(script.find("export LANG=en_US.UTF-8"), emerge)
+        # Bare verbose emerge of git is gone; path goes through emerge_one.
+        self.assertNotIn(f"emerge --ask=n --verbose --noreplace {GIT_ATOM}", script)
 
     def test_musl_uses_c_utf8(self) -> None:
         cfg = _cfg(stage_variant="musl", locale="C")
@@ -137,7 +150,7 @@ class BinpkgRespectUseReadinessTests(unittest.TestCase):
     def test_chroot_sanitizes_before_git_emerge(self) -> None:
         script = render_chroot_script(_cfg(), {"root": "/dev/vda2", "esp": "/dev/vda1"})
         sanitize = script.find("\nsanitize_binpkg_respect_use\n")
-        emerge = script.find(f"emerge --ask=n --verbose --noreplace {GIT_ATOM}")
+        emerge = script.find(f"emerge_one {GIT_ATOM}")
         self.assertGreaterEqual(sanitize, 0)
         self.assertGreaterEqual(emerge, 0)
         self.assertLess(sanitize, emerge)
