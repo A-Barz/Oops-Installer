@@ -74,6 +74,20 @@ class MakeProfileSymlinkTests(unittest.TestCase):
         self.assertIn("make.profile must be a symlink after eselect profile set", script)
         self.assertIn("removing non-symlink /etc/portage/make.profile", script)
 
+    def test_profile_is_linked_before_portage_loads(self) -> None:
+        script = render_chroot_script(_cfg(), {"root": "/dev/vda2", "esp": "/dev/vda1"})
+        profile = script.find(">> eselect profile")
+        link = script.find("link_make_profile", profile)
+        eselect = script.find("eselect profile set", profile)
+        call = script.find("\nportage_prepare\n", profile)
+        emerge = script.find(">> emerge Portage")
+        self.assertGreaterEqual(link, 0)
+        self.assertLess(link, eselect)
+        self.assertLess(eselect, call)
+        self.assertLess(call, emerge)
+        self.assertNotIn("\nportage_prepare\n", script[:profile])
+        self.assertIn('local dest="/var/db/repos/gentoo/profiles/${profile}"', script)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3006,7 +3006,34 @@ portage_prepare() {
   fi
   rm -f /tmp/emerge-help.txt /tmp/emerge-help.err
 }
-portage_prepare
+# emerge --help and eselect both load Portage. Portage prints
+# "make.profile is not a symlink" when that path is missing, a real file,
+# or a dangling link. Call portage_prepare only after link_make_profile.
+
+profile_has_marker() {
+  local dir="$1"
+  [ -e "${dir}/parent" ] || [ -e "${dir}/make.defaults" ] || [ -e "${dir}/packages" ] || [ -e "${dir}/use.force" ] || [ -e "${dir}/use.mask" ]
+}
+
+link_make_profile() {
+  local profile="$1"
+  local link=/etc/portage/make.profile
+  local dest="/var/db/repos/gentoo/profiles/${profile}"
+  if ! profile_has_marker "$dest"; then
+    echo ">> ${dest} is not a Portage profile" >&2
+    return 1
+  fi
+  if [ -e "$link" ] && [ ! -L "$link" ]; then
+    echo ">> ${link} is not a symlink; removing it" >&2
+    rm -rf "$link" || return 1
+  fi
+  ln -sfn "$dest" "$link" || return 1
+  if [ ! -L "$link" ] || ! profile_has_marker "$link"; then
+    echo ">> ${link} does not point at a profile" >&2
+    return 1
+  fi
+  echo ">> ${link} -> $(readlink "$link")"
+}
 
 # One atom. A batch emerge treats one masked or missing ebuild as a failed
 # calculation and installs nothing else in that command.
@@ -3988,6 +4015,7 @@ def _emerge_git_block(cfg: InstallConfig, *, reason: str) -> str:
     utf8 = shlex.quote(_installer_utf8_locale(cfg))
     kw = _git_keyword_text(cfg).rstrip("\n")
     um = _git_unmask_text().rstrip("\n")
+    pre_quoted = " ".join(shlex.quote(path) for path in _profile_candidates(cfg))
     return f"""
 echo ">> ensure {GIT_ATOM} ({reason})"
 # Never emerge git under ambiguous LANG=C from the installer env wrapper.
@@ -4006,6 +4034,13 @@ cat > /etc/portage/package.unmask/git << 'EOF'
 EOF
 echo ">> accept_keywords/git:"; cat /etc/portage/package.accept_keywords/git
 echo ">> package.unmask/git:"; cat /etc/portage/package.unmask/git
+# Stage3 may already contain the tree. Link a real profile before this emerge
+# so Portage does not warn. After sync, eselect links it again.
+if [ -d /var/db/repos/gentoo/profiles ]; then
+  for _pre_profile in {pre_quoted}; do
+    link_make_profile "$_pre_profile" && break
+  done
+fi
 unset FEATURES
 emerge --ask=n --verbose --noreplace {GIT_ATOM}
 git_emerge_status=$?
@@ -4917,6 +4952,7 @@ unset FEATURES
 unset FEATURES
 {_profile_set_script(cfg)}
 unset FEATURES
+portage_prepare
 {bootstrap}
 echo ">> emerge Portage"
 emerge --ask=n --oneshot --verbose $NR sys-apps/portage || true
@@ -5171,14 +5207,19 @@ echo ">> Portage tree OK ($(ls -d /var/db/repos/gentoo/profiles | head -n 1))"
 """
 
 
-def _profile_set_script(cfg: InstallConfig) -> str:
-    """eselect profile set so make.profile is a symlink. Fail closed if not."""
+def _profile_candidates(cfg: InstallConfig) -> list[str]:
+    """Saved profile first, then the 23.0 fallbacks, without duplicates."""
     wanted = (cfg.profile or "").strip() or _profile_fallbacks(cfg)[0]
     candidates: list[str] = []
     for path in [wanted, *_profile_fallbacks(cfg)]:
         if path and path not in candidates:
             candidates.append(path)
-    quoted = " ".join(shlex.quote(p) for p in candidates)
+    return candidates
+
+
+def _profile_set_script(cfg: InstallConfig) -> str:
+    """eselect profile set so make.profile is a symlink. Fail closed if not."""
+    quoted = " ".join(shlex.quote(p) for p in _profile_candidates(cfg))
     return f"""echo ">> eselect profile"
 if [ ! -d /var/db/repos/gentoo/profiles ]; then
   echo ">> cannot set profile — /var/db/repos/gentoo/profiles missing" >&2
@@ -5197,19 +5238,29 @@ fi
 profile_ok=0
 for profile_path in {quoted}; do
   echo ">> trying profile $profile_path"
-  if eselect profile set "$profile_path" || eselect profile set --force "$profile_path"; then
-    # Handbook: make.profile must be a symlink into the tree (not a plain dir/file).
-    if [ -L /etc/portage/make.profile ]; then
-      _mp_target=$(readlink -f /etc/portage/make.profile 2>/dev/null || true)
-      if [ -n "$_mp_target" ] && [ -e "$_mp_target" ] && eselect profile show 2>/dev/null | grep -q .; then
-        echo ">> Portage profile is $profile_path (make.profile -> $_mp_target)"
-        profile_ok=1
-        break
-      fi
-    else
-      echo ">> /etc/portage/make.profile is not a symlink after eselect profile set $profile_path" >&2
-      ls -la /etc/portage/make.profile >&2 || true
+  # Link first. eselect loads Portage, which warns when make.profile is missing.
+  link_make_profile "$profile_path" || {{
+    echo ">> profile $profile_path was not accepted" >&2
+    continue
+  }}
+  eselect profile set "$profile_path" || eselect profile set --force "$profile_path" || true
+  if ! profile_has_marker /etc/portage/make.profile; then
+    link_make_profile "$profile_path" || {{
+      echo ">> profile $profile_path was not accepted" >&2
+      continue
+    }}
+  fi
+  # Handbook: make.profile must be a symlink into the tree (not a plain dir/file).
+  if [ -L /etc/portage/make.profile ] && profile_has_marker /etc/portage/make.profile; then
+    _mp_target=$(readlink -f /etc/portage/make.profile 2>/dev/null || true)
+    if [ -n "$_mp_target" ] && [ -e "$_mp_target" ] && eselect profile show 2>/dev/null | grep -q .; then
+      echo ">> Portage profile is $profile_path (make.profile -> $_mp_target)"
+      profile_ok=1
+      break
     fi
+  else
+    echo ">> /etc/portage/make.profile is not a symlink after eselect profile set $profile_path" >&2
+    ls -la /etc/portage/make.profile >&2 || true
   fi
   echo ">> profile $profile_path was not accepted" >&2
 done
@@ -5219,7 +5270,7 @@ if [ "$profile_ok" -ne 1 ]; then
   ls -la /etc/portage/make.profile >&2 || true
   exit 1
 fi
-if [ ! -L /etc/portage/make.profile ]; then
+if [ ! -L /etc/portage/make.profile ] || ! profile_has_marker /etc/portage/make.profile; then
   echo ">> /etc/portage/make.profile must be a symlink after eselect profile set" >&2
   ls -la /etc/portage/make.profile >&2 || true
   exit 1
