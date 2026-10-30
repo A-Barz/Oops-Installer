@@ -29,14 +29,13 @@ Read **[HOWTO.txt](HOWTO.txt)** before a real install.
 - Wired or wireless internet
 - Root privileges
 - A target disk you can **wipe** (unless you choose existing partitions)
-- Optional but recommended for stage3 GPG: on the **Ubuntu Boot Image host**, install apt package **`ntpsec`** for live clock sync. It must **replace host chrony** (those Ubuntu packages conflict): `sudo apt-get remove -y chrony; sudo apt-get install -y ntpsec`. (Gentoo still uses optional `net-misc/chrony` on the installed system.)
+- Optional but recommended for stage3 GPG: on the **Ubuntu Boot Image host**, install apt package **`ntpsec-ntpdate`** for live clock sync: `sudo apt-get install -y ntpsec-ntpdate`. (Gentoo still uses optional `net-misc/chrony` on the installed system — do not unmerge it.)
 
 ## Usage
 
 ```bash
 sudo apt-get update
-sudo apt-get remove -y chrony
-sudo apt-get install -y python3 git ntpsec
+sudo apt-get install -y python3 git ntpsec-ntpdate
 git clone <this-repo>
 cd Oops-Installer   # or gentoo-live-installer
 sudo python3 install.py
@@ -89,7 +88,7 @@ Defaults are `InstallConfig` values unless noted. Conditional steps are marked.
 |-----|-----------------|---------|
 | Live network | `dhcp`, `wifi`, `static`, `skip` | `dhcp` if online else `wifi` |
 | Wi-Fi / static | iface, SSID/PSK or CIDR/gateway/DNS | DNS `1.1.1.1` |
-| Synchronise clock before stage3? | uses Ubuntu **`ntpsec`** (must replace **chrony**) | Yes |
+| Synchronise clock before stage3? | uses Ubuntu **`ntpsec-ntpdate`** | Yes |
 
 ### 4 — Disks
 

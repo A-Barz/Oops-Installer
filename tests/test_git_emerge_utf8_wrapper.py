@@ -10,6 +10,7 @@ from gentoo_installer.execute import (
     GIT_ATOM,
     _chroot_env_argv,
     _emerge_git_block,
+    _generate_locales,
     _installer_utf8_locale,
     _make_conf_text,
     phase_chroot,
@@ -73,6 +74,33 @@ class ChrootEnvLocaleTests(unittest.TestCase):
         self.assertIn("LANG=en_US.UTF-8", argv)
         self.assertIn("LC_ALL=en_US.UTF-8", argv)
         self.assertNotIn("LANG=C", argv)
+
+
+class GenerateLocalesUtf8Tests(unittest.TestCase):
+    def test_eselect_locale_runs_under_utf8_not_c(self) -> None:
+        cfg = _cfg()
+        runner = mock.Mock()
+        runner.run.return_value = mock.Mock(returncode=0)
+        _generate_locales(cfg, runner, "/mnt/gentoo")
+        self.assertEqual(runner.run.call_count, 2)
+        locale_gen_argv = runner.run.call_args_list[0][0][0]
+        eselect_argv = runner.run.call_args_list[1][0][0]
+        # locale-gen may stay on C; setting locale must not.
+        self.assertIn("LANG=C", locale_gen_argv)
+        self.assertIn("locale-gen", " ".join(locale_gen_argv))
+        self.assertIn("LANG=en_US.UTF-8", eselect_argv)
+        self.assertIn("LC_ALL=en_US.UTF-8", eselect_argv)
+        self.assertNotIn("LANG=C", eselect_argv)
+        joined = " ".join(eselect_argv)
+        self.assertIn("export LANG=", joined)
+        self.assertIn("eselect locale set", joined)
+        self.assertIn("refuse locale set under bare LANG", joined)
+
+    def test_musl_skips_glibc_locale_gen(self) -> None:
+        cfg = _cfg(stage_variant="musl")
+        runner = mock.Mock()
+        _generate_locales(cfg, runner, "/mnt/gentoo")
+        runner.run.assert_not_called()
 
 
 class EmergeGitBlockTests(unittest.TestCase):
