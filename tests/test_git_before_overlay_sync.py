@@ -53,14 +53,16 @@ class GitBeforeSyncTests(unittest.TestCase):
         self.assertIn("package.accept_keywords/git", script)
         self.assertIn(f"{GIT_ATOM} ~amd64", script)
         self.assertIn("package.unmask/git", script)
-        self.assertIn(f"emerge --ask=n --verbose --noreplace {GIT_ATOM}", script)
+        self.assertIn(f"emerge_one {GIT_ATOM}", script)
+        self.assertIn("gentoo tree/profile precondition", script)
+        self.assertIn("--autounmask-write --autounmask-continue", script)
         self.assertIn("export LANG=en_US.UTF-8", script)
         self.assertIn("export LC_ALL=en_US.UTF-8", script)
         self.assertIn("emerge -pv", script)
         self.assertIn("build.log", script)
         self.assertIn("command -v git", script)
         self.assertIn("git_emerge_status", script)
-        emerge = script.find(f"emerge --ask=n --verbose --noreplace {GIT_ATOM}")
+        emerge = script.find(f"emerge_one {GIT_ATOM}")
         check = script.find("command -v git")
         self.assertLess(emerge, check)
         # Keyword/unmask before emerge.
@@ -99,7 +101,7 @@ class GitBeforeSyncTests(unittest.TestCase):
         self.assertIn("s/ --binpkg-respect-use=[^\" ]*//g", script)
         sanitize_echo = script.find(">> sanitize make.conf before first emerge")
         sanitize = script.find("\nsanitize_binpkg_respect_use\n", sanitize_echo)
-        git_emerge = script.find(f"emerge --ask=n --verbose --noreplace {GIT_ATOM}")
+        git_emerge = script.find(f"emerge_one {GIT_ATOM}")
         self.assertGreaterEqual(sanitize_echo, 0)
         self.assertGreaterEqual(sanitize, 0, "pre-git sed sanitize must be invoked")
         self.assertGreaterEqual(git_emerge, 0)
@@ -122,7 +124,7 @@ class GitBeforeSyncTests(unittest.TestCase):
 
     def test_overlay_script_emerges_git_before_eselect_enable(self) -> None:
         script = _overlay_script(_cfg(window_managers=["gui-wm/niri"]))
-        git_emerge = script.find(f"emerge --ask=n --verbose --noreplace {GIT_ATOM}")
+        git_emerge = script.find(f"emerge_one {GIT_ATOM}")
         git_check = script.find("git missing after emerge")
         eselect = script.find("emerge --ask=n --verbose --noreplace app-eselect/eselect-repository")
         enable = script.find("eselect repository enable")
@@ -133,6 +135,7 @@ class GitBeforeSyncTests(unittest.TestCase):
         self.assertLess(eselect, enable)
         self.assertIn("package.accept_keywords/git", script)
         self.assertIn("export LANG=en_US.UTF-8", script)
+        self.assertIn("gentoo tree/profile precondition", script)
 
     def test_chroot_helpers_include_git_for_git_sync(self) -> None:
         atoms = _chroot_helper_atoms(_cfg(sync_method="git"))
