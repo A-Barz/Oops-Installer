@@ -11,7 +11,9 @@ from gentoo_installer.execute import (
     _chroot_env_argv,
     _emerge_git_block,
     _installer_utf8_locale,
+    _make_conf_text,
     phase_chroot,
+    render_chroot_script,
 )
 
 
@@ -96,6 +98,22 @@ class EmergeGitBlockTests(unittest.TestCase):
         self.assertEqual(_installer_utf8_locale(cfg), "C.UTF-8")
         script = _emerge_git_block(cfg, reason="musl")
         self.assertIn("export LANG=C.UTF-8", script)
+
+
+class BinpkgRespectUseReadinessTests(unittest.TestCase):
+    def test_make_conf_never_embeds_binpkg_respect_use(self) -> None:
+        for respect in (False, True):
+            text = _make_conf_text(_cfg(binhost=True, binpkg_respect_use=respect))
+            self.assertNotIn("binpkg-respect-use", text)
+
+    def test_chroot_sanitizes_before_git_emerge(self) -> None:
+        script = render_chroot_script(_cfg(), {"root": "/dev/vda2", "esp": "/dev/vda1"})
+        sanitize = script.find("\nsanitize_binpkg_respect_use\n")
+        emerge = script.find(f"emerge --ask=n --verbose --noreplace {GIT_ATOM}")
+        self.assertGreaterEqual(sanitize, 0)
+        self.assertGreaterEqual(emerge, 0)
+        self.assertLess(sanitize, emerge)
+        self.assertIn("$RESPECT_USE", script)
 
 
 if __name__ == "__main__":

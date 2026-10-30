@@ -1881,13 +1881,14 @@ def _make_conf_text(cfg: InstallConfig) -> str:
         cflags += " -fstack-protector-strong -fstack-clash-protection"
     if cfg.lto:
         cflags += " -flto"
+    # Never put --binpkg-respect-use in EMERGE_DEFAULT_OPTS: stage3 Portage may
+    # not know it, and that makes every emerge exit before it builds anything.
+    # After profile, portage_prepare detects support and sets $RESPECT_USE for
+    # later emerge_one / emerge_keep_going calls. Pre-git sanitize strips any
+    # leftover from older make.conf / resume copies before the first emerge.
     emerge_opts = f"--jobs={max(1, jobs // 2)} --load-average={jobs} --ask=n"
     if cfg.binhost:
         emerge_opts += " --getbinpkg --usepkg"
-        if getattr(cfg, "binpkg_respect_use", False):
-            emerge_opts += " --binpkg-respect-use=y"
-        else:
-            emerge_opts += " --binpkg-respect-use=n"
     l10n, linguas = _l10n_linguas(cfg)
     lines = [
         f'COMMON_FLAGS="{cflags}"',
@@ -2989,16 +2990,29 @@ disable_binpkgs() {
 
 # Stage3 Portage may not know --binpkg-respect-use. Leaving it in
 # EMERGE_DEFAULT_OPTS makes every later emerge exit before it builds anything.
+# make.conf no longer writes the option; sanitize_binpkg_respect_use (sed-only,
+# before first emerge) and this prepare (after profile) both strip leftovers.
+sanitize_binpkg_respect_use() {
+  # Sed-only: safe before make.profile exists (no emerge --help / Portage load).
+  local conf
+  local changed=0
+  for conf in /etc/portage/make.conf /etc/portage/make.conf/*; do
+    [ -f "$conf" ] || continue
+    if grep -q 'binpkg-respect-use' "$conf" 2>/dev/null; then
+      sed -i -E 's/ --binpkg-respect-use=[^" ]*//g' "$conf" || true
+      changed=1
+    fi
+  done
+  if [ "$changed" -eq 1 ]; then
+    echo ">> stripped --binpkg-respect-use from make.conf before first emerge"
+  fi
+}
 RESPECT_USE=""
 portage_prepare() {
   emerge --help >/tmp/emerge-help.txt 2>/tmp/emerge-help.err || true
   if grep -q 'binpkg-respect-use' /tmp/emerge-help.err 2>/dev/null; then
     echo ">> this Portage rejects --binpkg-respect-use; removing it so emerge can run"
-    local conf
-    for conf in /etc/portage/make.conf /etc/portage/make.conf/*; do
-      [ -f "$conf" ] || continue
-      sed -i -E 's/ --binpkg-respect-use=[^" ]*//g' "$conf" || true
-    done
+    sanitize_binpkg_respect_use
     emerge --help >/tmp/emerge-help.txt 2>/tmp/emerge-help.err || true
   fi
   if grep -q 'binpkg-respect-use' /tmp/emerge-help.txt 2>/dev/null; then
@@ -3009,6 +3023,7 @@ portage_prepare() {
 # emerge --help and eselect both load Portage. Portage prints
 # "make.profile is not a symlink" when that path is missing, a real file,
 # or a dangling link. Call portage_prepare only after link_make_profile.
+# Call sanitize_binpkg_respect_use (sed-only) before any package emerge.
 
 profile_has_marker() {
   local dir="$1"
@@ -4940,6 +4955,8 @@ EOF
 {keywords}
 
 {locale_prep}
+echo ">> sanitize make.conf before first emerge"
+sanitize_binpkg_respect_use
 {git_prep}
 echo ">> sync Portage tree"
 {sync}

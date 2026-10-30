@@ -5,6 +5,7 @@ Also: chroot must switch off bare LANG=C before emerge/sync (Portage ambiguous l
 
 from __future__ import annotations
 
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +18,7 @@ from gentoo_installer.execute import (
     _installer_utf8_locale,
     _locale_gen_lines,
     _locale_prep_script,
+    _make_conf_text,
     _needs_git_for_sync,
     _overlay_script,
     _write_overlay_portage_files,
@@ -80,6 +82,43 @@ class GitBeforeSyncTests(unittest.TestCase):
         self.assertLess(sync_echo, tree)
         # Tree sync itself fail-closes if git vanished.
         self.assertIn("git missing before Portage tree sync", script)
+
+    def test_make_conf_omits_binpkg_respect_use(self) -> None:
+        for respect in (False, True):
+            cfg = _cfg(binhost=True, binpkg_respect_use=respect)
+            text = _make_conf_text(cfg)
+            self.assertNotIn("binpkg-respect-use", text)
+            self.assertIn("--getbinpkg", text)
+            self.assertIn("--usepkg", text)
+
+    def test_sanitize_before_first_package_emerge(self) -> None:
+        """No package emerge before make.conf is free of --binpkg-respect-use."""
+        cfg = _cfg(sync_method="git", binhost=True, window_managers=["gui-wm/niri"])
+        script = render_chroot_script(cfg, {"root": "/dev/vda2", "esp": "/dev/vda1"})
+        self.assertIn("sanitize_binpkg_respect_use()", script)
+        self.assertIn("s/ --binpkg-respect-use=[^\" ]*//g", script)
+        sanitize_echo = script.find(">> sanitize make.conf before first emerge")
+        sanitize = script.find("\nsanitize_binpkg_respect_use\n", sanitize_echo)
+        git_emerge = script.find(f"emerge --ask=n --verbose --noreplace {GIT_ATOM}")
+        self.assertGreaterEqual(sanitize_echo, 0)
+        self.assertGreaterEqual(sanitize, 0, "pre-git sed sanitize must be invoked")
+        self.assertGreaterEqual(git_emerge, 0)
+        self.assertLess(sanitize, git_emerge)
+        # Full emerge --help detection stays after profile (avoid make.profile noise).
+        profile = script.find(">> eselect profile")
+        prepare = script.find("\nportage_prepare\n", profile)
+        self.assertGreaterEqual(profile, 0)
+        self.assertGreaterEqual(prepare, 0)
+        self.assertLess(sanitize, profile)
+        self.assertLess(profile, prepare)
+        # Top-level package emerges (column 0) must not precede sanitize.
+        for match in re.finditer(r"(?m)^emerge (?!--help)", script):
+            self.assertGreaterEqual(
+                match.start(),
+                sanitize,
+                f"package emerge before sanitize: {match.group(0)!r}",
+            )
+            break
 
     def test_overlay_script_emerges_git_before_eselect_enable(self) -> None:
         script = _overlay_script(_cfg(window_managers=["gui-wm/niri"]))
