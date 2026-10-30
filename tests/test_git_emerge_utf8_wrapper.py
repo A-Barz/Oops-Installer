@@ -13,6 +13,7 @@ from gentoo_installer.execute import (
     _generate_locales,
     _installer_utf8_locale,
     _make_conf_text,
+    _seed_gentoo_tree_script,
     phase_chroot,
     render_chroot_script,
 )
@@ -103,6 +104,23 @@ class GenerateLocalesUtf8Tests(unittest.TestCase):
         runner.run.assert_not_called()
 
 
+class SeedGentooTreeTests(unittest.TestCase):
+    def test_seed_uses_webrsync_then_fail_closed(self) -> None:
+        script = _seed_gentoo_tree_script(for_atom=GIT_ATOM)
+        self.assertIn("seeding with emerge-webrsync", script)
+        self.assertIn("emerge-webrsync", script)
+        self.assertIn("emerge --sync", script)
+        self.assertIn("mkdir -p /var/db/repos/gentoo", script)
+        self.assertIn("webrsync seed failed before emerge", script)
+        self.assertIn("/var/db/repos/gentoo/profiles missing after webrsync seed", script)
+        self.assertIn(f"no ebuilds for {GIT_ATOM} under /var/db/repos/gentoo after webrsync seed", script)
+        self.assertIn("gentoo tree/profile precondition OK", script)
+        # Seed before any post-seed fail-closed check.
+        seed = script.find("emerge-webrsync")
+        fail = script.find("profiles missing after webrsync seed")
+        self.assertLess(seed, fail)
+
+
 class EmergeGitBlockTests(unittest.TestCase):
     def test_block_keywords_utf8_emerge_one_and_error_surface(self) -> None:
         script = _emerge_git_block(_cfg(), reason="unit-test")
@@ -112,9 +130,12 @@ class EmergeGitBlockTests(unittest.TestCase):
         self.assertIn("export LANG=en_US.UTF-8", script)
         self.assertIn("refuse emerge", script)
         self.assertIn("gentoo tree/profile precondition", script)
-        self.assertIn("/var/db/repos/gentoo/profiles missing before emerge", script)
+        self.assertIn("seeding with emerge-webrsync", script)
+        self.assertIn("/var/db/repos/gentoo/profiles missing after webrsync seed", script)
         self.assertIn(f"no ebuilds for {GIT_ATOM}", script)
         self.assertIn("make.profile not usable before emerge", script)
+        self.assertIn("git already on PATH", script)
+        self.assertIn(f"skip emerge {GIT_ATOM}", script)
         self.assertIn("emerge_one", script)
         self.assertIn(f"emerge_one {GIT_ATOM}", script)
         self.assertIn("--autounmask-write --autounmask-continue", script)
@@ -126,13 +147,21 @@ class EmergeGitBlockTests(unittest.TestCase):
         # Failure dump lines always carry >> so the host log filter keeps them.
         self.assertIn('echo ">> $_line" >&2', script)
         self.assertIn("sed 's/^/>> /' /etc/portage/package.accept_keywords/git", script)
+        seed = script.find("seeding with emerge-webrsync")
         kw = script.find("package.accept_keywords/git")
         emerge = script.find(f"emerge_one {GIT_ATOM}")
+        self.assertLess(seed, kw)
         self.assertLess(kw, emerge)
-        # UTF-8 export before emerge.
+        # UTF-8 export before seed and emerge.
+        self.assertLess(script.find("export LANG=en_US.UTF-8"), seed)
         self.assertLess(script.find("export LANG=en_US.UTF-8"), emerge)
         # Bare verbose emerge of git is gone; path goes through emerge_one.
         self.assertNotIn(f"emerge --ask=n --verbose --noreplace {GIT_ATOM}", script)
+        # Skip-path when git exists must still leave the final readiness check.
+        skip = script.find("git already on PATH")
+        ready = script.find("git ready")
+        self.assertLess(skip, emerge)
+        self.assertLess(emerge, ready)
 
     def test_musl_uses_c_utf8(self) -> None:
         cfg = _cfg(stage_variant="musl", locale="C")

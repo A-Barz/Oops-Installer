@@ -21,6 +21,7 @@ from gentoo_installer.execute import (
     _make_conf_text,
     _needs_git_for_sync,
     _overlay_script,
+    _seed_gentoo_tree_script,
     _write_overlay_portage_files,
     _write_system_files,
     render_chroot_script,
@@ -55,6 +56,9 @@ class GitBeforeSyncTests(unittest.TestCase):
         self.assertIn("package.unmask/git", script)
         self.assertIn(f"emerge_one {GIT_ATOM}", script)
         self.assertIn("gentoo tree/profile precondition", script)
+        self.assertIn("seeding with emerge-webrsync", script)
+        self.assertIn("webrsync seed failed before emerge", script)
+        self.assertIn("git already on PATH", script)
         self.assertIn("--autounmask-write --autounmask-continue", script)
         self.assertIn("export LANG=en_US.UTF-8", script)
         self.assertIn("export LC_ALL=en_US.UTF-8", script)
@@ -62,12 +66,20 @@ class GitBeforeSyncTests(unittest.TestCase):
         self.assertIn("build.log", script)
         self.assertIn("command -v git", script)
         self.assertIn("git_emerge_status", script)
+        seed = script.find("seeding with emerge-webrsync")
         emerge = script.find(f"emerge_one {GIT_ATOM}")
-        check = script.find("command -v git")
+        check = script.find("git missing after emerge")
+        self.assertLess(seed, emerge)
         self.assertLess(emerge, check)
-        # Keyword/unmask before emerge.
+        # Keyword/unmask before emerge (inside the missing-git branch).
         self.assertLess(script.find("package.accept_keywords/git"), emerge)
         self.assertLess(script.find("package.unmask/git"), emerge)
+
+    def test_seed_helper_is_git_free_webrsync(self) -> None:
+        script = _seed_gentoo_tree_script()
+        self.assertIn("emerge-webrsync", script)
+        self.assertNotIn("sync-type = git", script)
+        self.assertNotIn("github.com/gentoo-mirror", script)
 
     def test_ensure_git_empty_when_not_needed(self) -> None:
         self.assertEqual(_ensure_git_script(_cfg(sync_method="rsync")), "")
@@ -76,14 +88,19 @@ class GitBeforeSyncTests(unittest.TestCase):
         cfg = _cfg(sync_method="git")
         script = render_chroot_script(cfg, {"root": "/dev/vda2", "esp": "/dev/vda1"})
         prep = script.find("ensure dev-vcs/git (before Portage git sync")
+        seed = script.find("seeding with emerge-webrsync")
         tree = script.find("sync-type = git")
         sync_echo = script.find(">> sync Portage tree")
         self.assertGreaterEqual(prep, 0)
+        self.assertGreaterEqual(seed, 0)
         self.assertGreaterEqual(tree, 0)
-        self.assertLess(prep, sync_echo)
+        self.assertLess(prep, seed)
+        self.assertLess(seed, sync_echo)
         self.assertLess(sync_echo, tree)
         # Tree sync itself fail-closes if git vanished.
         self.assertIn("git missing before Portage tree sync", script)
+        # Seed is git-free scaffolding; configured git sync still follows.
+        self.assertLess(seed, script.find("emerge_one " + GIT_ATOM))
 
     def test_make_conf_omits_binpkg_respect_use(self) -> None:
         for respect in (False, True):

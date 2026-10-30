@@ -4035,20 +4035,77 @@ def _git_unmask_text() -> str:
     return f"{GIT_ATOM}\n"
 
 
-def _emerge_git_block(cfg: InstallConfig, *, reason: str) -> str:
-    """Keyword/unmask + UTF-8 env + emerge_one of git; surface Portage errors.
+def _seed_gentoo_tree_script(*, for_atom: str = GIT_ATOM) -> str:
+    """Git-free webrsync/rsync seed when stage3 left no usable gentoo tree.
 
-    Always rewrites accept_keywords/unmask for git, asserts a concrete UTF-8
-    LANG/LC_ALL (never bare C from the installer wrapper), refuses a missing
-    gentoo tree/profile before the first emerge, runs git through ``emerge_one``
-    (SIGILL / ``--usepkg=n`` retry), optionally oneshot-autounmasks when
-    ``emerge -pv`` shows keyword masks, and on failure dumps tree/profile/
-    ``emerge -pv`` lines prefixed with ``>>`` so the host log filter keeps them.
+    Desktop stage3 often unpacks without ``/var/db/repos/gentoo``. Emerging
+    ``dev-vcs/git`` (needed *for* later ``sync_method=git`` / overlay sync)
+    still needs profiles + ebuilds first — handbook ``emerge-webrsync`` (or
+    ``emerge --sync``) is the seed; the later ``_portage_tree_sync_script``
+    refreshes or replaces with a git clone as configured.
+    """
+    return f"""
+# Git-free seed: stage3 unpack alone is not enough for emerge/profile.
+_gentoo_tree_usable=0
+if [ -d /var/db/repos/gentoo/profiles ] \\
+  && ls /var/db/repos/gentoo/dev-vcs/git/*.ebuild >/dev/null 2>&1; then
+  _gentoo_tree_usable=1
+fi
+if [ "$_gentoo_tree_usable" -ne 1 ]; then
+  echo ">> gentoo ebuild tree missing/incomplete before emerge {for_atom}; seeding with emerge-webrsync"
+  mkdir -p /var/db/repos/gentoo
+  if [ ! -d /var/db/repos/gentoo ]; then
+    echo ">> failed to create /var/db/repos/gentoo before webrsync seed" >&2
+    exit 1
+  fi
+  if command -v retry404 >/dev/null 2>&1; then
+    retry404 emerge-webrsync || retry404 emerge --sync || {{
+      echo ">> webrsync seed failed before emerge {for_atom} (emerge-webrsync / emerge --sync)" >&2
+      exit 1
+    }}
+  else
+    emerge-webrsync || emerge --sync || {{
+      echo ">> webrsync seed failed before emerge {for_atom} (emerge-webrsync / emerge --sync)" >&2
+      exit 1
+    }}
+  fi
+fi
+if [ ! -d /var/db/repos/gentoo ]; then
+  echo ">> /var/db/repos/gentoo missing after webrsync seed (before emerge {for_atom})" >&2
+  exit 1
+fi
+if [ ! -d /var/db/repos/gentoo/profiles ]; then
+  echo ">> /var/db/repos/gentoo/profiles missing after webrsync seed (cannot link make.profile)" >&2
+  echo ">> gentoo tree listing:" >&2
+  ls -la /var/db/repos/gentoo 2>&1 | while IFS= read -r _line || [ -n "$_line" ]; do echo ">> $_line" >&2; done || true
+  exit 1
+fi
+if ! ls /var/db/repos/gentoo/dev-vcs/git/*.ebuild >/dev/null 2>&1; then
+  echo ">> no ebuilds for {for_atom} under /var/db/repos/gentoo after webrsync seed" >&2
+  echo ">> gentoo tree listing:" >&2
+  ls /var/db/repos/gentoo 2>&1 | head -n 40 | while IFS= read -r _line || [ -n "$_line" ]; do echo ">> $_line" >&2; done || true
+  exit 1
+fi
+echo ">> gentoo tree/profile precondition OK for {for_atom}"
+"""
+
+
+def _emerge_git_block(cfg: InstallConfig, *, reason: str) -> str:
+    """Seed tree if needed, then keyword/unmask + UTF-8 + emerge_one of git.
+
+    Always asserts a concrete UTF-8 LANG/LC_ALL (never bare C), seeds a missing
+    gentoo tree via ``emerge-webrsync`` / ``emerge --sync`` (git-free), fails
+    closed if seed still leaves no profiles/ebuilds, links make.profile, then
+    either skips emerge when ``git`` is already on PATH or runs git through
+    ``emerge_one`` (SIGILL / ``--usepkg=n`` retry) with optional oneshot
+    autounmask when ``emerge -pv`` shows keyword masks. On failure dumps
+    tree/profile/``emerge -pv`` lines prefixed with ``>>`` for the host filter.
     """
     utf8 = shlex.quote(_installer_utf8_locale(cfg))
     kw = _git_keyword_text(cfg).rstrip("\n")
     um = _git_unmask_text().rstrip("\n")
     pre_quoted = " ".join(shlex.quote(path) for path in _profile_candidates(cfg))
+    seed = _seed_gentoo_tree_script(for_atom=GIT_ATOM).rstrip("\n")
     return f"""
 echo ">> ensure {GIT_ATOM} ({reason})"
 # Never emerge git under ambiguous LANG=C from the installer env wrapper.
@@ -4058,38 +4115,9 @@ case "$LANG" in
   C|POSIX|"") echo ">> refuse emerge {GIT_ATOM} under bare LANG='$LANG'" >&2; exit 1 ;;
 esac
 echo ">> installer locale for {GIT_ATOM} emerge: $LANG"
-# Stage3 snapshot / webrsync tree must already expose profiles + the git ebuild
-# before this first emerge (git is required *for* later git sync).
-if [ ! -d /var/db/repos/gentoo ]; then
-  echo ">> /var/db/repos/gentoo missing before emerge {GIT_ATOM} (stage3 snapshot / tree not present)" >&2
-  exit 1
-fi
-if [ ! -d /var/db/repos/gentoo/profiles ]; then
-  echo ">> /var/db/repos/gentoo/profiles missing before emerge {GIT_ATOM} (cannot link make.profile)" >&2
-  echo ">> gentoo tree listing:" >&2
-  ls -la /var/db/repos/gentoo 2>&1 | while IFS= read -r _line || [ -n "$_line" ]; do echo ">> $_line" >&2; done || true
-  exit 1
-fi
-if ! ls /var/db/repos/gentoo/dev-vcs/git/*.ebuild >/dev/null 2>&1; then
-  echo ">> no ebuilds for {GIT_ATOM} under /var/db/repos/gentoo (stage3/webrsync tree incomplete)" >&2
-  echo ">> gentoo tree listing:" >&2
-  ls /var/db/repos/gentoo 2>&1 | head -n 40 | while IFS= read -r _line || [ -n "$_line" ]; do echo ">> $_line" >&2; done || true
-  exit 1
-fi
-echo ">> gentoo tree/profile precondition OK for {GIT_ATOM}"
+{seed}
 mkdir -p /etc/portage/package.accept_keywords /etc/portage/package.unmask
-cat > /etc/portage/package.accept_keywords/git << 'EOF'
-{kw}
-EOF
-cat > /etc/portage/package.unmask/git << 'EOF'
-{um}
-EOF
-echo ">> accept_keywords/git:"
-sed 's/^/>> /' /etc/portage/package.accept_keywords/git
-echo ">> package.unmask/git:"
-sed 's/^/>> /' /etc/portage/package.unmask/git
-# Stage3 may already contain the tree. Link a real profile before this emerge
-# so Portage does not warn. After sync, eselect links it again.
+# Link a real profile before any Portage calculation (seeded tree or stage3).
 if [ -d /var/db/repos/gentoo/profiles ]; then
   for _pre_profile in {pre_quoted}; do
     link_make_profile "$_pre_profile" && break
@@ -4101,38 +4129,53 @@ if ! profile_has_marker /etc/portage/make.profile; then
   ls -ld /etc/portage/make.profile 2>&1 | while IFS= read -r _line || [ -n "$_line" ]; do echo ">> $_line" >&2; done || true
   exit 1
 fi
-unset FEATURES
-# Optional oneshot autounmask only when -pv already shows keyword masks on
-# git or a transitive dep (accept_keywords/git covers the atom itself only).
-_git_pv=$(emerge -pv {GIT_ATOM} 2>&1 || true)
-if printf '%s\n' "$_git_pv" | grep -qiE 'masked by:.*keyword|masked by:.*~'; then
-  echo ">> keyword mask in emerge -pv for {GIT_ATOM}; oneshot --autounmask-write --autounmask-continue" >&2
-  emerge --ask=n --autounmask-write --autounmask-continue --verbose --noreplace {GIT_ATOM} || true
-fi
-# Route through emerge_one for SIGILL / --usepkg=n source retry (not bare emerge).
-_git_save_nr=$NR
-NR=--noreplace
-emerge_one {GIT_ATOM}
-git_emerge_status=$?
-NR=$_git_save_nr
-if [ "$git_emerge_status" -ne 0 ]; then
-  echo ">> emerge {GIT_ATOM} failed (exit $git_emerge_status) — Portage detail follows" >&2
-  echo ">> gentoo tree (head):" >&2
-  ls /var/db/repos/gentoo 2>&1 | head -n 40 | while IFS= read -r _line || [ -n "$_line" ]; do echo ">> $_line" >&2; done || true
-  echo ">> make.profile -> $(readlink /etc/portage/make.profile 2>/dev/null || echo missing)" >&2
-  echo ">> emerge -pv {GIT_ATOM}:" >&2
-  emerge -pv {GIT_ATOM} 2>&1 | while IFS= read -r _line || [ -n "$_line" ]; do echo ">> $_line" >&2; done || true
-  echo ">> emerge --info (head):" >&2
-  emerge --info 2>&1 | head -n 60 | while IFS= read -r _line || [ -n "$_line" ]; do echo ">> $_line" >&2; done || true
-  echo ">> newest build.log (if any):" >&2
-  _git_blog=$(ls -1t /var/tmp/portage/dev-vcs/git-*/temp/build.log 2>/dev/null | head -n 1)
-  if [ -n "$_git_blog" ] && [ -f "$_git_blog" ]; then
-    echo ">> $_git_blog (last 80 lines)" >&2
-    tail -n 80 "$_git_blog" 2>&1 | while IFS= read -r _line || [ -n "$_line" ]; do echo ">> $_line" >&2; done || true
-  else
-    echo ">> no /var/tmp/portage/dev-vcs/git-*/temp/build.log yet (often mask/keyword/dep resolution)" >&2
+# Some desktop stage3s already ship git — still require the seeded tree above.
+if command -v git >/dev/null 2>&1; then
+  echo ">> git already on PATH ($(command -v git)); skip emerge {GIT_ATOM}"
+else
+  cat > /etc/portage/package.accept_keywords/git << 'EOF'
+{kw}
+EOF
+  cat > /etc/portage/package.unmask/git << 'EOF'
+{um}
+EOF
+  echo ">> accept_keywords/git:"
+  sed 's/^/>> /' /etc/portage/package.accept_keywords/git
+  echo ">> package.unmask/git:"
+  sed 's/^/>> /' /etc/portage/package.unmask/git
+  unset FEATURES
+  # Optional oneshot autounmask only when -pv already shows keyword masks on
+  # git or a transitive dep (accept_keywords/git covers the atom itself only).
+  _git_pv=$(emerge -pv {GIT_ATOM} 2>&1 || true)
+  if printf '%s\\n' "$_git_pv" | grep -qiE 'masked by:.*keyword|masked by:.*~'; then
+    echo ">> keyword mask in emerge -pv for {GIT_ATOM}; oneshot --autounmask-write --autounmask-continue" >&2
+    emerge --ask=n --autounmask-write --autounmask-continue --verbose --noreplace {GIT_ATOM} || true
   fi
-  exit "$git_emerge_status"
+  # Route through emerge_one for SIGILL / --usepkg=n source retry (not bare emerge).
+  _git_save_nr=$NR
+  NR=--noreplace
+  emerge_one {GIT_ATOM}
+  git_emerge_status=$?
+  NR=$_git_save_nr
+  if [ "$git_emerge_status" -ne 0 ]; then
+    echo ">> emerge {GIT_ATOM} failed (exit $git_emerge_status) — Portage detail follows" >&2
+    echo ">> gentoo tree (head):" >&2
+    ls /var/db/repos/gentoo 2>&1 | head -n 40 | while IFS= read -r _line || [ -n "$_line" ]; do echo ">> $_line" >&2; done || true
+    echo ">> make.profile -> $(readlink /etc/portage/make.profile 2>/dev/null || echo missing)" >&2
+    echo ">> emerge -pv {GIT_ATOM}:" >&2
+    emerge -pv {GIT_ATOM} 2>&1 | while IFS= read -r _line || [ -n "$_line" ]; do echo ">> $_line" >&2; done || true
+    echo ">> emerge --info (head):" >&2
+    emerge --info 2>&1 | head -n 60 | while IFS= read -r _line || [ -n "$_line" ]; do echo ">> $_line" >&2; done || true
+    echo ">> newest build.log (if any):" >&2
+    _git_blog=$(ls -1t /var/tmp/portage/dev-vcs/git-*/temp/build.log 2>/dev/null | head -n 1)
+    if [ -n "$_git_blog" ] && [ -f "$_git_blog" ]; then
+      echo ">> $_git_blog (last 80 lines)" >&2
+      tail -n 80 "$_git_blog" 2>&1 | while IFS= read -r _line || [ -n "$_line" ]; do echo ">> $_line" >&2; done || true
+    else
+      echo ">> no /var/tmp/portage/dev-vcs/git-*/temp/build.log yet (often mask/keyword/dep resolution)" >&2
+    fi
+    exit "$git_emerge_status"
+  fi
 fi
 if ! command -v git >/dev/null 2>&1; then
   echo ">> git missing after emerge — cannot sync Portage overlays or a git tree" >&2

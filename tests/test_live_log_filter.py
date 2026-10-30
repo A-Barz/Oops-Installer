@@ -21,7 +21,7 @@ class LiveLogFilterTests(unittest.TestCase):
 
     def test_keeps_portage_calculation_and_rev_banner(self) -> None:
         keepers = [
-            "=== gentoo-live-installer chroot rev 76 ===",
+            "=== gentoo-live-installer chroot rev 77 ===",
             "!!! Repository 'gentoo' is missing masters",
             'emerge: there are no ebuilds to satisfy "dev-vcs/git".',
             "!!! All ebuilds that could satisfy dev-vcs/git have been masked.",
