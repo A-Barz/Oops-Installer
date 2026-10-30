@@ -5243,22 +5243,19 @@ for profile_path in {quoted}; do
     echo ">> profile $profile_path was not accepted" >&2
     continue
   }}
-  eselect profile set "$profile_path" || eselect profile set --force "$profile_path" || true
-  if ! profile_has_marker /etc/portage/make.profile; then
-    link_make_profile "$profile_path" || {{
-      echo ">> profile $profile_path was not accepted" >&2
-      continue
-    }}
-  fi
-  # Handbook: make.profile must be a symlink into the tree (not a plain dir/file).
-  if [ -L /etc/portage/make.profile ] && profile_has_marker /etc/portage/make.profile; then
-    _mp_target=$(readlink -f /etc/portage/make.profile 2>/dev/null || true)
-    if [ -n "$_mp_target" ] && [ -e "$_mp_target" ] && eselect profile show 2>/dev/null | grep -q .; then
-      echo ">> Portage profile is $profile_path (make.profile -> $_mp_target)"
-      profile_ok=1
-      break
+  if eselect profile set "$profile_path" || eselect profile set --force "$profile_path"; then
+    if ! profile_has_marker /etc/portage/make.profile; then
+      link_make_profile "$profile_path" || true
     fi
-  else
+    # Handbook: make.profile must be a symlink into the tree (not a plain dir/file).
+    if [ -L /etc/portage/make.profile ] && profile_has_marker /etc/portage/make.profile; then
+      _mp_target=$(readlink -f /etc/portage/make.profile 2>/dev/null || true)
+      if [ -n "$_mp_target" ] && [ -e "$_mp_target" ]; then
+        echo ">> Portage profile is $profile_path (make.profile -> $_mp_target)"
+        profile_ok=1
+        break
+      fi
+    fi
     echo ">> /etc/portage/make.profile is not a symlink after eselect profile set $profile_path" >&2
     ls -la /etc/portage/make.profile >&2 || true
   fi

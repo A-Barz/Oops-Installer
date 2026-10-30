@@ -88,6 +88,17 @@ class MakeProfileSymlinkTests(unittest.TestCase):
         self.assertNotIn("\nportage_prepare\n", script[:profile])
         self.assertIn('local dest="/var/db/repos/gentoo/profiles/${profile}"', script)
 
+    def test_profile_ok_requires_eselect_success(self) -> None:
+        script = _profile_set_script(_cfg())
+        eselect = script.find('if eselect profile set "$profile_path"')
+        ok = script.find("profile_ok=1", eselect)
+        self.assertGreaterEqual(eselect, 0)
+        self.assertGreaterEqual(ok, 0)
+        window = script[eselect:ok]
+        self.assertIn("profile_has_marker /etc/portage/make.profile", window)
+        self.assertNotIn('eselect profile set --force "$profile_path" || true', script)
+        self.assertNotIn("eselect profile show", window)
+
 
 if __name__ == "__main__":
     unittest.main()
