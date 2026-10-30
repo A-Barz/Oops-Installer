@@ -1,4 +1,4 @@
-"""Host NTP ntpsec hint and partprobe must not hang on the live USB dm stack."""
+"""Host NTP ntpsec-ntpdate hint and partprobe must not hang on the live USB dm stack."""
 
 from __future__ import annotations
 
@@ -19,17 +19,20 @@ from gentoo_installer import ui
 
 
 class NtpNtpsecHintTests(unittest.TestCase):
-    def test_host_packages_include_ntpsec_not_chrony(self) -> None:
-        self.assertIn("ntpsec", HOST_PACKAGES)
+    def test_host_packages_include_ntpsec_ntpdate_not_legacy(self) -> None:
+        self.assertIn("ntpsec-ntpdate", HOST_PACKAGES)
+        self.assertNotIn("ntc", HOST_PACKAGES)
+        self.assertNotIn("ntpdate", HOST_PACKAGES)
         self.assertNotIn("chrony", HOST_PACKAGES)
 
-    def test_hint_names_ubuntu_ntpsec_replacing_chrony(self) -> None:
-        self.assertIn("ntpsec", NTP_NTC_HINT)
-        self.assertIn("replace chrony", NTP_NTC_HINT)
-        self.assertIn("apt-get install -y ntpsec", NTP_NTC_HINT)
-        self.assertIn("apt-get remove -y chrony", NTP_NTC_HINT)
+    def test_hint_names_ubuntu_ntpsec_ntpdate(self) -> None:
+        self.assertIn("ntpsec-ntpdate", NTP_NTC_HINT)
+        self.assertIn("apt-get install -y ntpsec-ntpdate", NTP_NTC_HINT)
+        self.assertNotIn("ntc", NTP_NTC_HINT)
+        # Host hint must not tell users to remove chrony (Gentoo keeps chrony).
+        self.assertNotIn("remove -y chrony", NTP_NTC_HINT)
 
-    def test_missing_tools_warn_ntp_not_found_and_ntpsec_hint(self) -> None:
+    def test_missing_tools_warn_ntp_not_found_and_ntpsec_ntpdate_hint(self) -> None:
         cfg = InstallConfig()
         cfg.ntp = True
         cfg.dry_run = False
@@ -41,18 +44,18 @@ class NtpNtpsecHintTests(unittest.TestCase):
         self.assertFalse(ok)
         runner.shell.assert_not_called()
         self.assertTrue(any("ntp update was not found" in w for w in warns))
-        self.assertTrue(any("ntpsec" in w and "chrony" in w for w in warns))
+        self.assertTrue(any("ntpsec-ntpdate" in w for w in warns))
 
-    def test_wizard_network_mentions_ntpsec_replacing_chrony(self) -> None:
+    def test_wizard_network_mentions_ntpsec_ntpdate(self) -> None:
         import inspect
 
         src = inspect.getsource(_network)
-        self.assertIn("ntpsec", src)
-        self.assertIn("chrony", src)
-        self.assertIn("apt-get install -y ntpsec", src)
+        self.assertIn("ntpsec-ntpdate", src)
+        self.assertIn("apt-get install -y ntpsec-ntpdate", src)
+        self.assertNotIn("ntc", src)
 
     def test_gentoo_still_offers_chrony_not_forced_ntpsec(self) -> None:
-        """ntpsec-over-chrony applies to the Ubuntu host only, not Gentoo emerge."""
+        """ntpsec-ntpdate applies to the Ubuntu host only, not Gentoo emerge."""
         cfg = InstallConfig()
         self.assertTrue(hasattr(cfg, "chrony"))
         self.assertFalse(hasattr(cfg, "ntpsec"))

@@ -177,6 +177,9 @@ class LocaleBeforeSyncTests(unittest.TestCase):
         self.assertIn("export LC_ALL=en_US.UTF-8", script)
         self.assertNotRegex(script, r"export LANG=C\n")
         self.assertNotRegex(script, r"export LC_ALL=C\n")
+        # Fail closed before emerge so Portage never prints ambiguous C / localectl.
+        self.assertIn("refuse emerge under ambiguous LANG", script)
+        self.assertIn("need UTF-8", script)
 
     def test_chroot_locale_prep_before_sync_and_git(self) -> None:
         cfg = _cfg(sync_method="git", locale="en_US.UTF-8")

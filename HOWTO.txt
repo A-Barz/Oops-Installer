@@ -124,9 +124,8 @@ disk until the review at the end.
   3. Network      Live DHCP, Wi-Fi, or static IP so stage3 can download.
                   Optional clock sync before stage3 (GPG). If NTP tools are
                   missing on the Ubuntu Boot Image host, install package
-                  ntpsec (must replace chrony — remove chrony first):
-                    sudo apt-get remove -y chrony
-                    sudo apt-get install -y ntpsec
+                  ntpsec-ntpdate:
+                    sudo apt-get install -y ntpsec-ntpdate
   4. Disks        Target disk, wipe, layout, filesystem, swap, LUKS
                   (wipe/full-disk paths default LUKS on; clear opt-out)
   5. Stage3       OpenRC or systemd, desktop / hardened / musl

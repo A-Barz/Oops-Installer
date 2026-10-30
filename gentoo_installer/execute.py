@@ -117,17 +117,15 @@ HOST_PACKAGES = [
     "pciutils",
     "iw",
     "wpasupplicant",
-    # Ubuntu Boot Image clock sync. Prefer ntpsec (must replace chrony — they conflict).
-    "ntpsec",
-    "ntc",
-    "ntpdate",
+    # Ubuntu Boot Image clock sync (one-shot client). Host-only — Gentoo keeps chrony.
+    "ntpsec-ntpdate",
 ]
 
 # Shown when live-host NTP tools are missing or sync fails (stage3 GPG needs a sane clock).
 NTP_NTC_HINT = (
     "NTP sync tools were not found (or clock sync failed) on this Ubuntu Boot Image host. "
-    "Install Ubuntu package ntpsec for time sync — it must replace chrony (remove chrony first): "
-    "sudo apt-get remove -y chrony; sudo apt-get install -y ntpsec"
+    "Install Ubuntu package ntpsec-ntpdate for live clock sync: "
+    "sudo apt-get install -y ntpsec-ntpdate"
 )
 
 
@@ -265,31 +263,30 @@ def _host_ntp_tools_present() -> bool:
     """True when the live host has at least one usable clock-sync command."""
     return any(
         shutil.which(name)
-        for name in ("ntc", "ntpdate", "ntpdig", "ntpd", "timedatectl")
+        for name in ("ntpdate", "ntpdig", "ntpd", "timedatectl")
     )
 
 
 def sync_live_clock(cfg: InstallConfig, runner: Runner) -> bool:
     """Synchronise the Ubuntu Boot Image clock before stage3 / GPG.
 
-    Prefers the Ubuntu ``ntc`` package. When tools are missing or every sync
-    attempt fails, warn with :data:`NTP_NTC_HINT` so the user can install ntc.
+    Prefers ``ntpdate`` from Ubuntu ``ntpsec-ntpdate``. When tools are missing
+    or every sync attempt fails, warn with :data:`NTP_NTC_HINT`.
     Returns True when sync looked successful (or was skipped / dry-run).
     """
     if not cfg.ntp:
         return True
     if cfg.dry_run:
-        ui.info("Dry-run: would synchronise the live clock (ntpsec / ntc / ntpdate / timedatectl).")
+        ui.info("Dry-run: would synchronise the live clock (ntpsec-ntpdate / timedatectl).")
         return True
     if not _host_ntp_tools_present():
         ui.warn("ntp update was not found on this live host.")
         ui.warn(NTP_NTC_HINT)
         return False
-    # Prefer ntpsec tools (replaces chrony), then ntc / ntpdate / timedatectl.
+    # Prefer ntpdate from ntpsec-ntpdate, then other NTP clients / timedatectl.
     script = (
-        "if command -v ntpdig >/dev/null 2>&1; then ntpdig -s pool.ntp.org; "
-        "elif command -v ntc >/dev/null 2>&1; then ntc; "
-        "elif command -v ntpdate >/dev/null 2>&1; then ntpdate -u pool.ntp.org; "
+        "if command -v ntpdate >/dev/null 2>&1; then ntpdate -u pool.ntp.org; "
+        "elif command -v ntpdig >/dev/null 2>&1; then ntpdig -s pool.ntp.org; "
         "elif command -v ntpd >/dev/null 2>&1; then ntpd -gq; "
         "elif command -v timedatectl >/dev/null 2>&1; then timedatectl set-ntp true; "
         "else exit 127; fi"
@@ -2121,11 +2118,25 @@ def _write_dns_config(cfg: InstallConfig, rootp: Path, *, keep_existing: bool) -
 
 
 def _generate_locales(cfg: InstallConfig, runner: Runner, root: str) -> None:
-    """Run locale-gen inside the chroot with LANG=C. Never abort the installer."""
+    """Handbook-style locale-gen, then activate UTF-8 before any locale set/emerge.
+
+    ``locale-gen`` runs under bare C (safe while archives are missing). After
+    that, export LANG/LC_ALL to a concrete UTF-8 locale and only then run
+    ``eselect locale set`` — otherwise Portage/localectl warn about an
+    ambiguous C locale. Never abort the installer on soft locale failures.
+    """
     if cfg.stage_variant == "musl":
         ui.info("musl stage: skipping glibc locale-gen")
         return
-    ui.chapter("8", "Generating locales (LANG=C)", "https://wiki.gentoo.org/wiki/Handbook:AMD64/Installation/System")
+    utf8 = _installer_utf8_locale(cfg)
+    loc = shlex.quote(utf8)
+    short = shlex.quote(utf8.split(".")[0])
+    ui.chapter(
+        "8",
+        f"Generating locales → {utf8}",
+        "https://wiki.gentoo.org/wiki/Handbook:AMD64/Installation/System",
+    )
+    # Step 1: localedef under C (archives not ready yet).
     runner.run(
         _chroot_env_argv(
             "chroot",
@@ -2136,16 +2147,21 @@ def _generate_locales(cfg: InstallConfig, runner: Runner, root: str) -> None:
         ),
         check=False,
     )
-    utf8 = _installer_utf8_locale(cfg)
-    loc = shlex.quote(utf8)
-    short = shlex.quote(utf8.split(".")[0])
+    # Step 2: activate UTF-8 in-env, then eselect (never leave LANG=C here).
     runner.run(
         _chroot_env_argv(
             "chroot",
             root,
             "/bin/bash",
             "-c",
-            f"eselect locale set {loc} || eselect locale set {short} || true",
+            (
+                f"export LANG={loc}; export LC_ALL={loc}; "
+                f'case "$LANG" in C|POSIX|"") '
+                f'echo ">> refuse locale set under bare LANG=$LANG" >&2; exit 1 ;; esac; '
+                f"eselect locale set {loc} || eselect locale set {short} || true; "
+                f'echo ">> host locale-gen done; LANG=$LANG LC_ALL=$LC_ALL"'
+            ),
+            locale=utf8,
         ),
         check=False,
     )
@@ -4118,6 +4134,9 @@ def _locale_prep_script(cfg: InstallConfig) -> str:
 echo ">> musl: set UTF-8 locale env for Portage (no glibc locale-gen)"
 export LANG={q}
 export LC_ALL={q}
+case "$LANG" in
+  C|POSIX|"") echo ">> refuse emerge under ambiguous LANG='$LANG' (need UTF-8)" >&2; exit 1 ;;
+esac
 echo ">> installer locale for Portage: $LANG"
 """
     # Ensure the chosen UTF-8 line exists even if locale.gen was trimmed on resume.
@@ -4143,6 +4162,13 @@ if ! locale -a 2>/dev/null | grep -qiE "^$(echo "$LANG" | tr '[:upper:]' '[:lowe
     export LC_ALL=C.UTF-8
   fi
 fi
+# Refuse bare C/POSIX before emerge — Portage warns and points at localectl.
+case "$LANG" in
+  C|POSIX|"") echo ">> refuse emerge under ambiguous LANG='$LANG' (need UTF-8)" >&2; exit 1 ;;
+esac
+case "$LC_ALL" in
+  C|POSIX|"") echo ">> refuse emerge under ambiguous LC_ALL='$LC_ALL' (need UTF-8)" >&2; exit 1 ;;
+esac
 echo ">> installer locale for Portage: $LANG"
 """
 
@@ -4912,7 +4938,8 @@ emerge --ask=n --emptytree @system || true
 # Locales, hostname, timezone, keymap, make.conf are written by the host.
 # This script must never `source /etc/profile` (debuginfod nounset + FEATURES).
 # Host launches this script with a UTF-8 locale after locale-gen. Keep a brief
-# C fallback only until locale_prep reasserts UTF-8 before any emerge/sync.
+# C fallback only until locale_prep reasserts UTF-8 before any emerge/sync
+# (avoids Portage "ambiguous locale … localectl" once emerge starts).
 set +eu
 unset FEATURES
 unset PORTAGE_FEATURES
@@ -4920,7 +4947,7 @@ export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
 # Prefer the wrapper locale when it is already UTF-8; else C until locale_prep.
 case "${{LANG:-C}}" in
   C|POSIX|"") export LANG=C; export LC_ALL=C ;;
-  *) export LC_ALL="${{LC_ALL:-$LANG}}" ;;
+  *) export LANG="${{LANG}}"; export LC_ALL="${{LC_ALL:-$LANG}}" ;;
 esac
 export DEBUGINFOD_URLS="${{DEBUGINFOD_URLS:-}}"
 export DEBUGINFOD_CERT_PATH="${{DEBUGINFOD_CERT_PATH:-}}"
