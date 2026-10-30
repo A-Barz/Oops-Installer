@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import unittest
 
 from gentoo_installer.config import InstallConfig
@@ -85,8 +86,34 @@ class MakeProfileSymlinkTests(unittest.TestCase):
         self.assertLess(link, eselect)
         self.assertLess(eselect, call)
         self.assertLess(call, emerge)
+        # Full portage_prepare (emerge --help) stays after profile; sed-only
+        # sanitize_binpkg_respect_use runs earlier so the first package emerge
+        # never sees unknown --binpkg-respect-use in make.conf.
         self.assertNotIn("\nportage_prepare\n", script[:profile])
+        sanitize = script.find("\nsanitize_binpkg_respect_use\n")
+        self.assertGreaterEqual(sanitize, 0)
+        self.assertLess(sanitize, profile)
         self.assertIn('local dest="/var/db/repos/gentoo/profiles/${profile}"', script)
+
+    def test_no_package_emerge_before_binpkg_respect_use_sanitize(self) -> None:
+        script = render_chroot_script(
+            _cfg(sync_method="git", window_managers=["gui-wm/niri"]),
+            {"root": "/dev/vda2", "esp": "/dev/vda1"},
+        )
+        sanitize = script.find(">> sanitize make.conf before first emerge")
+        self.assertGreaterEqual(sanitize, 0)
+        call = script.find("\nsanitize_binpkg_respect_use\n", sanitize)
+        self.assertGreaterEqual(call, 0)
+        for match in re.finditer(r"(?m)^emerge (?!--help)", script):
+            self.assertGreaterEqual(
+                match.start(),
+                call,
+                f"package emerge before make.conf sanitize: {match.group(0)!r}",
+            )
+            break
+        first_pkg = script.find("emerge --ask=n --verbose --noreplace")
+        self.assertGreaterEqual(first_pkg, 0)
+        self.assertLess(call, first_pkg)
 
     def test_profile_ok_requires_eselect_success(self) -> None:
         script = _profile_set_script(_cfg())
