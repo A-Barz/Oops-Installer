@@ -4035,6 +4035,27 @@ def _git_unmask_text() -> str:
     return f"{GIT_ATOM}\n"
 
 
+def _portage_oneshot_script(*, reason: str) -> str:
+    """Fail-closed Handbook oneshot of ``sys-apps/portage``.
+
+    Never uses ``$NR`` / ``--noreplace`` — resume must still upgrade Portage
+    when the tree is newer than the stage3 binary. On failure, retries from
+    source (``--usepkg=n``) then exits.
+    """
+    return f"""
+echo ">> emerge Portage oneshot ({reason})"
+unset FEATURES
+if ! emerge --ask=n --oneshot --verbose sys-apps/portage; then
+  echo ">> Portage oneshot failed; retrying from source" >&2
+  disable_binpkgs
+  emerge --ask=n --oneshot --verbose --usepkg=n --getbinpkg=n sys-apps/portage || {{
+    echo ">> required Portage oneshot failed ({reason})" >&2
+    exit 1
+  }}
+fi
+"""
+
+
 def _seed_gentoo_tree_script(*, for_atom: str = GIT_ATOM) -> str:
     """Git-free webrsync/rsync seed when stage3 left no usable gentoo tree.
 
@@ -4091,21 +4112,26 @@ echo ">> gentoo tree/profile precondition OK for {for_atom}"
 
 
 def _emerge_git_block(cfg: InstallConfig, *, reason: str) -> str:
-    """Seed tree if needed, then keyword/unmask + UTF-8 + emerge_one of git.
+    """Seed tree if needed, oneshot Portage, then keyword/unmask + emerge git.
 
     Always asserts a concrete UTF-8 LANG/LC_ALL (never bare C), seeds a missing
     gentoo tree via ``emerge-webrsync`` / ``emerge --sync`` (git-free), fails
-    closed if seed still leaves no profiles/ebuilds, links make.profile, then
-    either skips emerge when ``git`` is already on PATH or runs git through
-    ``emerge_one`` (SIGILL / ``--usepkg=n`` retry) with optional oneshot
-    autounmask when ``emerge -pv`` shows keyword masks. On failure dumps
-    tree/profile/``emerge -pv`` lines prefixed with ``>>`` for the host filter.
+    closed if seed still leaves no profiles/ebuilds, links make.profile, runs a
+    fail-closed Portage oneshot *before* any ``emerge -pv`` / ``emerge_one`` of
+    git (clears the handbook nag after seed), then either skips emerge when
+    ``git`` is already on PATH or runs git through ``emerge_one`` (SIGILL /
+    ``--usepkg=n`` retry) with optional oneshot autounmask when ``emerge -pv``
+    shows keyword masks. On failure dumps tree/profile/``emerge -pv`` lines
+    prefixed with ``>>`` for the host filter.
     """
     utf8 = shlex.quote(_installer_utf8_locale(cfg))
     kw = _git_keyword_text(cfg).rstrip("\n")
     um = _git_unmask_text().rstrip("\n")
     pre_quoted = " ".join(shlex.quote(path) for path in _profile_candidates(cfg))
     seed = _seed_gentoo_tree_script(for_atom=GIT_ATOM).rstrip("\n")
+    early_portage = _portage_oneshot_script(
+        reason="before first emerge after tree/profile ready"
+    ).rstrip("\n")
     return f"""
 echo ">> ensure {GIT_ATOM} ({reason})"
 # Never emerge git under ambiguous LANG=C from the installer env wrapper.
@@ -4129,6 +4155,8 @@ if ! profile_has_marker /etc/portage/make.profile; then
   ls -ld /etc/portage/make.profile 2>&1 | while IFS= read -r _line || [ -n "$_line" ]; do echo ">> $_line" >&2; done || true
   exit 1
 fi
+# Handbook: oneshot Portage once the tree+profile exist, before other emerges.
+{early_portage}
 # Some desktop stage3s already ship git — still require the seeded tree above.
 if command -v git >/dev/null 2>&1; then
   echo ">> git already on PATH ($(command -v git)); skip emerge {GIT_ATOM}"
@@ -5086,11 +5114,9 @@ unset FEATURES
 unset FEATURES
 portage_prepare
 {bootstrap}
-echo ">> emerge Portage"
-emerge --ask=n --oneshot --verbose $NR sys-apps/portage || true
+{_portage_oneshot_script(reason="after sync/profile (Handbook final tree)")}
 unset FEATURES
 {overlay_block}
-emerge --ask=n --oneshot --verbose $NR sys-apps/portage || true
 unset FEATURES
 {locale_eselect}
 unset FEATURES
@@ -5447,14 +5473,35 @@ def _overlay_script(cfg: InstallConfig) -> str:
     ]
     for ov in overlays:
         qov = shlex.quote(ov)
+        qdir = shlex.quote(f"/var/db/repos/{ov}")
+        # Word-ish match on list -i; overlay names are simple (guru, suckless-extra).
+        ov_re = re.escape(ov)
         lines.append("unset FEATURES")
+        # Idempotent: resume re-runs this block; "already enabled" must not be fatal.
         lines.append(
-            f"eselect repository enable {qov} || {{ "
-            f'echo ">> failed to enable overlay {ov}" >&2; exit 1; }}'
+            f"if eselect repository list -i 2>/dev/null | grep -Eq '{ov_re}'; then\n"
+            f"  echo \">> overlay {ov} already enabled; skip enable\"\n"
+            f"else\n"
+            f"  eselect repository enable {qov} || {{\n"
+            f"    if eselect repository list -i 2>/dev/null | grep -Eq '{ov_re}' "
+            f"|| [ -d {qdir} ]; then\n"
+            f"      echo \">> overlay {ov} already enabled/present; continue\"\n"
+            f"    else\n"
+            f"      echo \">> failed to enable overlay {ov}\" >&2\n"
+            f"      exit 1\n"
+            f"    fi\n"
+            f"  }}\n"
+            f"fi"
         )
         lines.append(
-            f"eselect repository list -i 2>/dev/null | grep -E '{re.escape(ov)}' >/dev/null || {{ "
-            f'echo ">> overlay {ov} not listed as installed after enable" >&2; exit 1; }}'
+            f"if ! eselect repository list -i 2>/dev/null | grep -Eq '{ov_re}'; then\n"
+            f"  if [ -d {qdir} ]; then\n"
+            f"    echo \">> overlay {ov} present at {qdir}; continue\"\n"
+            f"  else\n"
+            f"    echo \">> overlay {ov} not listed as installed after enable\" >&2\n"
+            f"    exit 1\n"
+            f"  fi\n"
+            f"fi"
         )
         lines.append("unset FEATURES")
         lines.append(

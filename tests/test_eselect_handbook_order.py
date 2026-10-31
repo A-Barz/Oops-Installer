@@ -65,6 +65,7 @@ class EselectHandbookOrderTests(unittest.TestCase):
         self.assertGreaterEqual(mkdir, 0)
         self.assertLess(mkdir, enable)
         self.assertIn("eselect repository list -i", script)
+        self.assertIn("already enabled; skip enable", script)
 
     def test_chroot_handbook_eselect_order(self) -> None:
         cfg = _cfg(window_managers=["gui-wm/niri"], shell="fish", sync_method="git")
