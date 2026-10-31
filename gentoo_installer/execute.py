@@ -3146,9 +3146,28 @@ portage_prepare() {
     sanitize_binpkg_respect_use
     emerge --help >/tmp/emerge-help.txt 2>/tmp/emerge-help.err || true
   fi
+  # =y when Portage documents the option: same safe ignore of USE-mismatched
+  # binpkgs as the default, but silences the NOTE. Never =n (force-binpkg).
+  # Leave empty only when unsupported so stage3 emerge does not abort.
   if grep -q 'binpkg-respect-use' /tmp/emerge-help.txt 2>/dev/null; then
     RESPECT_USE="--binpkg-respect-use=y"
   fi
+  _binhost_usepkg=0
+  for _conf in /etc/portage/make.conf /etc/portage/make.conf/*; do
+    [ -f "$_conf" ] || continue
+    if grep -Eq -- '--(getbinpkg|usepkg)( |")' "$_conf" 2>/dev/null; then
+      _binhost_usepkg=1
+      break
+    fi
+  done
+  if [ "$_binhost_usepkg" -eq 1 ]; then
+    if [ -n "$RESPECT_USE" ]; then
+      echo ">> binhost/usepkg on; RESPECT_USE=$RESPECT_USE"
+    else
+      echo ">> binhost/usepkg on; RESPECT_USE empty (Portage lacks --binpkg-respect-use)"
+    fi
+  fi
+  unset _binhost_usepkg _conf
   rm -f /tmp/emerge-help.txt /tmp/emerge-help.err
 }
 # emerge --help and eselect both load Portage. Portage prints
@@ -3186,7 +3205,7 @@ link_make_profile() {
 dump_world_emerge_failure() {
   local status="${1:-?}"
   echo ">> @world Portage failure dump (exit $status) — detail follows" >&2
-  echo ">> RESPECT_USE=[${RESPECT_USE:-}] (empty on @world so binpkg-respect-use NOTE stays visible; never =n)" >&2
+  echo ">> RESPECT_USE=[${RESPECT_USE:-}] (=y when Portage supports it; never =n)" >&2
   echo ">> USE=${USE:-}" >&2
   if [ -f /etc/portage/make.conf ]; then
     echo ">> make.conf USE / EMERGE_DEFAULT_OPTS / FEATURES:" >&2
@@ -5307,10 +5326,11 @@ unset FEATURES
 unset FEATURES
 {mirrorselect_block}
 echo ">> emerge @world"
-# Omit $RESPECT_USE on @world so Portage keeps the binpkg-respect-use NOTE when
-# USE-mismatched binpkgs are ignored. Do not pass --binpkg-respect-use=n
-# (force-binpkg; wiki: breaks the system). emerge_one still uses $RESPECT_USE.
-emerge --verbose --update --deep --newuse --keep-going $NR @world
+# Pass $RESPECT_USE (=y when Portage supports it) so binhost/usepkg @world
+# silences the ignore-NOTE instead of the weak default path. Never =n
+# (force mismatched binpkgs; wiki: breaks the system). Empty only when
+# unsupported. On failure, retry once from source (--usepkg=n).
+emerge --verbose --update --deep --newuse --keep-going $RESPECT_USE $NR @world
 world_status=$?
 if [ "$world_status" -ne 0 ]; then
   if [ "$world_status" -eq 132 ]; then
