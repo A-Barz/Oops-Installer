@@ -3181,6 +3181,38 @@ link_make_profile() {
   echo ">> ${link} -> $(readlink "$link")"
 }
 
+# Dump Portage detail after a failed emerge @world so host log filter keeps it
+# (every line prefixed with >>). Mirrors the git emerge failure dump.
+dump_world_emerge_failure() {
+  local status="${1:-?}"
+  echo ">> @world Portage failure dump (exit $status) — detail follows" >&2
+  echo ">> RESPECT_USE=[${RESPECT_USE:-}] (empty on @world so binpkg-respect-use NOTE stays visible; never =n)" >&2
+  echo ">> USE=${USE:-}" >&2
+  if [ -f /etc/portage/make.conf ]; then
+    echo ">> make.conf USE / EMERGE_DEFAULT_OPTS / FEATURES:" >&2
+    grep -E '^(USE|EMERGE_DEFAULT_OPTS|FEATURES)=' /etc/portage/make.conf 2>&1 | while IFS= read -r _line || [ -n "$_line" ]; do echo ">> $_line" >&2; done || true
+  fi
+  echo ">> emerge --info (head):" >&2
+  emerge --info 2>&1 | head -n 60 | while IFS= read -r _line || [ -n "$_line" ]; do echo ">> $_line" >&2; done || true
+  echo ">> Portage !!! / Failed to emerge / ERROR (emerge.log):" >&2
+  if [ -f /var/log/emerge.log ]; then
+    grep -E '!!!|Failed to emerge|\\* ERROR:' /var/log/emerge.log 2>/dev/null | tail -n 40 | while IFS= read -r _line || [ -n "$_line" ]; do echo ">> $_line" >&2; done || true
+  else
+    echo ">> no /var/log/emerge.log" >&2
+  fi
+  echo ">> newest build.log paths:" >&2
+  _world_blogs=$(ls -1t /var/tmp/portage/*/temp/build.log 2>/dev/null | head -n 5)
+  if [ -n "$_world_blogs" ]; then
+    printf '%s\\n' "$_world_blogs" | while IFS= read -r _blog || [ -n "$_blog" ]; do
+      [ -n "$_blog" ] && [ -f "$_blog" ] || continue
+      echo ">> $_blog (last 80 lines)" >&2
+      tail -n 80 "$_blog" 2>&1 | while IFS= read -r _line || [ -n "$_line" ]; do echo ">> $_line" >&2; done || true
+    done
+  else
+    echo ">> no /var/tmp/portage/*/temp/build.log yet (often dep/mask/USE calculation)" >&2
+  fi
+}
+
 # One atom. A batch emerge treats one masked or missing ebuild as a failed
 # calculation and installs nothing else in that command.
 emerge_one() {
@@ -5275,18 +5307,25 @@ unset FEATURES
 unset FEATURES
 {mirrorselect_block}
 echo ">> emerge @world"
-emerge --verbose --update --deep --newuse --keep-going $RESPECT_USE $NR @world
+# Omit $RESPECT_USE on @world so Portage keeps the binpkg-respect-use NOTE when
+# USE-mismatched binpkgs are ignored. Do not pass --binpkg-respect-use=n
+# (force-binpkg; wiki: breaks the system). emerge_one still uses $RESPECT_USE.
+emerge --verbose --update --deep --newuse --keep-going $NR @world
 world_status=$?
-if [ "$world_status" -eq 132 ]; then
-  echo ">> @world died with Illegal instruction; rebuilding from source"
-  disable_binpkgs
+if [ "$world_status" -ne 0 ]; then
+  if [ "$world_status" -eq 132 ]; then
+    echo ">> @world died with Illegal instruction; rebuilding from source" >&2
+    disable_binpkgs
+  else
+    echo ">> emerge @world failed ($world_status); retrying once from source (--usepkg=n)" >&2
+  fi
+  dump_world_emerge_failure "$world_status"
   emerge --verbose --update --deep --newuse --keep-going --usepkg=n --getbinpkg=n @world || {{
-    echo ">> @world source rebuild failed" >&2
+    _world_retry_status=$?
+    echo ">> @world source rebuild failed ($_world_retry_status)" >&2
+    dump_world_emerge_failure "$_world_retry_status"
     exit 1
   }}
-elif [ "$world_status" -ne 0 ]; then
-  echo ">> emerge @world failed ($world_status)" >&2
-  exit 1
 fi
 echo ">> emerge selected packages"
 unset FEATURES

@@ -92,8 +92,17 @@ class WorldFailClosedTests(unittest.TestCase):
         world = script.find(">> emerge @world")
         fail = script.find("emerge @world failed", world)
         self.assertGreater(fail, world)
-        chunk = script[fail : fail + 200]
+        # Non-zero @world dumps Portage detail, retries --usepkg=n once, then
+        # fails closed if the source retry still fails.
+        self.assertIn("dump_world_emerge_failure", script)
+        retry_fail = script.find("@world source rebuild failed", fail)
+        self.assertGreater(retry_fail, fail)
+        chunk = script[retry_fail : retry_fail + 280]
         self.assertIn("exit 1", chunk)
+        self.assertLess(
+            script.find("dump_world_emerge_failure \"$world_status\"", fail),
+            retry_fail,
+        )
 
 
 class RequiredWindowManagerTests(unittest.TestCase):
