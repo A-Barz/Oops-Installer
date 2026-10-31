@@ -3576,17 +3576,15 @@ def _resolved_dm(cfg: InstallConfig) -> str:
 
 
 def ensure_boot_to_greeter(cfg: InstallConfig) -> None:
-    """Mutate cfg so Wayland/shell installs always enable greetd with a session WM.
+    """Mutate cfg so Wayland installs always enable greetd with a session WM.
 
     Called before chroot script generation and by greeter assertion tests. A
     TTY-only boot after choosing a Wayland compositor is a project failure.
+    Portage shells were removed (OI-79); legacy shell ids are coerced to none.
     """
+    cfg.shell = "none"
     wms = list(cfg.window_managers or [])
-    shell = getattr(cfg, "shell", "") or "none"
-    if shell != "none" and not catalog.wayland_selected(wms):
-        if catalog.FALLBACK_WAYLAND_WM not in wms:
-            wms.append(catalog.FALLBACK_WAYLAND_WM)
-        cfg.window_managers = wms
+    shell = "none"
     if catalog.needs_login_greeter(cfg.window_managers, shell, _graphical_atoms(cfg)):
         cfg.display_manager = "greetd"
         sessions = catalog.login_sessions(
@@ -3684,11 +3682,9 @@ def _enabled_dm_services(cfg: InstallConfig) -> set[str]:
 
 
 def _greetd_uses_noctalia(cfg: InstallConfig) -> bool:
-    """Noctalia Shell brings its own greetd greeter."""
-    if getattr(cfg, "shell", "") == "noctalia":
-        return True
-    atoms = set(_graphical_atoms(cfg))
-    return "gui-apps/noctalia" in atoms or "gui-apps/noctalia-greeter" in atoms
+    """Noctalia/DMS Portage shells were removed; always use gtkgreet + labwc."""
+    del cfg
+    return False
 
 
 def _accounts_daemon_probe() -> tuple[str, ...]:
@@ -6202,7 +6198,8 @@ def _user_session_script(cfg: InstallConfig) -> str:
     if (hypr_choice and hypr_choice.repo) or (niri_choice and niri_choice.repo):
         lines += _wm_dotfile_fetch_lines()
     if "gui-wm/hyprland" in wms:
-        lines.append('  hypr="$userhome/.config/hypr/hyprland.conf"')
+        # hyproverlay tip is Lua-only from Hyprland 0.57; write hyprland.lua.
+        lines.append('  hypr="$userhome/.config/hypr/hyprland.lua"')
         if hypr_choice and hypr_choice.repo:
             lines += _dotfile_attempt(hypr_choice, '"$userhome/.config/hypr"', "hypr_dots", "Hyprland")
             lines.append('  if [ "$hypr_dots" != 1 ]; then')
@@ -6210,14 +6207,17 @@ def _user_session_script(cfg: InstallConfig) -> str:
             '  install -d -m 755 "$userhome/.config/hypr"',
             '  if [ ! -f "$hypr" ]; then',
             '    cat > "$hypr" << EOF',
-            "monitor=,preferred,auto,1",
-            "input {",
-            f"  kb_layout = {keymap}",
-            "}",
-        ]
-        if shell:
-            lines.append(f"exec-once = {shell}")
-        lines += [
+            "hl.monitor({",
+            '    output = "",',
+            '    mode = "preferred",',
+            '    position = "auto",',
+            "    scale = 1,",
+            "})",
+            "hl.config({",
+            "    input = {",
+            f'        kb_layout = "{keymap}",',
+            "    },",
+            "})",
             "EOF",
             f'    chown -R {user}:{user} "$userhome/.config/hypr" || true',
             "  fi",
@@ -6225,14 +6225,6 @@ def _user_session_script(cfg: InstallConfig) -> str:
         if hypr_choice and hypr_choice.repo:
             lines.append("  fi")
             lines.append(f'  chown -R {user}:{user} "$userhome/.config/hypr" || true')
-        if shell:
-            lines += [
-                f'  if [ -f "$hypr" ] && ! grep -q {shlex.quote(shell)} "$hypr"; then',
-                f'    echo {shlex.quote("exec-once = " + shell)} >> "$hypr"',
-                '  elif [ ! -f "$hypr" ] && [ -f "$userhome/.config/hypr/hyprland.lua" ]; then',
-                '    echo ">> Hyprland is using hyprland.lua; the chosen shell was not added to that file" >&2',
-                "  fi",
-            ]
     if "gui-wm/sway" in wms:
         lines += [
             '  install -d -m 755 "$userhome/.config/sway"',

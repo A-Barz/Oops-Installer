@@ -166,8 +166,6 @@ class OfferableAtomKeywordTests(unittest.TestCase):
                 cfg.display_manager = "greetd"
                 cfg.selected_packages = [bare]
                 cfg.extra_packages = [bare]
-            if bare in catalog.shell_atoms("noctalia") or bare == catalog.NOCTALIA_GREETER.atom:
-                cfg.shell = "noctalia"
             if bare in catalog.nonfree_codec_atoms():
                 cfg.nonfree_codecs = True
             ensure_boot_to_greeter(cfg)

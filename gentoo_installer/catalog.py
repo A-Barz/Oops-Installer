@@ -149,30 +149,24 @@ _SESSION_OVERRIDE: dict[str, tuple[str, str, str] | None] = {
     "x11-wm/i3": ("i3", "i3", "x11"),
 }
 
-# Shells the wizard can select. Noctalia lives in GURU; the overlay is enabled
-# only after this choice, and GURU is not a package-list option.
-# DMS (DankMaterialShell) was removed — no ebuild on GURU master (see REMOVED_GURU_ATOMS).
+# Wayland "shells" (Noctalia / DMS) are no longer offered. cfg.shell stays
+# "none"; saved profiles that still say noctalia/dms must not emerge those atoms.
 SHELL_CHOICES: list[tuple[str, str]] = [
     ("none", "No shell — compositor plus shared utilities"),
-    ("noctalia", "Noctalia shell"),
 ]
 
-SHELL_PACKAGES: dict[str, list[Pkg]] = {
-    "noctalia": [Pkg("gui-apps/noctalia", "Noctalia shell", "guru")],
-}
+SHELL_PACKAGES: dict[str, list[Pkg]] = {}
 
-# greetd frontend used only when Noctalia is the shell and a login manager is enabled.
+# Kept for greeter helpers / legacy profile detection; never emerged (REMOVED_GURU).
 NOCTALIA_GREETER = Pkg("gui-apps/noctalia-greeter", "Noctalia greeter for greetd", "guru")
 
-SHELL_EXEC: dict[str, str] = {
-    "noctalia": "noctalia",
-}
+SHELL_EXEC: dict[str, str] = {}
 
 # Previously offered from GURU but not restored as menu options. A saved profile
-# or typed atom must not emerge them. Wizard-offered GURU WMs/shells are the
-# exception (see offered_guru_atoms). vscode/vscodium/helix now live in ::gentoo.
+# or typed atom must not emerge them. Wizard-offered GURU WMs are the exception
+# (see offered_guru_atoms). vscode/vscodium/helix now live in ::gentoo.
 # gui-apps/tuigreet stays here — greetd uses gtkgreet/labwc (no tuigreet branch).
-# noctalia-shell / dankmaterialshell: old shell atoms; tip tree uses gui-apps/noctalia.
+# noctalia / noctalia-greeter / noctalia-shell / dankmaterialshell: Portage shells dropped (OI-79).
 REMOVED_GURU_ATOMS = frozenset(
     {
         "gui-wm/cage",
@@ -182,6 +176,8 @@ REMOVED_GURU_ATOMS = frozenset(
         "gui-apps/nwg-look",
         "x11-misc/ly",
         "gui-apps/tuigreet",
+        "gui-apps/noctalia",
+        "gui-apps/noctalia-greeter",
         "gui-apps/noctalia-shell",
         "gui-apps/dankmaterialshell",
         "www-client/brave-bin",
@@ -478,13 +474,12 @@ def shell_exec(shell: str) -> str:
 
 
 def offered_guru_atoms(shell: str) -> set[str]:
-    """GURU atoms the wizard may emerge: shells, greeter, and offered GURU WMs."""
-    allowed = set(shell_atoms(shell))
+    """GURU atoms the wizard may emerge: offered GURU WMs (shells removed)."""
+    del shell  # Legacy profiles may still pass a shell id; shells are never emerged.
+    allowed: set[str] = set()
     for pkg in WINDOW_MANAGERS:
         if pkg.overlay == "guru":
             allowed.add(pkg.atom)
-    if shell == "noctalia":
-        allowed.add(NOCTALIA_GREETER.atom)
     return allowed
 
 
@@ -1228,15 +1223,15 @@ class DotfileChoice:
     packages: tuple[str, ...] = ()
 
 
-# Exactly two choices per compositor: installer default plus the top-rated
-# GitHub config. Star counts checked on GitHub, 2026-10-25. Paths are the
-# compositor config only (not waybar, the shell, or the upstream install script).
+# Hyprland choices are Lua-compatible with hyproverlay tip (0.55+; 0.57 Lua-only).
+# Paths are the compositor config only (not waybar, Quickshell, or upstream install.sh).
+# HyDE is omitted: its hyprland.lua hard-requires a full HyDE install under ~/.local/share/hypr.
 WM_DOTFILES: dict[str, tuple[DotfileChoice, ...]] = {
     "gui-wm/hyprland": (
-        DotfileChoice("installer", "Installer default — keymap and a short Hyprland config"),
+        DotfileChoice("installer", "Installer default — keymap and a short Hyprland Lua config"),
         DotfileChoice(
             "end-4",
-            "end-4/dots-hyprland — most-starred Hyprland dots",
+            "end-4/dots-hyprland — most-starred Hyprland dots (Lua)",
             "end-4/dots-hyprland",
             "main",
             "dots/.config/hypr",
@@ -1256,6 +1251,22 @@ WM_DOTFILES: dict[str, tuple[DotfileChoice, ...]] = {
                 "media-fonts/jetbrains-mono",
                 "sys-process/btop",
                 "app-misc/jq",
+            ),
+        ),
+        DotfileChoice(
+            "ml4w",
+            "mylinuxforwork/dotfiles — ML4W Hyprland (Lua)",
+            "mylinuxforwork/dotfiles",
+            "main",
+            "dotfiles/.config/hypr",
+            ".config/hypr",
+            packages=(
+                "gui-apps/foot",
+                "gui-apps/waybar",
+                "gui-apps/hypridle",
+                "gui-apps/wl-clipboard",
+                "gnome-extra/polkit-gnome",
+                "media-fonts/jetbrains-mono",
             ),
         ),
     ),
@@ -1278,8 +1289,8 @@ WM_DOTFILES: dict[str, tuple[DotfileChoice, ...]] = {
     ),
 }
 
-# Hard cap so a longer WM_DOTFILES entry still only offers two options.
-_MAX_DOTFILE_CHOICES = 2
+# Cap: installer + up to two starred GitHub configs for Hyprland.
+_MAX_DOTFILE_CHOICES = 3
 
 
 def dotfile_choices(atom: str) -> list[DotfileChoice]:
@@ -1365,8 +1376,8 @@ def enforce_firewall_mutual_exclusion(
     return False, selected, extra, warnings
 
 
-# Noctalia already provides the bar, launcher, and its own config.
-DOTFILE_SHELLS_SKIP = frozenset({"noctalia"})
+# Portage shells are gone; GitHub compositor configs are always offered.
+DOTFILE_SHELLS_SKIP = frozenset()
 
 
 def dotfiles_skipped(shell: str) -> bool:
@@ -1412,7 +1423,6 @@ def _known_packages() -> list[Pkg]:
     pkgs.extend(PLYMOUTH_THEME_PACKAGES.values())
     for group in list(WM_REQUIREMENTS.values()) + list(SHELL_PACKAGES.values()):
         pkgs.extend(group)
-    pkgs.append(NOCTALIA_GREETER)
     return pkgs
 
 
