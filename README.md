@@ -198,8 +198,8 @@ No desktop environment. Browsers are optional (Firefox ESR soft-default in chapt
 | Ask | Options / notes | Default |
 |-----|-----------------|---------|
 | Compositors / WMs | checklist (below) | empty / saved |
-| Wayland shell | `none`, `noctalia`, `dms` | `none` |
-| Dotfiles | Hyprland: `installer` \| `end-4`; Niri: `installer` \| `upstream`. Skipped for Noctalia/DMS | `installer` |
+| Wayland shell | `none`, `noctalia` | `none` |
+| Dotfiles | Hyprland: `installer` \| `end-4`; Niri: `installer` \| `upstream`. Skipped for Noctalia | `installer` |
 | PipeWire | yes/no | Yes if WM or shell |
 | Proprietary codecs | license accept for ugly/bad/libav, fdk-aac, faac, lame, ffmpeg | Off |
 
@@ -227,7 +227,7 @@ Optional **mise + small agent set** invite: first-login note only — no Quicksh
 | `x11-wm/dwm` | X11 |
 | `x11-wm/i3` | X11 |
 
-GURU is enabled when a GURU compositor or Noctalia/DMS is selected — not as a free overlay checklist row.
+GURU is enabled when a GURU compositor or Noctalia is selected — not as a free overlay checklist row.
 
 ### 12 — Suckless tools and popular apps
 
@@ -261,7 +261,7 @@ Summary table and time estimate → wipe warning → “Proceed?” → **re-typ
 
 **Greeter:** `gui-libs/greetd` plus gtkgreet+labwc, or `gui-apps/noctalia-greeter` with Noctalia (plus greetd user/group / display-manager-init as needed).
 
-**Shells:** `gui-apps/noctalia-shell` or `gui-apps/dankmaterialshell` (::guru) when chosen.
+**Shells:** `gui-apps/noctalia` (::guru) when Noctalia is chosen (binary `noctalia`).
 
 `nano` is installed on the new system. Dotfile choices may pull additional atoms the chosen config launches (upstream install scripts are not run).
 

@@ -229,7 +229,7 @@ class RandomComboGreeterTests(unittest.TestCase):
 
     WAYLAND_WMS = [pkg.atom for pkg in catalog.WAYLAND_COMPOSITORS]
     X11_WMS = [pkg.atom for pkg in catalog.X11_WINDOW_MANAGERS]
-    SHELLS = ["none", "noctalia", "dms"]
+    SHELLS = ["none", "noctalia"]
     KERNELS = ["gentoo-kernel-bin", "gentoo-kernel", "gentoo-sources", "cachyos-kernel-bin"]
     INITS = ["openrc", "systemd"]
     CODECS = [False, True]
@@ -286,7 +286,7 @@ class RandomComboGreeterTests(unittest.TestCase):
         )
         rich = _base_cfg(
             window_managers=["gui-wm/hyprland", "gui-wm/niri", "gui-wm/sway"],
-            shell="dms",
+            shell="noctalia",
             display_manager="none",  # must still become greetd
             pipewire=True,
             nonfree_codecs=True,

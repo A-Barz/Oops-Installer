@@ -111,9 +111,14 @@ class MakeProfileSymlinkTests(unittest.TestCase):
                 f"package emerge before make.conf sanitize: {match.group(0)!r}",
             )
             break
-        first_pkg = script.find("emerge --ask=n --verbose --noreplace")
+        # Overlay helpers (git / eselect-repository) go through emerge_one.
+        first_pkg = script.find("emerge_one ", call)
         self.assertGreaterEqual(first_pkg, 0)
         self.assertLess(call, first_pkg)
+        self.assertNotIn(
+            "emerge --ask=n --verbose --noreplace app-eselect/eselect-repository",
+            script,
+        )
 
     def test_profile_ok_requires_eselect_success(self) -> None:
         script = _profile_set_script(_cfg())
