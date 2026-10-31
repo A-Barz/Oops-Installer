@@ -140,8 +140,8 @@ class StaleWineOverlayTests(unittest.TestCase):
         # Still enables when the name is present in the remote list.
         self.assertIn("eselect repository enable suckless-extra", script)
 
-    def test_installer_rev_79(self) -> None:
-        self.assertEqual(INSTALLER_REV, 79)
+    def test_installer_rev_80(self) -> None:
+        self.assertEqual(INSTALLER_REV, 80)
 
 
 if __name__ == "__main__":
