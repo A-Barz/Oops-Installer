@@ -31,7 +31,7 @@ def _cfg(**kwargs) -> InstallConfig:
 
 class CatalogueAtomEmergeFixesTests(unittest.TestCase):
     def test_rev_bumped(self) -> None:
-        self.assertEqual(INSTALLER_REV, 83)
+        self.assertGreaterEqual(INSTALLER_REV, 83)
 
     def test_noctalia_uses_tip_guru_atom_and_exec(self) -> None:
         self.assertEqual(catalog.shell_atoms("noctalia"), ["gui-apps/noctalia"])

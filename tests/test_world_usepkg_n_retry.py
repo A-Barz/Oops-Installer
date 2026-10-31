@@ -28,7 +28,7 @@ def _cfg(**kwargs: object) -> InstallConfig:
 
 class WorldUsepkgNRetryTests(unittest.TestCase):
     def test_rev_bumped_for_respect_use_world(self) -> None:
-        self.assertGreaterEqual(INSTALLER_REV, 83)
+        self.assertGreaterEqual(INSTALLER_REV, 84)
 
     def test_primary_world_passes_respect_use(self) -> None:
         script = render_chroot_script(_cfg(binhost=True), {"root": "/dev/vda2", "esp": "/dev/vda1"})
