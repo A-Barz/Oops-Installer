@@ -178,7 +178,8 @@ class InstallConfig:
     display_manager: str = "auto"
     pipewire: bool = True
     browser: str = "none"
-    # none | noctalia. Noctalia pulls the GURU overlay itself.
+    # Always "none". Portage Wayland shells (Noctalia/DMS) were removed (OI-79).
+    # Saved profiles may still say noctalia/dms; execute must not emerge them.
     shell: str = "none"
     extra_packages: list[str] = field(default_factory=list)  # Final emerge set (atoms)
     selected_packages: list[str] = field(default_factory=list)  # Catalogue picks only

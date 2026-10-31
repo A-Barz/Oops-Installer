@@ -1,4 +1,4 @@
-"""OI-73: tip-tree shell / Hyprland portal atoms must match GURU + hyproverlay."""
+"""OI-73 / OI-79: Hyprland portal atoms; Portage shells removed; extras kept."""
 
 from __future__ import annotations
 
@@ -31,26 +31,33 @@ def _cfg(**kwargs) -> InstallConfig:
 
 class CatalogueAtomEmergeFixesTests(unittest.TestCase):
     def test_rev_bumped(self) -> None:
-        self.assertGreaterEqual(INSTALLER_REV, 83)
+        self.assertGreaterEqual(INSTALLER_REV, 86)
 
-    def test_noctalia_uses_tip_guru_atom_and_exec(self) -> None:
-        self.assertEqual(catalog.shell_atoms("noctalia"), ["gui-apps/noctalia"])
-        self.assertEqual(catalog.shell_exec("noctalia"), "noctalia")
-        self.assertIn(("noctalia", "Noctalia shell"), catalog.SHELL_CHOICES)
-        planned = set(_atoms_to_unmask(_cfg(shell="noctalia", window_managers=["gui-wm/labwc"])))
-        self.assertIn("gui-apps/noctalia", planned)
-        self.assertIn("gui-apps/noctalia-greeter", planned)
-        self.assertNotIn("gui-apps/noctalia-shell", planned)
-
-    def test_dms_hidden_and_old_shell_atoms_blocked(self) -> None:
+    def test_portage_shells_removed(self) -> None:
         choice_ids = {key for key, _ in catalog.SHELL_CHOICES}
+        self.assertEqual(choice_ids, {"none"})
+        self.assertEqual(catalog.SHELL_PACKAGES, {})
+        self.assertEqual(catalog.shell_atoms("noctalia"), [])
+        self.assertEqual(catalog.shell_exec("noctalia"), "")
         self.assertNotIn("dms", choice_ids)
-        self.assertNotIn("dms", catalog.SHELL_PACKAGES)
-        self.assertEqual(catalog.shell_atoms("dms"), [])
-        for dead in ("gui-apps/noctalia-shell", "gui-apps/dankmaterialshell"):
+        for dead in (
+            "gui-apps/noctalia",
+            "gui-apps/noctalia-greeter",
+            "gui-apps/noctalia-shell",
+            "gui-apps/dankmaterialshell",
+        ):
             self.assertIn(dead, catalog.REMOVED_GURU_ATOMS)
+            self.assertNotIn(dead, catalog.offered_guru_atoms("none"))
             self.assertNotIn(dead, catalog.offered_guru_atoms("noctalia"))
             self.assertNotIn(dead, catalog.offerable_portage_atoms())
+
+    def test_legacy_shell_profile_does_not_emerge_shell_atoms(self) -> None:
+        for shell in ("noctalia", "dms"):
+            cfg = _cfg(shell=shell, window_managers=["gui-wm/sway"])
+            planned = set(_atoms_to_unmask(cfg))
+            self.assertNotIn("gui-apps/noctalia", planned)
+            self.assertNotIn("gui-apps/noctalia-greeter", planned)
+            self.assertNotIn("gui-apps/dankmaterialshell", planned)
 
     def test_hyprland_portal_is_gui_libs(self) -> None:
         reqs = [pkg.atom for pkg in catalog.WM_REQUIREMENTS["gui-wm/hyprland"]]
@@ -59,15 +66,6 @@ class CatalogueAtomEmergeFixesTests(unittest.TestCase):
         planned = set(_atoms_to_unmask(_cfg(window_managers=["gui-wm/hyprland"])))
         self.assertIn("gui-libs/xdg-desktop-portal-hyprland", planned)
         self.assertNotIn("gui-apps/xdg-desktop-portal-hyprland", planned)
-
-    def test_legacy_dms_shell_does_not_queue_dead_atom(self) -> None:
-        # Saved profiles may still say shell=dms; must not hard-fail emerge.
-        cfg = _cfg(shell="dms", window_managers=["gui-wm/sway"])
-        planned = set(_atoms_to_unmask(cfg))
-        self.assertNotIn("gui-apps/dankmaterialshell", planned)
-        # Unknown shell alone no longer forces greeter; Wayland WMs still do.
-        self.assertFalse(catalog.needs_login_greeter([], "dms"))
-        self.assertTrue(catalog.needs_login_greeter(cfg.window_managers, cfg.shell))
 
     def test_eselect_repository_uses_emerge_one(self) -> None:
         script = _overlay_script(_cfg(window_managers=["gui-wm/niri"]))
@@ -82,13 +80,12 @@ class CatalogueAtomEmergeFixesTests(unittest.TestCase):
         )
         self.assertIn("emerge_one app-eselect/eselect-repository", chroot)
 
-    def test_extra_compositors_plymouth_flatpak_still_offered(self) -> None:
-        # Preference: do not strip Extra Compositors / DE metas / Plymouth / Flatpak.
+    def test_extra_compositors_plymouth_flatpak_chrony_still_offered(self) -> None:
+        # Preference: do not strip Extra Compositors / DE metas / Plymouth / Flatpak / chrony.
         wm_atoms = {pkg.atom for pkg in catalog.WAYLAND_COMPOSITORS}
         self.assertIn("gui-wm/wayfire", wm_atoms)
         self.assertIn("gui-wm/gamescope", wm_atoms)
         self.assertTrue(catalog.PLYMOUTH_THEME_PACKAGES)
-        # Flatpak apps remain as catalogue rows (pseudo-atoms).
         flatpak_rows = []
         for _key, _title, rows in catalog.CATEGORIES:
             flatpak_rows.extend(atom for atom, _ in rows if atom.startswith("flatpak-app/"))

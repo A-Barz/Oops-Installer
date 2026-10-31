@@ -99,13 +99,13 @@ class GreeterResolutionTests(unittest.TestCase):
         self.assertEqual(_resolved_dm(cfg), "none")
         self.assertEqual(greeter_boot_failures(cfg), [])
 
-    def test_shell_without_wm_gets_labwc_and_greetd(self) -> None:
+    def test_legacy_shell_without_wm_does_not_force_labwc(self) -> None:
+        # Portage shells removed: legacy shell=noctalia is coerced to none.
         cfg = _base_cfg(window_managers=[], shell="noctalia", display_manager="none")
         ensure_boot_to_greeter(cfg)
-        self.assertEqual(cfg.display_manager, "greetd")
-        self.assertIn("gui-wm/labwc", cfg.window_managers)
-        sessions = _login_sessions_for(cfg)
-        self.assertTrue(sessions)
+        self.assertEqual(cfg.shell, "none")
+        self.assertEqual(cfg.display_manager, "none")
+        self.assertNotIn("gui-wm/labwc", cfg.window_managers)
         self.assertEqual(greeter_boot_failures(cfg), [])
 
     def test_empty_wm_list_with_greetd_gets_fallback_session(self) -> None:
@@ -151,15 +151,16 @@ class GreeterResolutionTests(unittest.TestCase):
         self.assertIn("gtkgreet", script)
         self.assertEqual(greeter_boot_failures(cfg), [])
 
-    def test_noctalia_uses_noctalia_greeter(self) -> None:
+    def test_legacy_noctalia_shell_uses_gtkgreet(self) -> None:
         cfg = _base_cfg(
             window_managers=["gui-wm/hyprland"],
             shell="noctalia",
             display_manager="greetd",
         )
         script = _display_manager_script(cfg)
-        self.assertIn("noctalia-greeter", script)
-        self.assertNotIn("/etc/greetd/environments", script)
+        self.assertNotIn("noctalia-greeter", script)
+        self.assertIn("gtkgreet", script)
+        self.assertIn("/etc/greetd/environments", script)
         self.assertEqual(greeter_boot_failures(cfg), [])
 
     def test_final_checks_make_greeter_fatal(self) -> None:
@@ -229,7 +230,6 @@ class RandomComboGreeterTests(unittest.TestCase):
 
     WAYLAND_WMS = [pkg.atom for pkg in catalog.WAYLAND_COMPOSITORS]
     X11_WMS = [pkg.atom for pkg in catalog.X11_WINDOW_MANAGERS]
-    SHELLS = ["none", "noctalia"]
     KERNELS = ["gentoo-kernel-bin", "gentoo-kernel", "gentoo-sources", "cachyos-kernel-bin"]
     INITS = ["openrc", "systemd"]
     CODECS = [False, True]
@@ -247,12 +247,11 @@ class RandomComboGreeterTests(unittest.TestCase):
                     wms += rng.sample(self.X11_WMS, k=1)
             else:
                 wms = rng.sample(self.X11_WMS, k=rng.randint(1, 2))
-            shell = rng.choice(self.SHELLS) if wayland else "none"
             # Old profiles may still say none / auto for Wayland.
             dm = rng.choice(["greetd", "none", "auto"]) if wayland else "none"
             cfg = _base_cfg(
                 window_managers=list(wms),
-                shell=shell,
+                shell="none",
                 display_manager=dm,
                 init_system=rng.choice(self.INITS),
                 kernel=rng.choice(self.KERNELS),
@@ -263,7 +262,7 @@ class RandomComboGreeterTests(unittest.TestCase):
             )
             problems = greeter_boot_failures(cfg)
             if problems:
-                failures.append(f"combo {i}: wms={wms} shell={shell} dm={dm} → {problems}")
+                failures.append(f"combo {i}: wms={wms} dm={dm} → {problems}")
             if catalog.needs_login_greeter(cfg.window_managers, cfg.shell):
                 if _resolved_dm(cfg) != "greetd":
                     failures.append(f"combo {i}: expected greetd, got {_resolved_dm(cfg)}")
@@ -286,13 +285,14 @@ class RandomComboGreeterTests(unittest.TestCase):
         )
         rich = _base_cfg(
             window_managers=["gui-wm/hyprland", "gui-wm/niri", "gui-wm/sway"],
-            shell="noctalia",
+            shell="none",
             display_manager="none",  # must still become greetd
             pipewire=True,
             nonfree_codecs=True,
             selected_packages=["gui-apps/waybar", "sys-apps/flatpak", "www-client/qutebrowser"],
             init_system="systemd",
             kernel="cachyos-kernel-bin",
+            wm_dotfiles=["gui-wm/hyprland=end-4"],
         )
         self.assertEqual(greeter_boot_failures(minimal), [])
         self.assertEqual(greeter_boot_failures(rich), [])

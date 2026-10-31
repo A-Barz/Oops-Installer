@@ -1233,21 +1233,17 @@ def _wm_dotfiles(cfg: InstallConfig) -> None:
     """Ask for a GitHub config when Hyprland or Niri was selected."""
     if catalog.dotfiles_skipped(cfg.shell):
         cfg.wm_dotfiles = []
-        ui.info(
-            "Noctalia and DMS bring their own bar, launcher, and config, "
-            "so GitHub window-manager configs are skipped."
-        )
         return
     atoms = [atom for atom in cfg.window_managers if catalog.dotfile_choices(atom)]
     if not atoms:
         cfg.wm_dotfiles = []
         return
     ui.info(
-        "Window manager dotfiles. Each compositor has two choices: the installer default "
-        "and the top-rated GitHub config. "
-        "A GitHub choice is downloaded during the install from the latest commit on that project's branch. "
-        "The compositor config is copied, and the Gentoo packages that config starts are installed. "
-        "The project's install script is not run."
+        "Window manager dotfiles. Hyprland: installer Lua default, end-4, or ML4W. "
+        "Niri: installer or upstream default. "
+        "A GitHub choice is downloaded from the latest commit on that branch. "
+        "Only the compositor config is copied; upstream install scripts are not run. "
+        "Hyprland configs are Lua (hyproverlay tip is Lua-only from 0.57)."
     )
     current: dict[str, str] = {}
     for item in cfg.wm_dotfiles or []:
@@ -1274,16 +1270,19 @@ def _wm_dotfiles(cfg: InstallConfig) -> None:
 
 
 def _finalize(cfg: InstallConfig) -> None:
-    """Wayland compositors, a shell, and greetd. No desktop environment."""
+    """Wayland compositors and greetd. No desktop environment; no Portage shells."""
     ui.chapter("11", "Wayland session", f"{HANDBOOK}/Installation/Finalizing")
     cfg.desktop = "none"
     cfg.kde_games = False
+    # Portage Wayland shells (Noctalia/DMS) removed — always compositor + utils/dots.
+    cfg.shell = "none"
     ui.info("Each compositor installs its own required packages (portal, wallpaper, lock, terminal).")
     ui.info("Utilities that work on every compositor are a separate list in the next chapter.")
     ui.info(
         "Popular Wayland compositors (Hyprland, Sway, SwayFX, Niri, River, Wayfire, labwc, "
         "dwl, MangoWM, miracle-wm, Qtile, Gamescope, Weston) plus dwm and i3."
     )
+    ui.info("Noctalia and DMS are not offered as Portage shells; pick starred WM configs instead.")
     cfg.window_managers = ui.paged_checklist(
         "Wayland compositors, dwl, dwm, and i3",
         catalog.wm_choices(),
@@ -1306,28 +1305,16 @@ def _finalize(cfg: InstallConfig) -> None:
             "Niri gets the GNOME portal, GNOME Keyring, and foot. "
             "Waybar, Wofi, Mako, swaybg, swayidle, and swaylock are in the next chapter."
         )
-    cfg.shell = ui.menu(
-        "Wayland shell",
-        catalog.SHELL_CHOICES,
-        cfg.shell if cfg.shell in {key for key, _ in catalog.SHELL_CHOICES} else "none",
-    )
-    if cfg.shell != "none":
-        ui.info("Noctalia and DMS are installed from the GURU overlay, which is enabled only for that shell.")
     _wm_dotfiles(cfg)
-    graphical = bool(cfg.window_managers) or cfg.shell != "none"
+    graphical = bool(cfg.window_managers)
     cfg.pipewire = ui.ask_yes_no("Install PipeWire audio?", graphical)
     _ask_nonfree_codecs(cfg)
-    if cfg.shell != "none" and not catalog.wayland_selected(cfg.window_managers):
-        ui.info("Noctalia and DMS run on a Wayland compositor. labwc will be installed with the shell.")
-        if "gui-wm/labwc" not in cfg.window_managers:
-            cfg.window_managers.append("gui-wm/labwc")
-    # Wayland / shell installs must boot to a greeter. Offering "none" failed that goal.
+    # Wayland installs must boot to a greeter. Offering "none" failed that goal.
     if catalog.needs_login_greeter(cfg.window_managers, cfg.shell):
         cfg.display_manager = "greetd"
         who = cfg.username or "your user"
-        screen = "Noctalia's login screen" if cfg.shell == "noctalia" else "greetd + gtkgreet"
         ui.info(
-            f"The installed system boots to {screen}. "
+            f"The installed system boots to greetd + gtkgreet. "
             f"Sign in as {who}. The compositors you chose are the sessions."
         )
         ui.info("A text console remains on tty2 if you need one.")
@@ -1391,11 +1378,8 @@ def _packages_locked_from_earlier_steps(cfg: InstallConfig) -> set[str]:
         locked.update(catalog.nonfree_codec_atoms())
     if catalog.needs_login_greeter(cfg.window_managers, cfg.shell) or cfg.display_manager == "greetd":
         locked.add("gui-libs/greetd")
-        if cfg.shell == "noctalia":
-            locked.add(catalog.NOCTALIA_GREETER.atom)
-        else:
-            locked.add("gui-apps/gtkgreet")
-            locked.add("gui-wm/labwc")
+        locked.add("gui-apps/gtkgreet")
+        locked.add("gui-wm/labwc")
         # Entire greetd stack — do not ask again in display-managers.
         # tuigreet is REMOVED_GURU (blocked if typed); gtkgreet/labwc is the path.
         locked.update({"x11-misc/lightdm", "x11-misc/sddm", "x11-misc/slim"})
@@ -1663,8 +1647,6 @@ def _login_manager_label(cfg: InstallConfig) -> str:
     name = catalog.resolved_display_manager(cfg.display_manager, cfg.desktop, atoms)
     if name == "none":
         return "text console"
-    if name == "greetd" and cfg.shell == "noctalia":
-        name = "noctalia-greeter"
     sessions = catalog.ensure_login_sessions(cfg.desktop, atoms, cfg.shell)
     who = cfg.username or "root"
     if sessions:
@@ -1884,7 +1866,6 @@ def _review(cfg: InstallConfig) -> None:
         ("User", cfg.username or "(root only)"),
         ("Compositors", ", ".join(cfg.window_managers) or "none"),
         ("Dotfiles", _dotfile_review(cfg)),
-        ("Shell", cfg.shell or "none"),
         ("Browsers", catalog.browser_review_label(cfg.browser)),
         ("Non-free codecs", "yes (license accepted)" if cfg.nonfree_codecs else "no"),
         ("ZRAM", "yes" if cfg.zram else "no"),

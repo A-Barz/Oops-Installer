@@ -23,13 +23,12 @@ Who should use it
 -----------------
 Use this if you want a guided Gentoo install with optional LUKS, LVM, RAID1,
 Btrfs, ZFS, several bootloaders, Plymouth, Wayland compositors (Hyprland,
-Sway, Wayfire, labwc, dwl, Qtile), suckless tools, and popular apps. Noctalia
-and DMS are optional shells. Hyprland and Niri can use the installer's own
-config or the top-rated GitHub config for that compositor. That choice is
-skipped when Noctalia or DMS is the shell. A GitHub config is downloaded
-during the install from the latest commit on its branch, and the Gentoo
-packages that config starts are installed too. The project's install script
-is not run.
+Sway, Wayfire, labwc, dwl, Qtile), suckless tools, and popular apps. Portage
+Wayland shells (Noctalia/DMS) are not offered. Hyprland and Niri can use the
+installer's own config or starred GitHub configs (Hyprland: end-4, ML4W —
+Lua; Niri: upstream). A GitHub config is downloaded during the install from
+the latest commit on its branch, and the Gentoo packages that config starts
+are installed too. The project's install script is not run.
 
 Do not use this as your first Linux install on a machine that holds unique
 data unless you have backups and have already practised in a virtual machine.

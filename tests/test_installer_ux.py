@@ -10,9 +10,10 @@ from gentoo_installer.wizard import _packages_locked_from_earlier_steps
 
 
 class DotfileTopTwoTests(unittest.TestCase):
-    def test_hyprland_offers_installer_and_end4_only(self) -> None:
+    def test_hyprland_offers_installer_end4_ml4w(self) -> None:
         ids = [choice.id for choice in catalog.dotfile_choices("gui-wm/hyprland")]
-        self.assertEqual(ids, ["installer", "end-4"])
+        self.assertEqual(ids, ["installer", "end-4", "ml4w"])
+        self.assertNotIn("hyde", ids)
 
     def test_niri_offers_installer_and_upstream_only(self) -> None:
         ids = [choice.id for choice in catalog.dotfile_choices("gui-wm/niri")]

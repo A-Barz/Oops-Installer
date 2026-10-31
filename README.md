@@ -198,12 +198,11 @@ No desktop environment. Browsers are optional (Firefox ESR soft-default in chapt
 | Ask | Options / notes | Default |
 |-----|-----------------|---------|
 | Compositors / WMs | checklist (below) | empty / saved |
-| Wayland shell | `none`, `noctalia` | `none` |
-| Dotfiles | Hyprland: `installer` \| `end-4`; Niri: `installer` \| `upstream`. Skipped for Noctalia | `installer` |
-| PipeWire | yes/no | Yes if WM or shell |
+| Dotfiles | Hyprland: `installer` (Lua) \| `end-4` \| `ml4w`; Niri: `installer` \| `upstream` | `installer` |
+| PipeWire | yes/no | Yes if WM |
 | Proprietary codecs | license accept for ugly/bad/libav, fdk-aac, faac, lame, ffmpeg | Off |
 
-**If a Wayland compositor or shell is chosen**, login is **greetd** (gtkgreet+labwc, or noctalia-greeter with Noctalia). X11-only dwm/i3 → text console / startx (no greeter). Shell without a WM → `labwc` is added.
+**If a Wayland compositor is chosen**, login is **greetd** (gtkgreet+labwc). X11-only dwm/i3 → text console / startx (no greeter). Portage Wayland shells (Noctalia/DMS) are not offered.
 
 Optional **mise + small agent set** invite: first-login note only — no Quickshell panel, no passwordless sudo. `dev-util/mise` is not emerged from ::gentoo; the invite documents a user install.
 
@@ -227,12 +226,12 @@ Optional **mise + small agent set** invite: first-login note only — no Quicksh
 | `x11-wm/dwm` | X11 |
 | `x11-wm/i3` | X11 |
 
-GURU is enabled when a GURU compositor or Noctalia is selected — not as a free overlay checklist row.
+GURU is enabled when a GURU compositor is selected — not as a free overlay checklist row.
 
 ### 12 — Suckless tools and popular apps
 
 1. Optional **extra Portage overlays** (featured + community list; GURU not listed here).
-2. If Niri: **Niri apps** checklist (preticks waybar/wofi/mako/swaybg/swayidle/swaylock when shell is `none`).
+2. If Niri: **Niri apps** checklist (preticks waybar/wofi/mako/swaybg/swayidle/swaylock).
 3. Linear category walk (Space toggle, Enter next, Select all), including **Browsers** — Firefox ESR soft-default (untick to skip); Google Chrome opt-in. Categories already decided earlier are skipped: window-managers, display-managers (and there is no games / DE category).
 4. Extra free-typed emerge atoms.
 
@@ -249,7 +248,7 @@ Summary table and time estimate → wipe warning → “Proceed?” → **re-typ
 - `www-client/firefox-bin:esr` — Firefox ESR (soft-default; untick to skip)
 - `www-client/google-chrome` — Google Chrome (opt-in; expands `ACCEPT_LICENSE` when chosen)
 
-### When a Wayland compositor or shell is selected
+### When a Wayland compositor is selected
 
 **Shared Wayland base** (`WAYLAND_BASE`):  
 `sys-apps/xdg-desktop-portal`, `gui-libs/xdg-desktop-portal-wlr`*, `sys-apps/xdg-desktop-portal-gtk`, `gui-apps/wl-clipboard`, `gui-apps/grim`*, `gui-apps/slurp`*, `x11-base/xwayland`*, `dev-qt/qtwayland`, `media-fonts/noto`, `media-fonts/noto-emoji`, `sys-auth/polkit`  
@@ -259,9 +258,9 @@ Summary table and time estimate → wipe warning → “Proceed?” → **re-typ
 
 **Per-compositor requirements** (examples): Hyprland → portal-hyprland, hyprpaper, hypridle, hyprlock; Sway/SwayFX → swaybg, swayidle, swaylock, foot; Niri → xdg-desktop-portal-gnome, gnome-keyring, foot; dwm → xorg-server, xinit, dmenu, st, slstatus, slock; i3 → xorg-server, xinit, dmenu, i3status, st.
 
-**Greeter:** `gui-libs/greetd` plus gtkgreet+labwc, or `gui-apps/noctalia-greeter` with Noctalia (plus greetd user/group / display-manager-init as needed).
+**Greeter:** `gui-libs/greetd` plus gtkgreet+labwc (plus greetd user/group / display-manager-init as needed).
 
-**Shells:** `gui-apps/noctalia` (::guru) when Noctalia is chosen (binary `noctalia`).
+**Hyprland configs** are **Lua** (`hyprland.lua`) — hyproverlay tip tracks 0.55+ and 0.57 is Lua-only.
 
 `nano` is installed on the new system. Dotfile choices may pull additional atoms the chosen config launches (upstream install scripts are not run).
 
