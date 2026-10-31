@@ -5275,7 +5275,7 @@ unset FEATURES
 unset FEATURES
 {mirrorselect_block}
 echo ">> emerge @world"
-emerge --verbose --update --deep --newuse --keep-going $NR @world
+emerge --verbose --update --deep --newuse --keep-going $RESPECT_USE $NR @world
 world_status=$?
 if [ "$world_status" -eq 132 ]; then
   echo ">> @world died with Illegal instruction; rebuilding from source"

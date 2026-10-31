@@ -185,6 +185,27 @@ class BinpkgRespectUseReadinessTests(unittest.TestCase):
         self.assertLess(sanitize, emerge)
         self.assertIn("$RESPECT_USE", script)
 
+    def test_world_emerge_passes_respect_use(self) -> None:
+        """Primary @world uses $RESPECT_USE like emerge_one; not make.conf."""
+        script = render_chroot_script(_cfg(), {"root": "/dev/vda2", "esp": "/dev/vda1"})
+        primary = (
+            "emerge --verbose --update --deep --newuse --keep-going "
+            "$RESPECT_USE $NR @world"
+        )
+        self.assertIn(primary, script)
+        # SIGILL retry already disables binpkgs; respect-use stays omitted.
+        sigill = (
+            "emerge --verbose --update --deep --newuse --keep-going "
+            "--usepkg=n --getbinpkg=n @world"
+        )
+        self.assertIn(sigill, script)
+        self.assertNotIn(
+            "$RESPECT_USE $NR --usepkg=n --getbinpkg=n @world",
+            script,
+        )
+        conf = _make_conf_text(_cfg(binhost=True, binpkg_respect_use=False))
+        self.assertNotIn("binpkg-respect-use", conf)
+
 
 if __name__ == "__main__":
     unittest.main()
