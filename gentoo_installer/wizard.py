@@ -1470,15 +1470,22 @@ def _packages(cfg: InstallConfig) -> None:
     ui.info("The top row, Select all, ticks every package in that section.")
 
     if ui.ask_yes_no("Enable extra Portage overlays (eselect repository)?", True):
+        ui.info(
+            "Handbook Wine (virtual/wine, app-emulation/wine-*) is in ::gentoo — "
+            "no wine overlay is required or offered."
+        )
         cfg.overlays = ui.paged_checklist(
             "Overlays from overlays.gentoo.org / eselect repository — Enter continues",
             catalog.overlay_choices(),
-            selected=cfg.overlays,
+            selected=[name for name in cfg.overlays if name not in catalog.STALE_OVERLAY_NAMES],
             page_size=14,
         )
         more = ui.prompt("Extra overlay names (space-separated, empty for none)", "")
         if more.strip():
             cfg.overlays = list(dict.fromkeys(cfg.overlays + more.split()))
+        cfg.overlays = [
+            name for name in cfg.overlays if name not in catalog.STALE_OVERLAY_NAMES
+        ]
 
     locked = _packages_locked_from_earlier_steps(cfg)
     picked: list[str] = [atom for atom in cfg.selected_packages if atom not in locked]

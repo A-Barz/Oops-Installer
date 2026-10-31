@@ -83,6 +83,15 @@ def _shred_install_secrets(mountpoint: str) -> None:
 # Same integer as the startup banner. Bump INSTALLER_REV in rev.py on each change.
 CHROOT_SCRIPT_REV = INSTALLER_REV
 
+# linux-mod / linux-info consumers: need /usr/src/linux before emerge.
+# Keep these out of the pre-kernel repair list (dracut/installkernel stay early).
+KERNEL_SRC_DEPENDENT_ATOMS: frozenset[str] = frozenset(
+    {
+        "sys-fs/zfs",
+        "app-emulation/virtualbox",
+    }
+)
+
 
 def selected_bootloaders(cfg: InstallConfig) -> list[str]:
     """All loaders to install; always includes primary `cfg.bootloader`."""
@@ -2471,6 +2480,52 @@ def _required_tools(cfg: InstallConfig, loaders: list[str]) -> list[tuple[str, t
     return tools
 
 
+def _atom_needs_kernel_sources(atom: str) -> bool:
+    """True when this atom's ebuild expects /usr/src/linux (linux-mod / linux-info)."""
+    return _bare_atom(atom) in KERNEL_SRC_DEPENDENT_ATOMS
+
+
+def _pre_kernel_tools(
+    cfg: InstallConfig, loaders: list[str]
+) -> list[tuple[str, tuple[str, ...]]]:
+    """Required tools that must exist before installkernel/dracut (not ZFS/modules)."""
+    return [
+        (atom, test)
+        for atom, test in _required_tools(cfg, loaders)
+        if not _atom_needs_kernel_sources(atom)
+    ]
+
+
+def _post_kernel_module_tools(
+    cfg: InstallConfig, loaders: list[str]
+) -> list[tuple[str, tuple[str, ...]]]:
+    """Required tools that must wait until /usr/src/linux exists (e.g. sys-fs/zfs)."""
+    return [
+        (atom, test)
+        for atom, test in _required_tools(cfg, loaders)
+        if _atom_needs_kernel_sources(atom)
+    ]
+
+
+def _queued_needs_kernel_sources(
+    cfg: InstallConfig, loaders: list[str], extra_atoms: list[str] | None = None
+) -> bool:
+    """True when any queued atom needs /usr/src/linux before its emerge."""
+    if _post_kernel_module_tools(cfg, loaders):
+        return True
+    for atom in extra_atoms or []:
+        if _atom_needs_kernel_sources(atom):
+            return True
+    for atom in dict.fromkeys(
+        list(cfg.extra_packages or [])
+        + list(cfg.selected_packages or [])
+        + list(cfg.window_managers or [])
+    ):
+        if _atom_needs_kernel_sources(atom):
+            return True
+    return False
+
+
 def _required_tool_repairs(cfg: InstallConfig, loaders: list[str]) -> str:
     """Install boot and service packages one failure at a time, before the kernel.
 
@@ -2480,8 +2535,11 @@ def _required_tool_repairs(cfg: InstallConfig, loaders: list[str]) -> str:
 
     Critical services (H5) use emerge_checked required=True. emerge_checked never
     passes --noreplace, so resume still repairs packages that soft-failed earlier (M3).
+
+    linux-mod consumers (ZFS, …) are deferred until after the kernel step so
+    /usr/src/linux exists; see _post_kernel_module_repairs.
     """
-    tools = _required_tools(cfg, loaders)
+    tools = _pre_kernel_tools(cfg, loaders)
     critical_atoms = {atom for atom, _test in _critical_service_tools(cfg)}
     lines = ["echo '>> install tools before dracut and OpenRC services'"]
     if tools:
@@ -2510,6 +2568,63 @@ def _required_tool_repairs(cfg: InstallConfig, loaders: list[str]) -> str:
     for atom, test in tools:
         lines.append(
             _emerge_checked_call(atom, test, required=atom in critical_atoms)
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _post_kernel_module_repairs(cfg: InstallConfig, loaders: list[str]) -> str:
+    """Emerge linux-mod consumers after kernel sources/symlink are in place."""
+    tools = _post_kernel_module_tools(cfg, loaders)
+    if not tools:
+        return ""
+    critical_atoms = {atom for atom, _test in _critical_service_tools(cfg)}
+    lines = [
+        'echo ">> emerge out-of-tree modules after /usr/src/linux"',
+    ]
+    atoms = " ".join(shlex.quote(atom) for atom, _test in tools)
+    lines.append(
+        "emerge --ask=n --keep-going $RESPECT_USE $NR "
+        + atoms
+        + " || echo '>> some module packages failed; retrying one at a time' >&2"
+    )
+    for atom, test in tools:
+        lines.append(
+            _emerge_checked_call(atom, test, required=atom in critical_atoms)
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _ensure_kernel_sources_script(
+    cfg: InstallConfig, loaders: list[str], extra_atoms: list[str] | None = None
+) -> str:
+    """After kernel emerge: eselect/symlink /usr/src/linux; fail closed if modules need it."""
+    need = _queued_needs_kernel_sources(cfg, loaders, extra_atoms)
+    is_sources = catalog.kernel_package_name(cfg.kernel) == "gentoo-sources"
+    if not need and not is_sources:
+        return ""
+    lines = [
+        'echo ">> ensure /usr/src/linux"',
+        "if [ ! -e /usr/src/linux ]; then",
+        "  if command -v eselect >/dev/null 2>&1; then",
+        "    if eselect kernel list 2>/dev/null | grep -qE '\\[[0-9]+\\]'; then",
+        "      if ! eselect kernel list 2>/dev/null | grep -qE '\\[[0-9]+\\].*\\*'; then",
+        "        eselect kernel set 1 || "
+        "echo '>> eselect kernel set failed' >&2",
+        "      fi",
+        "    fi",
+        "  fi",
+        "fi",
+    ]
+    if need:
+        lines.extend(
+            [
+                "if [ ! -e /usr/src/linux ]; then",
+                '  echo ">> Unable to find kernel sources at /usr/src/linux '
+                '(needed before ZFS / out-of-tree modules)" >&2',
+                "  ls -la /usr/src 2>/dev/null || true",
+                "  exit 1",
+                "fi",
+            ]
         )
     return "\n".join(lines) + "\n"
 
@@ -3996,6 +4111,9 @@ def _package_use_text(cfg: InstallConfig) -> str:
         lines.append("x11-misc/rofi wayland")
     if "x11-misc/dunst" in queued:
         lines.append("x11-misc/dunst wayland")
+    # gentoo-sources only creates /usr/src/linux when USE=symlink (or eselect kernel).
+    if catalog.kernel_package_name(cfg.kernel) == "gentoo-sources":
+        lines.append("sys-kernel/gentoo-sources symlink")
     return "\n".join(lines) + "\n"
 
 
@@ -4346,8 +4464,16 @@ echo ">> system locale: $(eselect locale show 2>/dev/null | tr '\\n' ' ' | sed '
 
 
 def _required_overlays(cfg: InstallConfig) -> list[str]:
-    """Overlays this install will enable (guru, CachyOS-kernels, hyproverlay, …)."""
-    overlay_names = [name for name in cfg.overlays if name != "guru"]
+    """Overlays this install will enable (guru, CachyOS-kernels, hyproverlay, …).
+
+    Stale checklist names (wine, …) absent from repositories.xml are dropped —
+    handbook Wine packages live in ::gentoo and do not need a wine overlay.
+    """
+    overlay_names = [
+        name
+        for name in cfg.overlays
+        if name != "guru" and name not in catalog.STALE_OVERLAY_NAMES
+    ]
     if catalog.shell_atoms(getattr(cfg, "shell", "") or ""):
         overlay_names.append("guru")
     kernel_ov = catalog.kernel_overlay(cfg.kernel)
@@ -4365,7 +4491,11 @@ def _required_overlays(cfg: InstallConfig) -> list[str]:
         )
         if atom and (_atom_allowed(cfg, atom) or str(atom).startswith("sys-kernel/"))
     ]
-    return catalog.overlays_required_by(queued, overlay_names)
+    return [
+        name
+        for name in catalog.overlays_required_by(queued, overlay_names)
+        if name not in catalog.STALE_OVERLAY_NAMES
+    ]
 
 
 def _arch_testing_keyword(cfg: InstallConfig) -> str:
@@ -4812,6 +4942,7 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
     if cfg.plymouth and cfg.init_system == "openrc":
         rc_plymouth = "append_once /etc/rc.conf 'rc_interactive=\"NO\"'"
     repair_tools = _required_tool_repairs(cfg, loaders)
+    post_kernel_modules = _post_kernel_module_repairs(cfg, loaders)
     final_checks = _final_tool_checks(cfg, loaders)
     package_use = _package_use_text(cfg).strip()
     accept_keywords = _keyword_text(cfg).strip()
@@ -4856,9 +4987,31 @@ if [ ! -s /etc/locale.conf ]; then echo 'LANG="{locale_safe}"' > /etc/locale.con
 if [ ! -s /etc/conf.d/keymaps ]; then echo 'keymap="{keymap_safe}"' > /etc/conf.d/keymaps; fi
 """
     firmware_block = _emerge_each_block("firmware", extra_fw)
-    missed_block = _emerge_each_block("remaining service packages", missed)
+    # Keep linux-mod consumers out of the soft pre-kernel missed list too.
+    missed_pre = [atom for atom in missed if not _atom_needs_kernel_sources(atom)]
+    missed_block = _emerge_each_block("remaining service packages", missed_pre)
     late_block = _emerge_each_block("desktop and extra packages", late_atoms)
     theme_block = _emerge_each_block("Plymouth theme packages", theme_pkgs)
+    need_kernel_src = _queued_needs_kernel_sources(cfg, loaders, late_atoms)
+    kernel_sources_gate = _ensure_kernel_sources_script(cfg, loaders, late_atoms)
+    if need_kernel_src:
+        kernel_emerge_line = (
+            f"emerge_with_source {kernel_atom} || {{ "
+            f'echo ">> kernel emerge failed (needed before ZFS/modules)" >&2; exit 1; }}'
+        )
+        kernel_fallback = (
+            "emerge --ask=n --usepkg=n --getbinpkg=n sys-kernel/gentoo-kernel || { "
+            'echo ">> gentoo-kernel source build failed (needed before ZFS/modules)" >&2; '
+            "exit 1; }"
+        )
+    else:
+        kernel_emerge_line = (
+            f'emerge_with_source {kernel_atom} || echo ">> kernel emerge failed" >&2'
+        )
+        kernel_fallback = (
+            "emerge --ask=n --usepkg=n --getbinpkg=n sys-kernel/gentoo-kernel || "
+            'echo ">> gentoo-kernel source build failed" >&2'
+        )
     plymouth_early = ""
     if cfg.plymouth and cfg.plymouth_theme:
         plymouth_early = (
@@ -5155,21 +5308,23 @@ unset FEATURES
 echo ">> fetch kernel and package sources"
 emerge --ask=n --fetchonly --usepkg=n --getbinpkg=n --keep-going {fetch_line} || echo ">> some distfiles were not fetched; emerge will try again" >&2
 # btrfs-progs, kbd, Plymouth, and OpenRC services must exist before the kernel
-# package's installkernel hook runs dracut. A later desktop failure must not
-# be in that same emerge.
+# package's installkernel hook runs dracut. ZFS / linux-mod packages wait until
+# /usr/src/linux exists (after kernel emerge + symlink/eselect).
 {repair_tools}
 {theme_block}
 {plymouth_early}
 {missed_block}
 {firmware_block}
 echo ">> emerge kernel"
-emerge_with_source {kernel_atom} || echo ">> kernel emerge failed" >&2
+{kernel_emerge_line}
 {kernel_seek}
 if [ "$kernel_found" -eq 0 ]; then
   echo ">> no kernel image in /boot or on /efi; building sys-kernel/gentoo-kernel from source"
-  emerge --ask=n --usepkg=n --getbinpkg=n sys-kernel/gentoo-kernel || echo ">> gentoo-kernel source build failed" >&2
+  {kernel_fallback}
   {kernel_seek}
 fi
+{kernel_sources_gate}
+{post_kernel_modules}
 {late_block}
 {stores_block}
 
@@ -5478,10 +5633,14 @@ def _overlay_script(cfg: InstallConfig) -> str:
         ov_re = re.escape(ov)
         lines.append("unset FEATURES")
         # Idempotent: resume re-runs this block; "already enabled" must not be fatal.
+        # Names absent from remote repositories.xml get a clear stale-name error
+        # instead of the raw "not listed in repositories.xml" eselect dump.
         lines.append(
             f"if eselect repository list -i 2>/dev/null | grep -Eq '{ov_re}'; then\n"
             f"  echo \">> overlay {ov} already enabled; skip enable\"\n"
-            f"else\n"
+            f"elif [ -d {qdir} ]; then\n"
+            f"  echo \">> overlay {ov} present at {qdir}; skip enable\"\n"
+            f"elif eselect repository list 2>/dev/null | grep -Eq '{ov_re}'; then\n"
             f"  eselect repository enable {qov} || {{\n"
             f"    if eselect repository list -i 2>/dev/null | grep -Eq '{ov_re}' "
             f"|| [ -d {qdir} ]; then\n"
@@ -5491,6 +5650,10 @@ def _overlay_script(cfg: InstallConfig) -> str:
             f"      exit 1\n"
             f"    fi\n"
             f"  }}\n"
+            f"else\n"
+            f"  echo \">> overlay {ov} is not listed in repositories.xml "
+            f'(stale or renamed name)" >&2\n'
+            f"  exit 1\n"
             f"fi"
         )
         lines.append(

@@ -830,6 +830,14 @@ COMMON_LOCALES: list[tuple[str, str]] = [
 ]
 
 
+# Names once offered in the checklist that are no longer in api.gentoo.org
+# repositories.xml (eselect repository enable fails closed). virtual/wine and
+# app-emulation/wine-* live in ::gentoo — no wine overlay is required.
+STALE_OVERLAY_NAMES: frozenset[str] = frozenset(
+    {"wine", "sad", "src_prepare-overlay"}
+)
+
+
 def extra_overlays() -> list[tuple[str, str]]:
     """More names from overlays.gentoo.org (shown after the featured list)."""
     names = [
@@ -838,17 +846,17 @@ def extra_overlays() -> list[tuple[str, str]]:
         "librewolf", "linux-surface", "loongson", "mate-de-gentoo", "melpa",
         "mysql", "palemoon", "parona-overlay", "php-overlay", "proaudio-gentoo",
         "pypi", "R_Overlay", "riscv", "ros-overlay", "sage-on-gentoo",
-        "src_prepare-overlay", "suckless-extra", "tex-overlay", "toolchain",
-        "torbrowser", "ukui", "vapoursynth", "wine", "without-systemd", "x11",
+        "suckless-extra", "tex-overlay", "toolchain",
+        "torbrowser", "ukui", "vapoursynth", "without-systemd", "x11",
         "xlibre", "zugaina", "pf4public", "tatsh-overlay", "thegreatmcpain",
-        "sad", "sorrow", "yellow", "oddlama", "pentoo", "steam-overlay",
+        "sorrow", "yellow", "oddlama", "pentoo", "steam-overlay",
         "wayland-desktop", "hyproverlay", "science", "kde", "qt",
     ]
     featured = {n for n, _ in FEATURED_OVERLAYS}
     return [
         (n, f"Community overlay from overlays.gentoo.org — `eselect repository enable {n}`")
         for n in sorted(set(names))
-        if n not in featured
+        if n not in featured and n not in STALE_OVERLAY_NAMES
     ]
 
 
