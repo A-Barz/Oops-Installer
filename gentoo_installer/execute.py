@@ -1801,7 +1801,55 @@ def phase_chroot(
 _BAD_FEATURE = "binpkg-request-use"
 # Only valid FEATURE names. Naming binpkg-request-use even with a leading '-'
 # can still trip unknown-features-warn on some Portage builds.
-_FEATURES_SANITIZE = 'FEATURES="-unknown-features-warn unknown-features-filter"'
+_FEATURES_BASE = "-unknown-features-warn unknown-features-filter"
+# Backward-compatible alias used by legacy FEATURES sanitizers / tests.
+_FEATURES_SANITIZE = f'FEATURES="{_FEATURES_BASE}"'
+
+
+def _features_line(cfg: InstallConfig) -> str:
+    """Handbook/Quickstart: binhost adds getbinpkg + binpkg-request-signature."""
+    feats = _FEATURES_BASE
+    if cfg.binhost:
+        feats = f"{feats} getbinpkg binpkg-request-signature"
+    return f'FEATURES="{feats}"'
+
+
+def _binrepos_conf_text(cfg: InstallConfig) -> str:
+    """Official binhost repo file (Handbook Base + Binary Host Quickstart).
+
+    Always includes verify-signature + location. When the user picks x86-64-v3,
+    handbook Important requires *both* the base x86-64 and the v3 URI so missing
+    v3 binpkgs can fall back.
+    """
+    if not cfg.binhost or cfg.architecture != "amd64":
+        return ""
+    abi = (cfg.binhost_abi or "x86-64").strip() or "x86-64"
+    base = """[binhost]
+priority = 9998
+sync-uri = https://distfiles.gentoo.org/releases/amd64/binpackages/23.0/x86-64/
+verify-signature = true
+location = /var/cache/binhost/gentoo
+"""
+    if abi == "x86-64-v3":
+        return (
+            base
+            + """
+[binhost-x86-64-v3]
+priority = 9999
+sync-uri = https://distfiles.gentoo.org/releases/amd64/binpackages/23.0/x86-64-v3/
+verify-signature = true
+location = /var/cache/binhost/gentoo-x86-64-v3
+"""
+        )
+    if abi != "x86-64":
+        # Unknown ABI token — still emit a single matching URI (legacy behaviour).
+        return f"""[binhost]
+priority = 9999
+sync-uri = https://distfiles.gentoo.org/releases/amd64/binpackages/23.0/{abi}/
+verify-signature = true
+location = /var/cache/binhost/gentoo
+"""
+    return base.replace("priority = 9998", "priority = 9999")
 
 
 def _strip_bad_features(path: Path) -> bool:
@@ -1904,7 +1952,7 @@ def _make_conf_text(cfg: InstallConfig) -> str:
         'FFLAGS="${COMMON_FLAGS}"',
         f'MAKEOPTS="-j{jobs}"',
         f'EMERGE_DEFAULT_OPTS="{emerge_opts}"',
-        _FEATURES_SANITIZE,
+        _features_line(cfg),
         f'USE="{" ".join(sorted(set(use)))}"',
         f'ACCEPT_LICENSE="{cfg.accept_license}"',
         f'VIDEO_CARDS="{video}"',
@@ -2944,23 +2992,37 @@ set_gentoo_mirrors() {
 update_binhost() {
   local newbase="$1"
   local conf=/etc/portage/binrepos.conf/gentoobinhost.conf
-  local old suffix="" base
+  local tmp old suffix="" base line
   [ -f "$conf" ] || return 0
-  old=$(awk '/^sync-uri/{print $3; exit}' "$conf")
-  [ -n "$old" ] || return 0
-  for base in "${MIRROR_CANDIDATES[@]}"; do
-    case "$old" in
-      "$base"/*)
-        suffix="${old#"$base"}"
-        break
+  # Dual x86-64 + x86-64-v3 repos share a host but keep distinct paths — rewrite
+  # each sync-uri independently (Handbook Important for v3).
+  tmp=$(mktemp) || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      sync-uri\ =*)
+        old="${line#sync-uri = }"
+        old="${old#"${old%%[![:space:]]*}"}"
+        suffix=""
+        for base in "${MIRROR_CANDIDATES[@]}"; do
+          case "$old" in
+            "$base"/*)
+              suffix="${old#"$base"}"
+              break
+              ;;
+          esac
+        done
+        if [ -z "$suffix" ]; then
+          suffix=$(printf '%s\n' "$old" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+##')
+        fi
+        echo "sync-uri = ${newbase}${suffix}"
+        echo ">> binhost mirror is now ${newbase}${suffix}"
+        ;;
+      *)
+        printf '%s\n' "$line"
         ;;
     esac
-  done
-  if [ -z "$suffix" ]; then
-    suffix=$(printf '%s\n' "$old" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+##')
-  fi
-  sed -i "s#^sync-uri = .*#sync-uri = ${newbase}${suffix}#" "$conf"
-  echo ">> binhost mirror is now ${newbase}${suffix}"
+  done < "$conf" > "$tmp"
+  mv "$tmp" "$conf"
 }
 
 drop_binpkg_opts() {
@@ -2969,6 +3031,9 @@ drop_binpkg_opts() {
   for conf in /etc/portage/make.conf /etc/portage/make.conf/*; do
     [ -f "$conf" ] || continue
     sed -i -e 's/ --getbinpkg / /g' -e 's/ --usepkg / /g' "$conf" || true
+    # Handbook FEATURES getbinpkg must leave with the emerge opts.
+    sed -i -E 's/(FEATURES="[^"]*)\bgetbinpkg\b */\1/g' "$conf" || true
+    sed -i -E 's/(FEATURES="[^"]*)\bbinpkg-request-signature\b */\1/g' "$conf" || true
   done
   touch /tmp/gentoo-installer-binpkg-404-fallback
 }
@@ -3106,8 +3171,21 @@ if grep -qw avx2 /proc/cpuinfo && grep -qw bmi1 /proc/cpuinfo && grep -qw bmi2 /
   cpu_has_v3=1
 fi
 if [ "$cpu_has_v3" -eq 0 ] && [ -f /etc/portage/binrepos.conf/gentoobinhost.conf ] && grep -q x86-64-v3 /etc/portage/binrepos.conf/gentoobinhost.conf; then
-  echo ">> this CPU cannot run x86-64-v3 binpkgs (Illegal instruction); using the x86-64 binhost"
-  sed -i 's/x86-64-v3/x86-64/g' /etc/portage/binrepos.conf/gentoobinhost.conf || true
+  echo ">> this CPU cannot run x86-64-v3 binpkgs (Illegal instruction); dropping v3 binhost (keep x86-64)"
+  # Dual-repo handbook layout: delete the v3 section rather than renaming paths
+  # (which would duplicate the base x86-64 URI).
+  awk '
+    BEGIN { skip=0 }
+    /^[[]/ {
+      if ($0 ~ /x86-64-v3/) { skip=1; next }
+      skip=0
+    }
+    skip { next }
+    /x86-64-v3/ { next }
+    { print }
+  ' /etc/portage/binrepos.conf/gentoobinhost.conf > /tmp/gentoobinhost.conf.$$ \
+    && mv /tmp/gentoobinhost.conf.$$ /etc/portage/binrepos.conf/gentoobinhost.conf \
+    || sed -i 's/x86-64-v3/x86-64/g' /etc/portage/binrepos.conf/gentoobinhost.conf || true
 fi
 
 disable_binpkgs() {
@@ -3116,6 +3194,8 @@ disable_binpkgs() {
   for conf in /etc/portage/make.conf /etc/portage/make.conf/*; do
     [ -f "$conf" ] || continue
     sed -i -e 's/ --getbinpkg / /g' -e 's/ --usepkg / /g' "$conf" || true
+    sed -i -E 's/(FEATURES="[^"]*)\bgetbinpkg\b */\1/g' "$conf" || true
+    sed -i -E 's/(FEATURES="[^"]*)\bbinpkg-request-signature\b */\1/g' "$conf" || true
   done
 }
 
@@ -4785,15 +4865,25 @@ def render_chroot_script(cfg: InstallConfig, devices: dict[str, str]) -> str:
     """
     ensure_boot_to_greeter(cfg)
     loaders = selected_bootloaders(cfg)
+    # Handbook: --newuse with binhost; --changed-use for source-only installs.
+    world_use_flag = "--newuse" if cfg.binhost else "--changed-use"
     binrepo = ""
-    if cfg.binhost and cfg.architecture == "amd64":
+    binrepos_body = _binrepos_conf_text(cfg).rstrip("\n")
+    if binrepos_body:
         binrepo = f"""
-mkdir -p /etc/portage/binrepos.conf
+mkdir -p /etc/portage/binrepos.conf /var/cache/binhost
 cat > /etc/portage/binrepos.conf/gentoobinhost.conf << 'EOF'
-[binhost]
-priority = 9999
-sync-uri = https://distfiles.gentoo.org/releases/amd64/binpackages/23.0/{cfg.binhost_abi}/
+{binrepos_body}
 EOF
+echo ">> getuto (Handbook binpkg signature trust)"
+if command -v getuto >/dev/null 2>&1; then
+  getuto || {{
+    echo ">> getuto failed — cannot verify binpkg signatures" >&2
+    exit 1
+  }}
+else
+  echo ">> getuto not on PATH yet; Portage runs it on first signed binpkg fetch" >&2
+fi
 """
     kw_arch = "amd64" if cfg.architecture == "amd64" else "arm64"
     keywords = (
@@ -5327,11 +5417,12 @@ unset FEATURES
 unset FEATURES
 {mirrorselect_block}
 echo ">> emerge @world"
-# Pass $RESPECT_USE (=y when Portage supports it) so binhost/usepkg @world
-# silences the ignore-NOTE instead of the weak default path. Never =n
-# (force mismatched binpkgs; wiki: breaks the system). Empty only when
-# unsupported. On failure, retry once from source (--usepkg=n).
-emerge --verbose --update --deep --newuse --keep-going $RESPECT_USE $NR @world
+# Handbook Base: source path uses --changed-use; binhost example uses --newuse
+# (plus -g via EMERGE_DEFAULT_OPTS / FEATURES). Pass $RESPECT_USE (=y when
+# Portage supports it) so binhost/usepkg @world silences the ignore-NOTE.
+# Never =n (force mismatched binpkgs; wiki: breaks the system). Empty only
+# when unsupported. On failure, retry once from source (--usepkg=n).
+emerge --verbose --update --deep {world_use_flag} --keep-going $RESPECT_USE $NR @world
 world_status=$?
 if [ "$world_status" -ne 0 ]; then
   if [ "$world_status" -eq 132 ]; then
@@ -5341,7 +5432,7 @@ if [ "$world_status" -ne 0 ]; then
     echo ">> emerge @world failed ($world_status); retrying once from source (--usepkg=n)" >&2
   fi
   dump_world_emerge_failure "$world_status"
-  emerge --verbose --update --deep --newuse --keep-going --usepkg=n --getbinpkg=n @world || {{
+  emerge --verbose --update --deep {world_use_flag} --keep-going --usepkg=n --getbinpkg=n @world || {{
     _world_retry_status=$?
     echo ">> @world source rebuild failed ($_world_retry_status)" >&2
     dump_world_emerge_failure "$_world_retry_status"
