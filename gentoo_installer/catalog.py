@@ -149,31 +149,30 @@ _SESSION_OVERRIDE: dict[str, tuple[str, str, str] | None] = {
     "x11-wm/i3": ("i3", "i3", "x11"),
 }
 
-# Shells the wizard can select. Both ebuilds live in GURU; the overlay is
-# enabled only after this choice, and GURU is not a package-list option.
+# Shells the wizard can select. Noctalia lives in GURU; the overlay is enabled
+# only after this choice, and GURU is not a package-list option.
+# DMS (DankMaterialShell) was removed — no ebuild on GURU master (see REMOVED_GURU_ATOMS).
 SHELL_CHOICES: list[tuple[str, str]] = [
     ("none", "No shell — compositor plus shared utilities"),
     ("noctalia", "Noctalia shell"),
-    ("dms", "DMS (DankMaterialShell)"),
 ]
 
 SHELL_PACKAGES: dict[str, list[Pkg]] = {
-    "noctalia": [Pkg("gui-apps/noctalia-shell", "Noctalia shell", "guru")],
-    "dms": [Pkg("gui-apps/dankmaterialshell", "DMS (DankMaterialShell)", "guru")],
+    "noctalia": [Pkg("gui-apps/noctalia", "Noctalia shell", "guru")],
 }
 
 # greetd frontend used only when Noctalia is the shell and a login manager is enabled.
 NOCTALIA_GREETER = Pkg("gui-apps/noctalia-greeter", "Noctalia greeter for greetd", "guru")
 
 SHELL_EXEC: dict[str, str] = {
-    "noctalia": "noctalia-shell",
-    "dms": "dms",
+    "noctalia": "noctalia",
 }
 
 # Previously offered from GURU but not restored as menu options. A saved profile
 # or typed atom must not emerge them. Wizard-offered GURU WMs/shells are the
 # exception (see offered_guru_atoms). vscode/vscodium/helix now live in ::gentoo.
 # gui-apps/tuigreet stays here — greetd uses gtkgreet/labwc (no tuigreet branch).
+# noctalia-shell / dankmaterialshell: old shell atoms; tip tree uses gui-apps/noctalia.
 REMOVED_GURU_ATOMS = frozenset(
     {
         "gui-wm/cage",
@@ -183,6 +182,8 @@ REMOVED_GURU_ATOMS = frozenset(
         "gui-apps/nwg-look",
         "x11-misc/ly",
         "gui-apps/tuigreet",
+        "gui-apps/noctalia-shell",
+        "gui-apps/dankmaterialshell",
         "www-client/brave-bin",
         "app-misc/fastfetch",
         "app-office/onlyoffice-bin",
@@ -345,7 +346,7 @@ WAYLAND_BASE: list[Pkg] = [
 # Extra packages a compositor needs that the shared set does not cover.
 WM_REQUIREMENTS: dict[str, list[Pkg]] = {
     "gui-wm/hyprland": [
-        Pkg("gui-apps/xdg-desktop-portal-hyprland", "Hyprland XDG portal", "hyproverlay"),
+        Pkg("gui-libs/xdg-desktop-portal-hyprland", "Hyprland XDG portal", "hyproverlay"),
         Pkg("gui-apps/hyprpaper", "Hyprpaper wallpaper", "hyproverlay"),
         Pkg("gui-apps/hypridle", "Hypridle", "hyproverlay"),
         Pkg("gui-apps/hyprlock", "Hyprlock", "hyproverlay"),
@@ -612,12 +613,12 @@ def needs_login_greeter(window_managers: list[str], shell: str = "", atoms: list
     if atoms:
         picked = list(dict.fromkeys(picked + list(atoms)))
     shell_name = (shell or "none").strip()
-    if shell_name and shell_name != "none":
+    if shell_name in SHELL_PACKAGES:
         return True
     if wayland_selected(picked):
         return True
     return any(
-        atom.split("::", 1)[0] in {"gui-apps/noctalia-shell", "gui-apps/dankmaterialshell"}
+        atom.split("::", 1)[0] in {"gui-apps/noctalia", "gui-apps/noctalia-greeter"}
         for atom in picked
     )
 
@@ -1340,8 +1341,8 @@ def enforce_firewall_mutual_exclusion(
     return False, selected, extra, warnings
 
 
-# Noctalia and DMS already provide the bar, launcher, and their own config.
-DOTFILE_SHELLS_SKIP = frozenset({"noctalia", "dms"})
+# Noctalia already provides the bar, launcher, and its own config.
+DOTFILE_SHELLS_SKIP = frozenset({"noctalia"})
 
 
 def dotfiles_skipped(shell: str) -> bool:

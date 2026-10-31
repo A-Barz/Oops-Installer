@@ -3605,7 +3605,8 @@ def _greetd_uses_noctalia(cfg: InstallConfig) -> bool:
     """Noctalia Shell brings its own greetd greeter."""
     if getattr(cfg, "shell", "") == "noctalia":
         return True
-    return "gui-apps/noctalia-shell" in set(_graphical_atoms(cfg))
+    atoms = set(_graphical_atoms(cfg))
+    return "gui-apps/noctalia" in atoms or "gui-apps/noctalia-greeter" in atoms
 
 
 def _accounts_daemon_probe() -> tuple[str, ...]:
@@ -5679,9 +5680,15 @@ def _overlay_script(cfg: InstallConfig) -> str:
         helper_um,
         "EOF",
         git_block,
-        "emerge --ask=n --verbose --noreplace app-eselect/eselect-repository || { "
+        # Same emerge_one path as git (SIGILL / --usepkg=n source retry).
+        "_eselect_save_nr=$NR",
+        "NR=--noreplace",
+        "emerge_one app-eselect/eselect-repository",
+        "eselect_emerge_status=$?",
+        "NR=$_eselect_save_nr",
+        'if [ "$eselect_emerge_status" -ne 0 ]; then '
         'echo ">> eselect-repository required for overlays" >&2; '
-        "emerge -pv app-eselect/eselect-repository >&2 || true; exit 1; }",
+        "emerge -pv app-eselect/eselect-repository >&2 || true; exit 1; fi",
         "if ! command -v eselect >/dev/null 2>&1; then "
         'echo ">> eselect missing — cannot enable overlays" >&2; exit 1; fi',
     ]

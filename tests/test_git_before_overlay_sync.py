@@ -143,7 +143,7 @@ class GitBeforeSyncTests(unittest.TestCase):
         script = _overlay_script(_cfg(window_managers=["gui-wm/niri"]))
         git_emerge = script.find(f"emerge_one {GIT_ATOM}")
         git_check = script.find("git missing after emerge")
-        eselect = script.find("emerge --ask=n --verbose --noreplace app-eselect/eselect-repository")
+        eselect = script.find("emerge_one app-eselect/eselect-repository")
         enable = script.find("eselect repository enable")
         self.assertGreaterEqual(git_emerge, 0)
         self.assertGreaterEqual(eselect, 0)

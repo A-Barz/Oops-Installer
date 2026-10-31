@@ -168,8 +168,6 @@ class OfferableAtomKeywordTests(unittest.TestCase):
                 cfg.extra_packages = [bare]
             if bare in catalog.shell_atoms("noctalia") or bare == catalog.NOCTALIA_GREETER.atom:
                 cfg.shell = "noctalia"
-            if bare in catalog.shell_atoms("dms"):
-                cfg.shell = "dms"
             if bare in catalog.nonfree_codec_atoms():
                 cfg.nonfree_codecs = True
             ensure_boot_to_greeter(cfg)
@@ -211,7 +209,8 @@ class OfferableAtomKeywordTests(unittest.TestCase):
         )
         planned = set(_atoms_to_unmask(cfg))
         self.assertIn("net-misc/curl", planned)
-        self.assertIn("gui-apps/xdg-desktop-portal-hyprland", planned)
+        self.assertIn("gui-libs/xdg-desktop-portal-hyprland", planned)
+        self.assertNotIn("gui-apps/xdg-desktop-portal-hyprland", planned)
 
 
 if __name__ == "__main__":

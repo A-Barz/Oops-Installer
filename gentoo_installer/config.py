@@ -178,7 +178,7 @@ class InstallConfig:
     display_manager: str = "auto"
     pipewire: bool = True
     browser: str = "none"
-    # none | noctalia | dms. Noctalia and DMS pull the GURU overlay themselves.
+    # none | noctalia. Noctalia pulls the GURU overlay itself.
     shell: str = "none"
     extra_packages: list[str] = field(default_factory=list)  # Final emerge set (atoms)
     selected_packages: list[str] = field(default_factory=list)  # Catalogue picks only
