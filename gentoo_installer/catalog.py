@@ -838,6 +838,28 @@ STALE_OVERLAY_NAMES: frozenset[str] = frozenset(
     {"wine", "sad", "src_prepare-overlay"}
 )
 
+# Still listed upstream, but Oops-Installer will not enable them (fail closed).
+# without-systemd pulls eudev and conflicts with OpenRC stage3 systemd-utils udev;
+# the installer does not apply that overlay's package.mask / provider migration.
+REFUSED_OVERLAY_NAMES: frozenset[str] = frozenset({"without-systemd"})
+
+REFUSED_OVERLAY_REASON = (
+    "OpenRC stage3 already avoids systemd as PID 1 and uses "
+    "sys-apps/systemd-utils for udev — that is not the without-systemd "
+    "overlay. Enabling without-systemd needs eudev migration this installer "
+    "does not perform. Add it by hand after install if you need it."
+)
+
+
+def refuse_unsupported_overlays(overlays: list[str] | tuple[str, ...] | set[str]) -> None:
+    """Fail closed when a refused overlay is still selected (typed / saved profile)."""
+    hit = [name for name in overlays if name in REFUSED_OVERLAY_NAMES]
+    if not hit:
+        return
+    raise SystemExit(
+        f"Refusing overlay(s): {', '.join(dict.fromkeys(hit))}. {REFUSED_OVERLAY_REASON}"
+    )
+
 
 def extra_overlays() -> list[tuple[str, str]]:
     """More names from overlays.gentoo.org (shown after the featured list)."""
@@ -848,7 +870,7 @@ def extra_overlays() -> list[tuple[str, str]]:
         "mysql", "palemoon", "parona-overlay", "php-overlay", "proaudio-gentoo",
         "pypi", "R_Overlay", "riscv", "ros-overlay", "sage-on-gentoo",
         "suckless-extra", "tex-overlay", "toolchain",
-        "torbrowser", "ukui", "vapoursynth", "without-systemd", "x11",
+        "torbrowser", "ukui", "vapoursynth", "x11",
         "xlibre", "zugaina", "pf4public", "tatsh-overlay", "thegreatmcpain",
         "sorrow", "yellow", "oddlama", "pentoo", "steam-overlay",
         "wayland-desktop", "hyproverlay", "science", "kde", "qt",
@@ -857,7 +879,9 @@ def extra_overlays() -> list[tuple[str, str]]:
     return [
         (n, f"Community overlay from overlays.gentoo.org — `eselect repository enable {n}`")
         for n in sorted(set(names))
-        if n not in featured and n not in STALE_OVERLAY_NAMES
+        if n not in featured
+        and n not in STALE_OVERLAY_NAMES
+        and n not in REFUSED_OVERLAY_NAMES
     ]
 
 

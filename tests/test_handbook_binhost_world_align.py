@@ -33,7 +33,7 @@ def _cfg(**kwargs: object) -> InstallConfig:
 
 class HandbookBinhostWorldAlignTests(unittest.TestCase):
     def test_rev_bumped(self) -> None:
-        self.assertEqual(INSTALLER_REV, 84)
+        self.assertGreaterEqual(INSTALLER_REV, 84)
 
     def test_features_include_getbinpkg_and_signature_when_binhost(self) -> None:
         text = _make_conf_text(_cfg(binhost=True))

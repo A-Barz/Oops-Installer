@@ -80,6 +80,7 @@ def queue_saved_software(cfg: InstallConfig) -> None:
     cfg.extra_packages = list(dict.fromkeys(managers + needed + kept))
     cfg.overlays = [name for name in cfg.overlays if name != "guru"]
     cfg.overlays = catalog.overlays_required_by(cfg.extra_packages, cfg.overlays)
+    catalog.refuse_unsupported_overlays(cfg.overlays)
     if managers or any("wayland" in atom or "gui-wm/" in atom for atom in cfg.extra_packages):
         if "wayland" not in cfg.extra_use:
             cfg.extra_use.append("wayland")
@@ -739,11 +740,27 @@ def _stage(cfg: InstallConfig) -> None:
         cfg.install_type = "server"
     else:
         ui.info("Kernel package selection comes later (chapter 7), after the base-system questions.")
+    ui.info(
+        "OpenRC is Gentoo's default init (PID 1). That is not the same as the "
+        "without-systemd community overlay: an OpenRC stage3 still uses "
+        "sys-apps/systemd-utils for udev (and related tools), not systemd as PID 1."
+    )
+    ui.info(
+        "OpenRC keeps shell-script services, pairs with elogind for desktops, and "
+        "does not require journald/timers. Many other distros default to full "
+        "systemd; both OpenRC and systemd stages are supported here."
+    )
     cfg.init_system = ui.menu(
         "Init system",
         [
-            ("openrc", "OpenRC — Gentoo native"),
-            ("systemd", "systemd — handbook alternative"),
+            (
+                "openrc",
+                "OpenRC — Gentoo default PID 1 (udev via systemd-utils, not systemd-as-init)",
+            ),
+            (
+                "systemd",
+                "systemd — full PID 1 (common on other distros; handbook alternative)",
+            ),
         ],
         "openrc",
     )
@@ -1486,6 +1503,7 @@ def _packages(cfg: InstallConfig) -> None:
         cfg.overlays = [
             name for name in cfg.overlays if name not in catalog.STALE_OVERLAY_NAMES
         ]
+        catalog.refuse_unsupported_overlays(cfg.overlays)
 
     locked = _packages_locked_from_earlier_steps(cfg)
     picked: list[str] = [atom for atom in cfg.selected_packages if atom not in locked]
@@ -1616,6 +1634,7 @@ def _packages(cfg: InstallConfig) -> None:
     _apply_firewall_exclusion(cfg)
     cfg.overlays = [name for name in cfg.overlays if name != "guru"]
     cfg.overlays = catalog.overlays_required_by(cfg.extra_packages, cfg.overlays)
+    catalog.refuse_unsupported_overlays(cfg.overlays)
     if cfg.window_managers or any("wayland" in a or "gui-wm/" in a for a in cfg.extra_packages):
         if "wayland" not in cfg.extra_use:
             cfg.extra_use.append("wayland")

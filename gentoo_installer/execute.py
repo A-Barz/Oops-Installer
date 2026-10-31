@@ -156,6 +156,8 @@ def execute(cfg: InstallConfig) -> None:
     from .wizard import _apply_firewall_exclusion, queue_saved_software
 
     queue_saved_software(cfg)
+    # A1: without-systemd is not supported (eudev vs stage3 systemd-utils).
+    catalog.refuse_unsupported_overlays(cfg.overlays or [])
     # M9: YAML/--config profiles can still list ufw alongside default nftables.
     _apply_firewall_exclusion(cfg)
 
@@ -4600,7 +4602,9 @@ def _required_overlays(cfg: InstallConfig) -> list[str]:
 
     Stale checklist names (wine, …) absent from repositories.xml are dropped —
     handbook Wine packages live in ::gentoo and do not need a wine overlay.
+    Refused names (without-systemd, …) fail closed — never enable.
     """
+    catalog.refuse_unsupported_overlays(cfg.overlays or [])
     overlay_names = [
         name
         for name in cfg.overlays
