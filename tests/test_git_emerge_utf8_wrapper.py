@@ -185,18 +185,20 @@ class BinpkgRespectUseReadinessTests(unittest.TestCase):
         self.assertLess(sanitize, emerge)
         self.assertIn("$RESPECT_USE", script)
 
-    def test_world_emerge_omits_respect_use_keeps_note(self) -> None:
-        """@world omits $RESPECT_USE so the binpkg-respect-use NOTE stays visible.
+    def test_world_emerge_passes_respect_use_keeps_source_retry(self) -> None:
+        """@world passes $RESPECT_USE (=y when supported) to silence the NOTE.
 
         Do not pass --binpkg-respect-use=n (force-binpkg). On failure, dump
         Portage detail and retry once with --usepkg=n (source).
         """
-        script = render_chroot_script(_cfg(), {"root": "/dev/vda2", "esp": "/dev/vda1"})
-        primary = "emerge --verbose --update --deep --newuse --keep-going $NR @world"
+        script = render_chroot_script(_cfg(binhost=True), {"root": "/dev/vda2", "esp": "/dev/vda1"})
+        primary = (
+            "emerge --verbose --update --deep --newuse --keep-going "
+            "$RESPECT_USE $NR @world"
+        )
         self.assertIn(primary, script)
         self.assertNotIn(
-            "emerge --verbose --update --deep --newuse --keep-going "
-            "$RESPECT_USE $NR @world",
+            "emerge --verbose --update --deep --newuse --keep-going $NR @world",
             script,
         )
         self.assertNotIn('RESPECT_USE="--binpkg-respect-use=n"', script)

@@ -1,4 +1,4 @@
-"""emerge @world: keep binpkg NOTE, dump Portage errors, retry --usepkg=n once."""
+"""emerge @world: pass $RESPECT_USE=y when supported; retry --usepkg=n once."""
 
 from __future__ import annotations
 
@@ -27,19 +27,25 @@ def _cfg(**kwargs: object) -> InstallConfig:
 
 
 class WorldUsepkgNRetryTests(unittest.TestCase):
-    def test_rev_bumped_for_world_retry(self) -> None:
-        self.assertGreaterEqual(INSTALLER_REV, 81)
+    def test_rev_bumped_for_respect_use_world(self) -> None:
+        self.assertGreaterEqual(INSTALLER_REV, 82)
 
-    def test_primary_world_omits_respect_use(self) -> None:
-        script = render_chroot_script(_cfg(), {"root": "/dev/vda2", "esp": "/dev/vda1"})
+    def test_primary_world_passes_respect_use(self) -> None:
+        script = render_chroot_script(_cfg(binhost=True), {"root": "/dev/vda2", "esp": "/dev/vda1"})
         self.assertIn(
+            "emerge --verbose --update --deep --newuse --keep-going "
+            "$RESPECT_USE $NR @world",
+            script,
+        )
+        # Bare $NR @world without $RESPECT_USE is the weak/NOTE path — reject it.
+        self.assertNotIn(
             "emerge --verbose --update --deep --newuse --keep-going $NR @world",
             script,
         )
-        self.assertNotIn("$RESPECT_USE $NR @world", script)
-        # portage_prepare may set =y for emerge_one; never assign =n (force-binpkg).
+        # portage_prepare sets =y when Portage supports it; never =n (force-binpkg).
         self.assertIn('RESPECT_USE="--binpkg-respect-use=y"', script)
         self.assertNotIn('RESPECT_USE="--binpkg-respect-use=n"', script)
+        self.assertIn("binhost/usepkg on; RESPECT_USE=", script)
         for line in script.splitlines():
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
@@ -75,7 +81,7 @@ class WorldUsepkgNRetryTests(unittest.TestCase):
         script = render_chroot_script(_cfg(), {"root": "/dev/vda2", "esp": "/dev/vda1"})
         self.assertIn("dump_world_emerge_failure()", script)
         self.assertIn("@world Portage failure dump", script)
-        self.assertIn("binpkg-respect-use NOTE stays visible; never =n", script)
+        self.assertIn("=y when Portage supports it; never =n", script)
         self.assertIn('echo ">> $_line" >&2', script)
         self.assertIn("/var/tmp/portage/*/temp/build.log", script)
         self.assertIn("Failed to emerge", script)

@@ -76,7 +76,7 @@ class PortageOneshotTests(unittest.TestCase):
             self.assertLess(handbook, overlay)
 
     def test_installer_rev_bumped(self) -> None:
-        self.assertEqual(INSTALLER_REV, 81)
+        self.assertEqual(INSTALLER_REV, 82)
 
 
 class OverlayIdempotentEnableTests(unittest.TestCase):
