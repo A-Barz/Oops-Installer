@@ -141,7 +141,7 @@ class StaleWineOverlayTests(unittest.TestCase):
         self.assertIn("eselect repository enable suckless-extra", script)
 
     def test_installer_rev_80(self) -> None:
-        self.assertEqual(INSTALLER_REV, 80)
+        self.assertEqual(INSTALLER_REV, 81)
 
 
 if __name__ == "__main__":

@@ -185,24 +185,37 @@ class BinpkgRespectUseReadinessTests(unittest.TestCase):
         self.assertLess(sanitize, emerge)
         self.assertIn("$RESPECT_USE", script)
 
-    def test_world_emerge_passes_respect_use(self) -> None:
-        """Primary @world uses $RESPECT_USE like emerge_one; not make.conf."""
+    def test_world_emerge_omits_respect_use_keeps_note(self) -> None:
+        """@world omits $RESPECT_USE so the binpkg-respect-use NOTE stays visible.
+
+        Do not pass --binpkg-respect-use=n (force-binpkg). On failure, dump
+        Portage detail and retry once with --usepkg=n (source).
+        """
         script = render_chroot_script(_cfg(), {"root": "/dev/vda2", "esp": "/dev/vda1"})
-        primary = (
-            "emerge --verbose --update --deep --newuse --keep-going "
-            "$RESPECT_USE $NR @world"
-        )
+        primary = "emerge --verbose --update --deep --newuse --keep-going $NR @world"
         self.assertIn(primary, script)
-        # SIGILL retry already disables binpkgs; respect-use stays omitted.
-        sigill = (
+        self.assertNotIn(
+            "emerge --verbose --update --deep --newuse --keep-going "
+            "$RESPECT_USE $NR @world",
+            script,
+        )
+        self.assertNotIn('RESPECT_USE="--binpkg-respect-use=n"', script)
+        for line in script.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if "emerge" in stripped:
+                self.assertNotIn("--binpkg-respect-use=n", stripped)
+        self.assertIn("dump_world_emerge_failure", script)
+        self.assertIn(
+            "retrying once from source (--usepkg=n)",
+            script,
+        )
+        source_retry = (
             "emerge --verbose --update --deep --newuse --keep-going "
             "--usepkg=n --getbinpkg=n @world"
         )
-        self.assertIn(sigill, script)
-        self.assertNotIn(
-            "$RESPECT_USE $NR --usepkg=n --getbinpkg=n @world",
-            script,
-        )
+        self.assertIn(source_retry, script)
         conf = _make_conf_text(_cfg(binhost=True, binpkg_respect_use=False))
         self.assertNotIn("binpkg-respect-use", conf)
 
