@@ -130,7 +130,7 @@ SSD detection enables weekly `fstrim`. Disks under ~40 GiB get a warning. Dual b
 | `VIDEO_CARDS` / `INPUT_DEVICES` | prompts from live probe | auto / `libinput` (+ wacom) |
 | Global USE | checklist (see below) | pre-ticks `dist-kernel`, `wayland`, … |
 | Extra USE / LTO / hardened CFLAGS | prompts | LTO No; hardened forced if variant hardened |
-| Mirrors / MAKEOPTS | empty = mirrorselect | jobs `0` = CPU count |
+| Mirrors / MAKEOPTS | empty = curated + deep mirrorselect | jobs `0` = CPU count |
 
 **USE checklist flags:** `X`, `wayland`, `gtk`, `qt5`, `qt6`, `opengl`, `vulkan`, `alsa`, `pulseaudio`, `pipewire`, `jack`, `bluetooth`, `networkmanager`, `wifi`, `dbus`, `udev`, `elogind`, `systemd`, `cups`, `pam`, `ssl`, `python`, `nls`, `dist-kernel`.
 
@@ -368,7 +368,7 @@ The wizard follows handbook order. Places where Arch is stricter and this instal
 
 - `/etc/fstab` names a plain partition by PARTUUID on GPT, or by filesystem UUID otherwise. LVM, LUKS, and ZFS stay on `/dev/mapper` names. ESP at `/efi` with `umask=0077`.
 - GRUB keeps the kernel on `/boot`. systemd-boot and EFI stub install the kernel onto `/efi`.
-- Empty mirror answer → `mirrorselect` → `GENTOO_MIRRORS`.
+- Empty mirror answer → curated `GENTOO_MIRRORS` (multi-base + distfiles) then optional deep `mirrorselect -D`.
 - Console keymap before LUKS passphrase; SSD → weekly `fstrim`; nftables offered (default yes); SSH opened only when sshd is selected.
 - Small-disk warning; 32-bit UEFI limited to GRUB `i386-efi`; declining `linux-firmware` notes AMD microcode lives there.
 - After install: power down; remove USB only when the machine is off.
