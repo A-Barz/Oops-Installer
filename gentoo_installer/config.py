@@ -94,7 +94,7 @@ class InstallConfig:
     # --- Handbook ch. 5: stage tarball flavour ---
     init_system: str = "openrc"  # openrc | systemd — selects latest-stage3-*-{init}.txt
     install_type: str = "desktop"  # desktop stage3 includes LLVM/Rust-bin
-    stage_level: str = "stage3"  # stage1, stage2, or stage3 (handbook default)
+    stage_level: str = "stage3"  # public autobuilds are stage3-only; stage1/2 refused
     stage_variant: str = "standard"  # standard, hardened, musl
     verify_stage: bool = True  # SHA256 + GPG (Release Engineering keys)
     testing_keywords: bool = False  # Writes */* ~amd64 if True

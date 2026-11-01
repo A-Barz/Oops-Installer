@@ -49,6 +49,7 @@ class AlreadySelectedPackageTests(unittest.TestCase):
         self.assertIn("gui-wm/hyprland", locked)
         self.assertIn("gui-apps/hyprpaper", locked)
         self.assertIn("media-video/pipewire", locked)
+        self.assertIn("sys-process/btop", locked)
         # end-4 dotfiles may pull Firefox; Chrome is never auto-locked as mandatory.
         self.assertNotIn("www-client/google-chrome", locked)
         cfg_no_dot = InstallConfig()
@@ -58,6 +59,28 @@ class AlreadySelectedPackageTests(unittest.TestCase):
         locked_plain = _packages_locked_from_earlier_steps(cfg_no_dot)
         self.assertNotIn("www-client/firefox-bin:esr", locked_plain)
         self.assertNotIn("www-client/google-chrome", locked_plain)
+
+    def test_end4_btop_stays_visible_selected_in_system_admin(self) -> None:
+        """Locked dots packages show selected — not hidden (OI-86 / c5ab)."""
+        cfg = InstallConfig()
+        cfg.window_managers = ["gui-wm/hyprland"]
+        cfg.shell = "none"
+        cfg.pipewire = True
+        cfg.wm_dotfiles = ["gui-wm/hyprland=end-4"]
+        locked = _packages_locked_from_earlier_steps(cfg)
+        self.assertIn("sys-process/btop", locked)
+        hide_always = catalog.firewall_catalogue_hidden(bool(cfg.nftables))
+        show_locked = locked - hide_always
+        system = next(pkgs for key, _t, pkgs in catalog.CATEGORIES if key == "system")
+        # Do not hide queued dots deps — only mutual-exclusion / claimed rows.
+        visible = catalog.without_already_selected(system, hide_always)
+        visible_atoms = {atom for atom, _ in visible}
+        self.assertIn("sys-process/btop", visible_atoms)
+        self.assertIn("sys-process/htop", visible_atoms)
+        self.assertIn("sys-process/btop", show_locked)
+        # Old hide-locked behavior would drop btop; that must not return.
+        hidden_old = catalog.without_already_selected(system, locked)
+        self.assertNotIn("sys-process/btop", {atom for atom, _ in hidden_old})
 
     def test_locked_includes_greetd_when_chosen(self) -> None:
         cfg = InstallConfig()

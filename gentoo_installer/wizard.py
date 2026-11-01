@@ -706,15 +706,19 @@ def _disks(cfg: InstallConfig) -> None:
 
 
 def _stage(cfg: InstallConfig) -> None:
-    """Handbook: Stage file — stage1/2/3, OpenRC/systemd, desktop vs hardened/musl."""
+    """Handbook: Stage file — stage3 on public autobuilds; OpenRC/systemd; desktop vs hardened/musl."""
     ui.chapter("5", "Installing the Gentoo installation files", f"{HANDBOOK}/Installation/Stage")
     ui.info(
-        "The stage tarball is the base system archive (stage1 / stage2 / stage3). "
-        "It is not a kernel. Stage3 does not include a bootable kernel image — "
+        "The stage tarball is the base system archive. "
+        "Public Gentoo autobuilds publish stage3 only — stage1 and stage2 tarballs "
+        "are not on distfiles mirrors (latest-stage1/2 would 404 everywhere)."
+    )
+    ui.info(
+        "Stage3 does not include a bootable kernel image — "
         "you choose which kernel package to emerge in chapter 7."
     )
     cfg.stage_level = ui.menu(
-        "Stage tarball (handbook default is stage3)",
+        "Stage tarball (handbook default is stage3; public mirrors are stage3-only)",
         [
             (
                 "stage3",
@@ -722,24 +726,29 @@ def _stage(cfg: InstallConfig) -> None:
             ),
             (
                 "stage2",
-                "stage2 — toolchain plus a thin base. This installer then runs emerge -e @system.",
+                "stage2 — not on public autobuilds (expert; installer refuses download)",
             ),
             (
                 "stage1",
-                "stage1 — seed toolchain only. Very long bootstrap; not for a first install.",
+                "stage1 — not on public autobuilds (expert; installer refuses download)",
             ),
         ],
         "stage3",
     )
     if cfg.stage_level != "stage3":
-        ui.warn(f"{cfg.stage_level} is experimental on official autobuilds and can take many extra hours.")
-        ui.warn("Desktop/LLVM tarballs usually exist only as stage3. Minimal flavour will be used.")
-        ui.info(
-            "If the stage file or emerge returns HTTP 404, the installer checks the next Gentoo mirror and retries."
+        ui.danger(
+            f"{cfg.stage_level} is not published on public Gentoo autobuild mirrors."
         )
-        cfg.install_type = "server"
-    else:
-        ui.info("Kernel package selection comes later (chapter 7), after the base-system questions.")
+        ui.warn(
+            "This installer will not wget latest-stage1/2 — every mirror would answer 404."
+        )
+        if not ui.ask_yes_no("Continue with stage3 instead (required for public mirrors)?", True):
+            raise SystemExit(
+                "Aborted. Public autobuilds are stage3-only; choose stage3."
+            )
+        cfg.stage_level = "stage3"
+        ui.ok("Using stage3.")
+    ui.info("Kernel package selection comes later (chapter 7), after the base-system questions.")
     ui.info(
         "OpenRC is Gentoo's default init (PID 1). That is not the same as the "
         "without-systemd community overlay: an OpenRC stage3 still uses "
@@ -1464,8 +1473,8 @@ def _packages(cfg: InstallConfig) -> None:
         "flatpak-app/* row (Pulsar, etc.), or install from Flathub after first boot."
     )
     ui.info(
-        "Packages already chosen earlier (compositors, greetd, deps, dotfiles) "
-        "are hidden so you are not asked twice."
+        "Packages already chosen earlier (compositors, deps, dotfiles) stay selected "
+        "and locked so you can see what will install (for example end-4 → btop)."
     )
     ui.info("Each category: Space toggles, Enter continues to the next category.")
     ui.info("The top row, Select all, ticks every package in that section.")
@@ -1490,7 +1499,15 @@ def _packages(cfg: InstallConfig) -> None:
         catalog.refuse_unsupported_overlays(cfg.overlays)
 
     locked = _packages_locked_from_earlier_steps(cfg)
-    picked: list[str] = [atom for atom in cfg.selected_packages if atom not in locked]
+    # Mutual-exclusion rows stay hidden; queued dots/deps stay visible and selected.
+    hide_always = set(catalog.firewall_catalogue_hidden(bool(cfg.nftables)))
+    if cfg.ufw and not cfg.nftables:
+        hide_always.add(catalog.NFTABLES_ATOM)
+    show_locked = locked - hide_always
+    picked: list[str] = [atom for atom in cfg.selected_packages if atom not in hide_always]
+    for atom in show_locked:
+        if atom not in picked:
+            picked.append(atom)
     if cfg.ufw and not cfg.nftables and catalog.UFW_ATOM not in picked:
         picked.append(catalog.UFW_ATOM)
         ui.info(f"{catalog.UFW_ATOM} queued from the firewall step (deny-in / allow-out).")
@@ -1537,10 +1554,17 @@ def _packages(cfg: InstallConfig) -> None:
 
     claimed: set[str] = set()
     for index, (key, title, packages) in enumerate(steps, start=1):
-        hide = set(locked) | claimed
+        # Hide only exclusions and atoms already claimed in an earlier category.
+        # Dotfile/WM deps stay visible and pre-selected (e.g. end-4 → btop).
+        hide = set(hide_always) | claimed
         visible = catalog.without_already_selected(packages, hide)
+        locked_here = {atom for atom, _desc in visible if atom in show_locked}
+        rows = [
+            (atom, f"{desc}  [already queued]" if atom in locked_here else desc)
+            for atom, desc in visible
+        ]
         ui.info(f"Category {index}/{len(steps)}: {title}")
-        if not visible:
+        if not rows:
             ui.info(f"{title}: every package here was already chosen earlier — continuing.")
             continue
         if key == "browsers":
@@ -1551,18 +1575,22 @@ def _packages(cfg: InstallConfig) -> None:
             ui.info("Editors include Sublime Text and Pulsar (Atom’s Flatpak successor) near the top.")
         selected = ui.paged_checklist(
             f"{title} — Enter continues to the next category",
-            visible,
+            rows,
             selected=picked,
             page_size=14,
             select_all=True,
+            locked=locked_here,
         )
-        visible_atoms = {atom for atom, _ in visible}
+        visible_atoms = {atom for atom, _ in rows}
         for atom in selected:
             if atom not in picked:
                 picked.append(atom)
         for atom in list(picked):
-            if atom in visible_atoms and atom not in selected:
+            if atom in visible_atoms and atom not in selected and atom not in locked_here:
                 picked.remove(atom)
+        for atom in locked_here:
+            if atom not in picked:
+                picked.append(atom)
         claimed.update(visible_atoms)
 
     extra = ui.prompt("Additional emerge atoms (space-separated, e.g. app-misc/jq media-gfx/feh)", "")

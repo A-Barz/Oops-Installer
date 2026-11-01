@@ -557,19 +557,29 @@ def checklist(title: str, choices: Sequence[tuple[str, str]], selected: Iterable
     return paged_checklist(title, choices, selected=selected, page_size=max(12, len(choices)))
 
 
-def _section_all_selected(choices: Sequence[tuple[str, str]], current: set[str]) -> bool:
-    ids = [value for value, _desc in choices]
+def _section_all_selected(
+    choices: Sequence[tuple[str, str]], current: set[str], locked: set[str] | None = None
+) -> bool:
+    freeze = locked or set()
+    ids = [value for value, _desc in choices if value not in freeze]
     return bool(ids) and all(value in current for value in ids)
 
 
-def _toggle_section(choices: Sequence[tuple[str, str]], current: set[str]) -> None:
+def _toggle_section(
+    choices: Sequence[tuple[str, str]], current: set[str], locked: set[str] | None = None
+) -> None:
     """Tick every package in the section, or clear them when they are already all ticked."""
-    ids = [value for value, _desc in choices]
-    if _section_all_selected(choices, current):
+    freeze = locked or set()
+    ids = [value for value, _desc in choices if value not in freeze]
+    if _section_all_selected(choices, current, freeze):
         for value in ids:
             current.discard(value)
+        for value in freeze:
+            current.add(value)
         return
     for value in ids:
+        current.add(value)
+    for value in freeze:
         current.add(value)
 
 
@@ -579,15 +589,18 @@ def paged_checklist(
     selected: Iterable[str] | None = None,
     page_size: int = 14,
     select_all: bool = False,
+    locked: Iterable[str] | None = None,
 ) -> list[str]:
     """Searchable multi-select: arrows move, Space toggles, Enter finishes.
 
     select_all pins a row at the top that ticks every package in this section.
+    locked atoms stay selected and cannot be unticked (dotfile / earlier deps).
     """
+    freeze = {value for value in (locked or [])}
     if not _interactive():
-        return _paged_checklist_fallback(title, choices, selected, page_size, select_all)
+        return _paged_checklist_fallback(title, choices, selected, page_size, select_all, freeze)
 
-    current = set(selected or [])
+    current = set(selected or []) | freeze
     query = ""
     page = 0
     cursor = -1 if select_all else 0
@@ -608,6 +621,8 @@ def paged_checklist(
             )
             if select_all:
                 hint += "   top row: whole section"
+            if freeze:
+                hint += "   [already queued] stays on"
             lines = [
                 paint(f"  {title}", C.BOLD, C.GREEN),
                 paint(
@@ -620,7 +635,7 @@ def paged_checklist(
                 paint(hint, C.DIM, C.GREEN),
             ]
             if select_all:
-                all_on = _section_all_selected(choices, current)
+                all_on = _section_all_selected(choices, current, freeze)
                 box = paint("[x]", C.GREEN, C.BOLD) if all_on else paint("[ ]", C.DIM)
                 mark = paint("▸", C.BOLD, C.GREEN) if cursor == -1 else " "
                 prefix = paint("  > ", C.BOLD, C.GREEN) if cursor == -1 else "    "
@@ -631,6 +646,7 @@ def paged_checklist(
             flag_w = max((len(value) for value, _desc in view), default=0)
             for i, (value, desc) in enumerate(view):
                 on = value in current
+                frozen = value in freeze
                 box = paint("[x]", C.GREEN, C.BOLD) if on else paint("[ ]", C.DIM)
                 mark = paint("▸", C.BOLD, C.GREEN) if i == cursor else " "
                 prefix = paint("  > ", C.BOLD, C.GREEN) if i == cursor else "    "
@@ -643,7 +659,12 @@ def paged_checklist(
                 )
                 room = max(16, width() - flag_w - 16)
                 shown = desc if len(desc) <= room else desc[: room - 1] + "…"
-                detail = highlight_guru(paint(shown, C.WHITE), after=C.WHITE) if shown else ""
+                detail_codes = (C.DIM, C.PURPLE) if frozen else (C.WHITE,)
+                detail = (
+                    highlight_guru(paint(shown, *detail_codes), after="".join(detail_codes))
+                    if shown
+                    else ""
+                )
                 lines.append(f"{prefix}{mark} {box} {flag}  {detail}".rstrip())
             _erase_lines(drawn)
             print("\n".join(lines))
@@ -677,14 +698,17 @@ def paged_checklist(
                 if cursor != -1:
                     cursor = 0
             elif key == "space" and select_all and cursor == -1:
-                _toggle_section(choices, current)
+                _toggle_section(choices, current, freeze)
             elif key == "space" and view and cursor >= 0:
                 val = view[cursor][0]
-                if val in current:
+                if val in freeze:
+                    current.add(val)
+                elif val in current:
                     current.remove(val)
                 else:
                     current.add(val)
             elif key == "enter":
+                current |= freeze
                 order = [v for v, _ in choices if v in current]
                 extra = [v for v in current if v not in {c[0] for c in choices}]
                 return order + extra
@@ -701,7 +725,9 @@ def paged_checklist(
                     current.add(value)
             elif key in {"c", "C"}:
                 for value, _ in view:
-                    current.discard(value)
+                    if value not in freeze:
+                        current.discard(value)
+                current |= freeze
     finally:
         _show_cursor()
         print()
@@ -713,8 +739,10 @@ def _paged_checklist_fallback(
     selected: Iterable[str] | None,
     page_size: int,
     select_all: bool = False,
+    locked: set[str] | None = None,
 ) -> list[str]:
-    current = set(selected or [])
+    freeze = locked or set()
+    current = set(selected or []) | freeze
     query = ""
     page = 0
     info("Not a TTY — type a number to toggle, 0 when done.")
@@ -727,7 +755,7 @@ def _paged_checklist_fallback(
         print()
         print(paint(f"  {title}", C.BOLD, C.GREEN))
         if select_all:
-            all_on = _section_all_selected(choices, current)
+            all_on = _section_all_selected(choices, current, freeze)
             mark = paint("[x]", C.GREEN, C.BOLD) if all_on else paint("[ ]", C.DIM)
             print(f"    {mark} {paint('*', C.GREEN)}. {paint('Select all', C.WHITE)}")
         for i, (value, desc) in enumerate(view, start=1):
@@ -739,6 +767,7 @@ def _paged_checklist_fallback(
             )
         raw = prompt("Package command", "0")
         if raw in {"", "0", "d", "done"}:
+            current |= freeze
             order = [v for v, _ in choices if v in current]
             extra = [v for v in current if v not in {c[0] for c in choices}]
             return order + extra
@@ -750,16 +779,20 @@ def _paged_checklist_fallback(
             query = raw[1:].strip()
             page = 0
         elif select_all and raw.lower() in {"*", "all"}:
-            _toggle_section(choices, current)
+            _toggle_section(choices, current, freeze)
         elif raw.lower() == "a":
             for value, _ in view:
                 current.add(value)
         elif raw.lower() == "c":
             for value, _ in view:
-                current.discard(value)
+                if value not in freeze:
+                    current.discard(value)
+            current |= freeze
         elif raw.isdigit() and 1 <= int(raw) <= len(view):
             val = view[int(raw) - 1][0]
-            if val in current:
+            if val in freeze:
+                current.add(val)
+            elif val in current:
                 current.remove(val)
             else:
                 current.add(val)
