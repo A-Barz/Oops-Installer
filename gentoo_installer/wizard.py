@@ -877,7 +877,7 @@ def _base(cfg: InstallConfig) -> None:
         "If emerge gets HTTP 404 from the chosen mirror, the installer checks another mirror and retries that emerge."
     )
     cfg.gentoo_mirrors = ui.prompt(
-        "GENTOO_MIRRORS URL (empty = speed-test mirrors with mirrorselect)",
+        "GENTOO_MIRRORS URL (empty = curated bases + optional deep mirrorselect)",
         cfg.gentoo_mirrors,
     )
     cfg.makeopts_jobs = int(ui.prompt("MAKEOPTS jobs (0 = CPU count)", "0"))
@@ -1857,7 +1857,7 @@ def _review(cfg: InstallConfig) -> None:
             ),
         ),
         ("TRIM", "weekly" if cfg.fstrim else "no"),
-        ("Mirrors", cfg.gentoo_mirrors or "mirrorselect"),
+        ("Mirrors", cfg.gentoo_mirrors or "curated + mirrorselect -D"),
         ("Plymouth", _plymouth_review(cfg)),
         ("Hostname", cfg.hostname),
         ("DNS", f"{cfg.dns_provider}: {cfg.dns_servers}"),

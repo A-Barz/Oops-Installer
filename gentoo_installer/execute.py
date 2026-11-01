@@ -1510,6 +1510,11 @@ def _mirror_bases(cfg: InstallConfig) -> list[str]:
     return ordered
 
 
+def _default_gentoo_mirrors() -> str:
+    """Curated multi-mirror string: GENTOO_MIRROR_BASES with distfiles first."""
+    return " ".join(GENTOO_MIRROR_BASES)
+
+
 def _stage_relpath(text: str) -> str:
     """Relative tarball path from a latest-<flavor>.txt pointer, or ''."""
     for line in text.splitlines():
@@ -1931,7 +1936,7 @@ def _make_conf_text(cfg: InstallConfig) -> str:
             grub_plat = 'GRUB_PLATFORMS="efi-64"'
     else:
         grub_plat = ""
-    mirrors = cfg.gentoo_mirrors.strip()
+    mirrors = cfg.gentoo_mirrors.strip() or _default_gentoo_mirrors()
     cflags = "-march=native -O2 -pipe"
     if cfg.hardened_flags:
         cflags += " -fstack-protector-strong -fstack-clash-protection"
@@ -1959,9 +1964,10 @@ def _make_conf_text(cfg: InstallConfig) -> str:
         f'ACCEPT_LICENSE="{cfg.accept_license}"',
         f'VIDEO_CARDS="{video}"',
         f'INPUT_DEVICES="{(cfg.input_devices or detect.suggest_input_devices()).strip() or "libinput"}"',
+        # Always set GENTOO_MIRRORS: wizard value, or curated bases (distfiles
+        # first) so early sync/emerge never wait on optional mirrorselect.
+        f'GENTOO_MIRRORS="{mirrors}"',
     ]
-    if mirrors:
-        lines.append(f'GENTOO_MIRRORS="{mirrors}"')
     if l10n:
         lines.append(f'L10N="{l10n}"')
     if linguas:
@@ -5408,6 +5414,10 @@ unset FEATURES
 {_profile_set_script(cfg)}
 unset FEATURES
 portage_prepare
+# Handbook Base: pick mirrors once the tree/profile exist, before overlays/@world
+# so oneshot/overlay fetches use curated (or deep-selected) GENTOO_MIRRORS.
+{mirrorselect_block}
+unset FEATURES
 {bootstrap}
 {_portage_oneshot_script(reason="after sync/profile (Handbook final tree)")}
 unset FEATURES
@@ -5415,7 +5425,6 @@ unset FEATURES
 unset FEATURES
 {locale_eselect}
 unset FEATURES
-{mirrorselect_block}
 echo ">> emerge @world"
 # Handbook Base: source path uses --changed-use; binhost example uses --newuse
 # (plus -g via EMERGE_DEFAULT_OPTS / FEATURES). Pass $RESPECT_USE (=y when
@@ -6528,17 +6537,76 @@ def _installkernel_setup(cfg: InstallConfig) -> str:
 
 
 def _mirrorselect_block(cfg: InstallConfig) -> str:
-    """Emerge mirrorselect and write GENTOO_MIRRORS when the wizard left it empty."""
+    """Optional deep mirrorselect; curated multi-mirror fallback already in make.conf.
+
+    Handbook/wiki: ``mirrorselect -s3 -b10 -D``; keep several mirrors with
+    distfiles.gentoo.org as fallback. Soft-fail quietly — never leave make.conf
+    without GENTOO_MIRRORS, and never surface raw ``Could not find any mirrors.``
+    as the install story.
+    """
     if cfg.gentoo_mirrors.strip():
         return ""
-    return """
-echo ">> select fast mirrors"
-emerge --ask=n --oneshot --verbose $NR app-portage/mirrorselect || true
-if command -v mirrorselect >/dev/null 2>&1; then
-  mirrorselect -s3 -b10 -o >> /etc/portage/make.conf || true
+    curated = _default_gentoo_mirrors()
+    curated_line = shlex.quote(f'GENTOO_MIRRORS="{curated}"')
+    return f"""
+echo ">> select fast mirrors (deep probe; curated fallback ready)"
+# Host make.conf already wrote curated GENTOO_MIRRORS. Re-assert if missing.
+if ! grep -hq '^GENTOO_MIRRORS=' /etc/portage/make.conf /etc/portage/make.conf/* /etc/make.conf 2>/dev/null; then
+  if [ -d /etc/portage/make.conf ]; then
+    _ms_conf=/etc/portage/make.conf/99gentoo-live-installer
+  else
+    _ms_conf=/etc/portage/make.conf
+  fi
+  mkdir -p "$(dirname "$_ms_conf")"
+  echo {curated_line} >> "$_ms_conf"
+  echo ">> wrote curated GENTOO_MIRRORS"
 fi
-if ! grep -q '^GENTOO_MIRRORS=' /etc/portage/make.conf; then
-  echo 'GENTOO_MIRRORS="https://distfiles.gentoo.org"' >> /etc/portage/make.conf
+emerge --ask=n --oneshot --verbose $NR app-portage/mirrorselect || true
+_ms_ok=0
+if command -v mirrorselect >/dev/null 2>&1; then
+  _ms_out=$(mktemp 2>/dev/null || echo /tmp/gentoo-installer-mirrorselect.out)
+  # Wiki deep probe (-D). Stdout only; stderr discarded so upstream errors stay quiet.
+  if mirrorselect -s3 -b10 -D -o >"$_ms_out" 2>/dev/null; then
+    _ms_line=$(grep -E '^GENTOO_MIRRORS=' "$_ms_out" | head -n 1 || true)
+    if [ -n "$_ms_line" ]; then
+      _ms_val=$(printf '%s\\n' "$_ms_line" | sed -E 's/^GENTOO_MIRRORS=//; s/^"//; s/"$//')
+      if [ -n "$_ms_val" ]; then
+        _ms_found=0
+        for _ms_conf in /etc/portage/make.conf /etc/portage/make.conf/* /etc/make.conf; do
+          [ -f "$_ms_conf" ] || continue
+          if grep -q '^GENTOO_MIRRORS=' "$_ms_conf"; then
+            sed -i "s#^GENTOO_MIRRORS=.*#GENTOO_MIRRORS=\\"$_ms_val\\"#" "$_ms_conf"
+            _ms_found=1
+          fi
+        done
+        if [ "$_ms_found" -eq 0 ]; then
+          if [ -d /etc/portage/make.conf ]; then
+            _ms_conf=/etc/portage/make.conf/99gentoo-live-installer
+          else
+            _ms_conf=/etc/portage/make.conf
+          fi
+          mkdir -p "$(dirname "$_ms_conf")"
+          echo "GENTOO_MIRRORS=\\"$_ms_val\\"" >> "$_ms_conf"
+        fi
+        echo ">> mirrorselect wrote GENTOO_MIRRORS"
+        _ms_ok=1
+      fi
+    fi
+  fi
+  rm -f "$_ms_out"
+fi
+if [ "$_ms_ok" -ne 1 ]; then
+  echo ">> mirrorselect failed; using curated GENTOO_MIRRORS (distfiles + regional bases)"
+fi
+# Never leave make.conf without GENTOO_MIRRORS=
+if ! grep -hq '^GENTOO_MIRRORS=' /etc/portage/make.conf /etc/portage/make.conf/* /etc/make.conf 2>/dev/null; then
+  if [ -d /etc/portage/make.conf ]; then
+    _ms_conf=/etc/portage/make.conf/99gentoo-live-installer
+  else
+    _ms_conf=/etc/portage/make.conf
+  fi
+  mkdir -p "$(dirname "$_ms_conf")"
+  echo {curated_line} >> "$_ms_conf"
 fi
 """
 

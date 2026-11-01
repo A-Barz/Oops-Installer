@@ -117,7 +117,7 @@ class InstallConfig:
     lto: bool = False
     hardened_flags: bool = False
     makeopts_jobs: int = 0  # 0 means os.cpu_count()
-    gentoo_mirrors: str = ""  # Empty → mirrorselect speed test, then distfiles.gentoo.org
+    gentoo_mirrors: str = ""  # Empty → curated bases + optional deep mirrorselect
 
     # --- Handbook ch. 7: kernel ---
     # Short package name under sys-kernel/ (gentoo-kernel-bin, cachyos-kernel, …).
