@@ -387,6 +387,26 @@ def _clip(text: str, reserve: int = 18) -> str:
     return text[: limit - 1] + "…"
 
 
+def _checklist_hint_rows(*, select_all: bool, locked: bool) -> list[str]:
+    """Control-hint rows for ``paged_checklist`` — each fits one terminal line.
+
+    Sections with locked/default picks (Hyprland dots/utils) used to append
+    ``[already queued] stays on`` onto the main hint. That wrapped past
+    ``width()``, so ``_erase_lines`` under-cleared and the yellow-green
+    ``Enter — continue`` fragment stacked on every Down key (OI-87).
+    Keep freeze text on its own counted row, and clip every row.
+    """
+    base = (
+        "  ↑↓ move   Space toggle   Enter — continue   ←→ page   / search   a page   c clear"
+    )
+    if select_all:
+        base += "   top row: whole section"
+    rows = [_clip(base, reserve=1)]
+    if locked:
+        rows.append(_clip("  [already queued] stays on", reserve=1))
+    return rows
+
+
 def _hide_cursor() -> None:
     if _enabled() and sys.stdout.isatty():
         sys.stdout.write("\033[?25l")
@@ -616,24 +636,19 @@ def paged_checklist(
             view = filtered[start : start + page_size]
             if view and cursor >= 0:
                 cursor = min(cursor, len(view) - 1)
-            hint = (
-                "  ↑↓ move   Space toggle   Enter — continue   ←→ page   / search   a page   c clear"
+            status = (
+                f"  selected {len(current)}  ·  page {page + 1}/{pages}  ·  "
+                f"{start + 1}-{start + len(view)} of {len(filtered)}"
+                + (f"  filter=/{query}" if query else "")
             )
-            if select_all:
-                hint += "   top row: whole section"
-            if freeze:
-                hint += "   [already queued] stays on"
+            # Clip chrome to one row each so arrow redraws never leave Enter-hint ghosts.
             lines = [
-                paint(f"  {title}", C.BOLD, C.GREEN),
-                paint(
-                    f"  selected {len(current)}  ·  page {page + 1}/{pages}  ·  "
-                    f"{start + 1}-{start + len(view)} of {len(filtered)}"
-                    + (f"  filter=/{query}" if query else ""),
-                    C.DIM,
-                    C.PURPLE,
-                ),
-                paint(hint, C.DIM, C.GREEN),
+                paint(_clip(f"  {title}", reserve=1), C.BOLD, C.GREEN),
+                paint(_clip(status, reserve=1), C.DIM, C.PURPLE),
             ]
+            for hint_row in _checklist_hint_rows(select_all=select_all, locked=bool(freeze)):
+                lines.append(paint(hint_row, C.DIM, C.GREEN))
+
             if select_all:
                 all_on = _section_all_selected(choices, current, freeze)
                 box = paint("[x]", C.GREEN, C.BOLD) if all_on else paint("[ ]", C.DIM)
