@@ -112,7 +112,7 @@ SSD detection enables weekly `fstrim`. Disks under ~40 GiB get a warning. Dual b
 
 | Ask | Options / notes | Default |
 |-----|-----------------|---------|
-| Stage level | `stage3`, `stage2`, `stage1` | `stage3` |
+| Stage level | `stage3` (default). `stage1`/`stage2` expert-gated then refused — public autobuilds are stage3-only | `stage3` |
 | Init system | `openrc`, `systemd` | `openrc` |
 | Install type | `desktop`, `server` (stage3 only) | `desktop` |
 | Variant | `standard`, `hardened`, `musl` | `standard` |

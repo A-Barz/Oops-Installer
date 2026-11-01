@@ -1574,8 +1574,23 @@ def _download_trying_mirrors(
     raise SystemExit(f"Could not download {name} (last wget status {last}).")
 
 
+def _refuse_non_public_stage_level(cfg: InstallConfig) -> None:
+    """Fail closed before wget: public autobuilds publish stage3 only."""
+    level = getattr(cfg, "stage_level", "stage3") or "stage3"
+    if level not in {"stage1", "stage2", "stage3"}:
+        level = "stage3"
+    if level == "stage3":
+        return
+    raise SystemExit(
+        f"stage_level={level} cannot be downloaded from public Gentoo autobuilds. "
+        "Use stage3 (handbook default). Stage1 and stage2 tarballs are not published "
+        "on distfiles, so latest-stage1/2.txt would 404 on every mirror."
+    )
+
+
 def _resolve_stage(cfg: InstallConfig, runner: Runner, root: str, flavor: str) -> tuple[str, str, str]:
     """Return (tarball filename, pointer-relative path, mirror that listed it)."""
+    _refuse_non_public_stage_level(cfg)
     bases = _mirror_bases(cfg)
     if cfg.dry_run:
         rel = f"DATE/{flavor}-DATE.tar.xz"
@@ -1646,12 +1661,13 @@ def phase_stage3(cfg: InstallConfig, runner: Runner, root: str) -> None:
     """Download the current stage tarball, optionally verify GPG, extract with xattrs.
 
     A 404 on latest-<flavor>.txt or the tarball itself tries the next mirror
-    before the install stops. Stage2 names 404 on distfiles.gentoo.org because
-    Gentoo does not publish them; the same check still runs on the other mirrors.
+    before the install stops. Stage1/stage2 are refused before any wget because
+    public autobuilds publish stage3 only.
     """
     if cfg.resume and (Path(root) / "etc" / "portage").is_dir():
         ui.info("Resume: stage tarball already extracted; skipping download.")
         return
+    _refuse_non_public_stage_level(cfg)
     flavor = stage_flavor(cfg)
     _prepare_mountpoint(runner, root)
     tarball, rel, used = _resolve_stage(cfg, runner, root, flavor)
