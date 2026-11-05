@@ -184,9 +184,14 @@ class InstallConfig:
     extra_packages: list[str] = field(default_factory=list)  # Final emerge set (atoms)
     selected_packages: list[str] = field(default_factory=list)  # Catalogue picks only
     window_managers: list[str] = field(default_factory=list)  # gui-wm/* and x11-wm/*
-    # "gui-wm/hyprland=installer" or "gui-wm/niri=upstream". Missing / unknown /
-    # removed ids (old end-4/ml4w) fall back to the installer config.
+    # "gui-wm/hyprland=installer|own|end-4" or "gui-wm/niri=upstream".
+    # Unknown / removed ids (old ml4w hypr-only) fall back to the installer rice.
     wm_dotfiles: list[str] = field(default_factory=list)
+    # Filled when Hyprland dots = own (GitHub import). Empty when unused.
+    wm_dotfile_import_repo: str = ""  # owner/repo
+    wm_dotfile_import_branch: str = "main"
+    wm_dotfile_import_hypr: str = ".config/hypr"  # path inside the repo
+    wm_dotfile_import_quickshell: str = ""  # optional; empty skips qs tree copy
     overlays: list[str] = field(default_factory=list)  # eselect repository names
     kde_games: bool = False
     flatpak: bool = False
