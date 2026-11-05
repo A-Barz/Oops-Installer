@@ -1209,6 +1209,8 @@ class DotfileChoice:
     `repo` empty means the installer's own config. A GitHub choice copies
     `source` only. The project's install script is never run.
     `kind` is "dir" (archive subdir) or "file" (one raw file).
+    `expert` True means the wizard hides it unless the user accepts a
+    warn+confirm gate (Hyprland third-party rices that only copy ~/.config/hypr).
     """
 
     id: str
@@ -1221,17 +1223,19 @@ class DotfileChoice:
     # Gentoo atoms the config launches. Empty for the installer default.
     # Programs that are not in the Gentoo tree are omitted on purpose.
     packages: tuple[str, ...] = ()
+    expert: bool = False
 
 
-# Hyprland choices are Lua-compatible with hyproverlay tip (0.55+; 0.57 Lua-only).
-# Paths are the compositor config only (not waybar, Quickshell, or upstream install.sh).
-# HyDE is omitted: its hyprland.lua hard-requires a full HyDE install under ~/.local/share/hypr.
+# Hyprland: installer Lua default is the safe session path.
+# end-4 / ML4W are expert-only: this installer copies only ~/.config/hypr and does
+# not emerge Quickshell / full rice deps — those choices often bounce back to greetd.
+# HyDE stays omitted: its hyprland.lua hard-requires a full HyDE install.
 WM_DOTFILES: dict[str, tuple[DotfileChoice, ...]] = {
     "gui-wm/hyprland": (
         DotfileChoice("installer", "Installer default — keymap and a short Hyprland Lua config"),
         DotfileChoice(
             "end-4",
-            "end-4/dots-hyprland — most-starred Hyprland dots (Lua)",
+            "expert: end-4/dots-hyprland — hypr dir only (often breaks sessions)",
             "end-4/dots-hyprland",
             "main",
             "dots/.config/hypr",
@@ -1252,10 +1256,11 @@ WM_DOTFILES: dict[str, tuple[DotfileChoice, ...]] = {
                 "sys-process/btop",
                 "app-misc/jq",
             ),
+            expert=True,
         ),
         DotfileChoice(
             "ml4w",
-            "mylinuxforwork/dotfiles — ML4W Hyprland (Lua)",
+            "expert: mylinuxforwork/dotfiles — hypr dir only (incomplete rice)",
             "mylinuxforwork/dotfiles",
             "main",
             "dotfiles/.config/hypr",
@@ -1268,6 +1273,7 @@ WM_DOTFILES: dict[str, tuple[DotfileChoice, ...]] = {
                 "gnome-extra/polkit-gnome",
                 "media-fonts/jetbrains-mono",
             ),
+            expert=True,
         ),
     ),
     "gui-wm/niri": (
@@ -1289,13 +1295,16 @@ WM_DOTFILES: dict[str, tuple[DotfileChoice, ...]] = {
     ),
 }
 
-# Cap: installer + up to two starred GitHub configs for Hyprland.
+# Cap keeps catalogue rows bounded; Hyprland safe menu is installer-only.
 _MAX_DOTFILE_CHOICES = 3
 
 
-def dotfile_choices(atom: str) -> list[DotfileChoice]:
-    """Top two config choices for this compositor, or none."""
-    return list(WM_DOTFILES.get(atom, ()))[:_MAX_DOTFILE_CHOICES]
+def dotfile_choices(atom: str, *, include_expert: bool = False) -> list[DotfileChoice]:
+    """Config choices for this compositor. Expert Hyprland rices stay hidden by default."""
+    choices = list(WM_DOTFILES.get(atom, ()))
+    if not include_expert:
+        choices = [choice for choice in choices if not choice.expert]
+    return choices[:_MAX_DOTFILE_CHOICES]
 
 
 def without_already_selected(
@@ -1386,9 +1395,14 @@ def dotfiles_skipped(shell: str) -> bool:
 
 
 def selected_dotfile(atom: str, wm_dotfiles: list[str]) -> DotfileChoice | None:
-    """The saved choice for this compositor, or the installer default."""
-    choices = dotfile_choices(atom)
-    if not choices:
+    """The saved choice for this compositor, or the installer default.
+
+    Resolves expert ids (end-4 / ml4w) when a profile or expert menu picked them.
+    Unknown ids fall back to the safe installer default.
+    """
+    safe = dotfile_choices(atom)
+    all_choices = dotfile_choices(atom, include_expert=True)
+    if not all_choices:
         return None
     wanted = "installer"
     for item in wm_dotfiles or []:
@@ -1396,10 +1410,10 @@ def selected_dotfile(atom: str, wm_dotfiles: list[str]) -> DotfileChoice | None:
         if key == atom and value:
             wanted = value
             break
-    for choice in choices:
+    for choice in all_choices:
         if choice.id == wanted:
             return choice
-    return choices[0]
+    return safe[0] if safe else all_choices[0]
 
 
 def dotfile_package_atoms(shell: str, window_managers: list[str], wm_dotfiles: list[str]) -> list[str]:
@@ -1452,7 +1466,7 @@ def offerable_portage_atoms() -> list[str]:
         for value, _desc in pkgs:
             add(value)
     for wm in WINDOW_MANAGERS:
-        for choice in dotfile_choices(wm.atom):
+        for choice in dotfile_choices(wm.atom, include_expert=True):
             for pkg in choice.packages:
                 add(pkg)
     # Greeter stack always available when Wayland is chosen.

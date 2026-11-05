@@ -4728,21 +4728,12 @@ def _chroot_helper_atoms(cfg: InstallConfig) -> list[str]:
         for atom in OVERLAY_HELPER_ATOMS:
             if atom not in atoms:
                 atoms.append(atom)
-    # Remote dotfile fetch uses curl from the chroot.
+    # Remote dotfile fetch uses curl from the chroot (incl. expert Hyprland rices).
     for atom in cfg.window_managers or []:
-        choices = catalog.dotfile_choices(atom)
-        if not choices:
-            continue
-        wanted = "installer"
-        for item in cfg.wm_dotfiles or []:
-            key, _, value = str(item).partition("=")
-            if key == atom and value:
-                wanted = value
-                break
-        for choice in choices:
-            if choice.id == wanted and choice.repo:
-                atoms.append("net-misc/curl")
-                break
+        choice = catalog.selected_dotfile(atom, cfg.wm_dotfiles or [])
+        if choice is not None and choice.repo:
+            atoms.append("net-misc/curl")
+            break
     return atoms
 
 
@@ -6075,21 +6066,10 @@ def _atom_allowed(cfg: InstallConfig, atom: str) -> bool:
 
 def _dotfile_for(cfg: InstallConfig, atom: str) -> catalog.DotfileChoice | None:
     """The saved config choice for this compositor, or the installer default."""
-    choices = catalog.dotfile_choices(atom)
-    if not choices:
-        return None
     if catalog.dotfiles_skipped(getattr(cfg, "shell", "") or ""):
-        return choices[0]
-    wanted = "installer"
-    for item in cfg.wm_dotfiles or []:
-        key, _, value = str(item).partition("=")
-        if key == atom and value:
-            wanted = value
-            break
-    for choice in choices:
-        if choice.id == wanted:
-            return choice
-    return choices[0]
+        safe = catalog.dotfile_choices(atom)
+        return safe[0] if safe else None
+    return catalog.selected_dotfile(atom, cfg.wm_dotfiles or [])
 
 
 def _wm_dotfile_fetch_lines() -> list[str]:

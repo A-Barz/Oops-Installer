@@ -19,7 +19,7 @@ Gentoo fits that intent:
 - **Control** — Portage profiles, USE flags, kernels (including stable LTS `gentoo-sources` or CachyOS), and overlays (`hyproverlay`, GURU when needed) stay explicit. Binary packages are optional so a desktop install need not compile everything.
 - **Minimalism** — Stage3 plus the session you chose. Shared Wayland utilities and suckless packages are offered; nothing assumes a full DE stack.
 - **Performance** — Dist-kernels and binhosts when you want speed; source builds and LTO when you want to tune. Hardware probed on the live USB seeds sensible USE and `VIDEO_CARDS` defaults you can change.
-- **Ownership** — Configs and emerges land on *your* disk. Hyprland/Niri can use the installer config or a top GitHub config (downloaded; upstream install scripts are never run). Dual boot is not set up: the default path wipes the disk you confirm.
+- **Ownership** — Configs and emerges land on *your* disk. Hyprland uses the installer Lua config by default; incomplete third-party hypr-only GitHub rices are expert-gated. Niri can use the installer or upstream default (downloaded; upstream install scripts are never run). Dual boot is not set up: the default path wipes the disk you confirm.
 
 Read **[HOWTO.txt](HOWTO.txt)** before a real install.
 
@@ -198,7 +198,7 @@ No desktop environment. Browsers are optional (Firefox ESR soft-default in chapt
 | Ask | Options / notes | Default |
 |-----|-----------------|---------|
 | Compositors / WMs | checklist (below) | empty / saved |
-| Dotfiles | Hyprland: `installer` (Lua) \| `end-4` \| `ml4w`; Niri: `installer` \| `upstream` | `installer` |
+| Dotfiles | Hyprland: `installer` (Lua; default). `end-4` / `ml4w` expert-only after warn (hypr dir only; often breaks sessions). Niri: `installer` \| `upstream` | `installer` |
 | PipeWire | yes/no | Yes if WM |
 | Proprietary codecs | license accept for ugly/bad/libav, fdk-aac, faac, lame, ffmpeg | Off |
 
@@ -260,9 +260,9 @@ Summary table and time estimate → wipe warning → “Proceed?” → **re-typ
 
 **Greeter:** `gui-libs/greetd` plus gtkgreet+labwc (plus greetd user/group / display-manager-init as needed).
 
-**Hyprland configs** are **Lua** (`hyprland.lua`) — hyproverlay tip tracks 0.55+ and 0.57 is Lua-only.
+**Hyprland configs** are **Lua** (`hyprland.lua`) — hyproverlay tip tracks 0.55+ and 0.57 is Lua-only. The default path writes the installer stub. Expert third-party choices still copy only `~/.config/hypr`.
 
-`nano` is installed on the new system. Dotfile choices may pull additional atoms the chosen config launches (upstream install scripts are not run).
+`nano` is installed on the new system. Expert dotfile choices may pull additional atoms the chosen config launches (upstream install scripts are not run).
 
 ### Proprietary codecs (only after explicit license accept)
 

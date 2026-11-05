@@ -1230,7 +1230,7 @@ def _dotfile_review(cfg: InstallConfig) -> str:
         atom, _, ident = str(item).partition("=")
         name = atom.split("/")[-1] or atom
         label = ident or "installer"
-        for choice in catalog.dotfile_choices(atom):
+        for choice in catalog.dotfile_choices(atom, include_expert=True):
             if choice.id == ident:
                 label = choice.id
                 break
@@ -1238,18 +1238,70 @@ def _dotfile_review(cfg: InstallConfig) -> str:
     return ", ".join(parts) or "installer default"
 
 
+def _hyprland_dotfile_menu_choices(
+    atom: str, saved_id: str
+) -> tuple[list[catalog.DotfileChoice], str]:
+    """Safe installer default, or warn+expert third-party Hyprland rices."""
+    safe = catalog.dotfile_choices(atom)
+    all_choices = catalog.dotfile_choices(atom, include_expert=True)
+    expert = [choice for choice in all_choices if choice.expert]
+    if not expert:
+        default = saved_id if saved_id in {c.id for c in safe} else "installer"
+        return safe, default
+
+    saved_is_expert = saved_id in {choice.id for choice in expert}
+    if saved_is_expert:
+        ui.warn(
+            f"Saved Hyprland dots are '{saved_id}' (copies only ~/.config/hypr). "
+            "Those rices often fail to start a session after greetd."
+        )
+        keep = ui.ask_yes_no(
+            "Keep that expert third-party config despite the session risk?",
+            False,
+        )
+        if keep:
+            ui.danger(
+                "Only ~/.config/hypr is copied. Quickshell / full rice helpers are not "
+                "emerged. Login may return to the greeter."
+            )
+            if ui.ask_yes_no("I understand the risk — show the expert Hyprland menu", False):
+                return all_choices, saved_id
+        return safe, "installer"
+
+    ui.info("Hyprland uses the installer Lua default (known-good greetd → session path).")
+    show = ui.ask_yes_no(
+        "Show expert third-party Hyprland GitHub configs? "
+        "They copy only ~/.config/hypr and often break sessions. Not recommended.",
+        False,
+    )
+    if not show:
+        return safe, "installer"
+    ui.danger(
+        "end-4 / ML4W here are incomplete: hypr config only, no Quickshell/shell install. "
+        "Sessions frequently bounce back to greetd."
+    )
+    if not ui.ask_yes_no("I understand the risk — show the expert Hyprland menu", False):
+        return safe, "installer"
+    return all_choices, "installer"
+
+
 def _wm_dotfiles(cfg: InstallConfig) -> None:
-    """Ask for a GitHub config when Hyprland or Niri was selected."""
+    """Ask for a compositor config when Hyprland or Niri was selected."""
     if catalog.dotfiles_skipped(cfg.shell):
         cfg.wm_dotfiles = []
         return
-    atoms = [atom for atom in cfg.window_managers if catalog.dotfile_choices(atom)]
+    atoms = [
+        atom
+        for atom in cfg.window_managers
+        if catalog.dotfile_choices(atom, include_expert=True)
+    ]
     if not atoms:
         cfg.wm_dotfiles = []
         return
     ui.info(
-        "Window manager dotfiles. Hyprland: installer Lua default, end-4, or ML4W. "
-        "Niri: installer or upstream default. "
+        "Window manager dotfiles. Hyprland defaults to the installer Lua config "
+        "(safe session). Popular GitHub rices that only copy ~/.config/hypr are "
+        "expert-only after a warning. Niri: installer or upstream default. "
         "A GitHub choice is downloaded from the latest commit on that branch. "
         "Only the compositor config is copied; upstream install scripts are not run. "
         "Hyprland configs are Lua (hyproverlay tip is Lua-only from 0.57)."
@@ -1261,11 +1313,13 @@ def _wm_dotfiles(cfg: InstallConfig) -> None:
             current[key] = value
     kept: list[str] = []
     for atom in atoms:
-        choices = catalog.dotfile_choices(atom)
         title = next((pkg.desc for pkg in catalog.WINDOW_MANAGERS if pkg.atom == atom), atom)
-        default = current.get(atom, "installer")
-        if default not in {choice.id for choice in choices}:
-            default = "installer"
+        saved = current.get(atom, "installer")
+        if atom == "gui-wm/hyprland":
+            choices, default = _hyprland_dotfile_menu_choices(atom, saved)
+        else:
+            choices = catalog.dotfile_choices(atom)
+            default = saved if saved in {choice.id for choice in choices} else "installer"
         picked = ui.menu(f"{title} dotfiles", [(choice.id, choice.label) for choice in choices], default)
         kept.append(f"{atom}={picked}")
     cfg.wm_dotfiles = kept
@@ -1291,7 +1345,10 @@ def _finalize(cfg: InstallConfig) -> None:
         "Popular Wayland compositors (Hyprland, Sway, SwayFX, Niri, River, Wayfire, labwc, "
         "dwl, MangoWM, miracle-wm, Qtile, Gamescope, Weston) plus dwm and i3."
     )
-    ui.info("Noctalia and DMS are not offered as Portage shells; pick starred WM configs instead.")
+    ui.info(
+        "Noctalia and DMS are not offered as Portage shells. "
+        "Hyprland uses the installer Lua config by default."
+    )
     cfg.window_managers = ui.paged_checklist(
         "Wayland compositors, dwl, dwm, and i3",
         catalog.wm_choices(),
@@ -1474,7 +1531,7 @@ def _packages(cfg: InstallConfig) -> None:
     )
     ui.info(
         "Packages already chosen earlier (compositors, deps, dotfiles) stay selected "
-        "and locked so you can see what will install (for example end-4 → btop)."
+        "and locked so you can see what will install (for example expert dots → btop)."
     )
     ui.info("Each category: Space toggles, Enter continues to the next category.")
     ui.info("The top row, Select all, ticks every package in that section.")

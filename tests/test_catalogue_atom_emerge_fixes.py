@@ -31,7 +31,7 @@ def _cfg(**kwargs) -> InstallConfig:
 
 class CatalogueAtomEmergeFixesTests(unittest.TestCase):
     def test_rev_bumped(self) -> None:
-        self.assertGreaterEqual(INSTALLER_REV, 86)
+        self.assertGreaterEqual(INSTALLER_REV, 90)
 
     def test_portage_shells_removed(self) -> None:
         choice_ids = {key for key, _ in catalog.SHELL_CHOICES}

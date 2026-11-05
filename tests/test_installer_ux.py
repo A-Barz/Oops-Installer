@@ -1,19 +1,35 @@
-"""Installer UX: top-two WM dotfiles and hiding already-selected packages."""
+"""Installer UX: WM dotfiles (Hyprland safe default) and locked packages."""
 
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 from gentoo_installer import catalog
 from gentoo_installer.config import InstallConfig
-from gentoo_installer.wizard import _packages_locked_from_earlier_steps
+from gentoo_installer.wizard import _hyprland_dotfile_menu_choices, _packages_locked_from_earlier_steps
 
 
 class DotfileTopTwoTests(unittest.TestCase):
-    def test_hyprland_offers_installer_end4_ml4w(self) -> None:
+    def test_hyprland_safe_menu_is_installer_only(self) -> None:
         ids = [choice.id for choice in catalog.dotfile_choices("gui-wm/hyprland")]
-        self.assertEqual(ids, ["installer", "end-4", "ml4w"])
+        self.assertEqual(ids, ["installer"])
+        self.assertNotIn("end-4", ids)
+        self.assertNotIn("ml4w", ids)
         self.assertNotIn("hyde", ids)
+
+    def test_hyprland_expert_menu_keeps_third_party(self) -> None:
+        ids = [
+            choice.id
+            for choice in catalog.dotfile_choices("gui-wm/hyprland", include_expert=True)
+        ]
+        self.assertEqual(ids, ["installer", "end-4", "ml4w"])
+        experts = [
+            choice.id
+            for choice in catalog.dotfile_choices("gui-wm/hyprland", include_expert=True)
+            if choice.expert
+        ]
+        self.assertEqual(experts, ["end-4", "ml4w"])
 
     def test_niri_offers_installer_and_upstream_only(self) -> None:
         ids = [choice.id for choice in catalog.dotfile_choices("gui-wm/niri")]
@@ -27,6 +43,42 @@ class DotfileTopTwoTests(unittest.TestCase):
         self.assertIsNotNone(choice)
         assert choice is not None
         self.assertEqual(choice.id, "installer")
+
+    def test_selected_dotfile_still_resolves_expert_id(self) -> None:
+        choice = catalog.selected_dotfile("gui-wm/hyprland", ["gui-wm/hyprland=end-4"])
+        self.assertIsNotNone(choice)
+        assert choice is not None
+        self.assertEqual(choice.id, "end-4")
+        self.assertTrue(choice.expert)
+
+
+class HyprlandExpertGateTests(unittest.TestCase):
+    def test_default_path_stays_installer_without_expert_yes(self) -> None:
+        with mock.patch("gentoo_installer.wizard.ui.info"), mock.patch(
+            "gentoo_installer.wizard.ui.ask_yes_no", return_value=False
+        ) as ask:
+            choices, default = _hyprland_dotfile_menu_choices("gui-wm/hyprland", "installer")
+        self.assertEqual([c.id for c in choices], ["installer"])
+        self.assertEqual(default, "installer")
+        self.assertEqual(ask.call_count, 1)
+
+    def test_expert_path_requires_two_confirms(self) -> None:
+        with mock.patch("gentoo_installer.wizard.ui.info"), mock.patch(
+            "gentoo_installer.wizard.ui.danger"
+        ), mock.patch(
+            "gentoo_installer.wizard.ui.ask_yes_no", side_effect=[True, True]
+        ):
+            choices, default = _hyprland_dotfile_menu_choices("gui-wm/hyprland", "installer")
+        self.assertEqual([c.id for c in choices], ["installer", "end-4", "ml4w"])
+        self.assertEqual(default, "installer")
+
+    def test_saved_expert_declined_falls_back_to_installer(self) -> None:
+        with mock.patch("gentoo_installer.wizard.ui.warn"), mock.patch(
+            "gentoo_installer.wizard.ui.ask_yes_no", return_value=False
+        ):
+            choices, default = _hyprland_dotfile_menu_choices("gui-wm/hyprland", "end-4")
+        self.assertEqual([c.id for c in choices], ["installer"])
+        self.assertEqual(default, "installer")
 
 
 class AlreadySelectedPackageTests(unittest.TestCase):
@@ -61,7 +113,7 @@ class AlreadySelectedPackageTests(unittest.TestCase):
         self.assertNotIn("www-client/google-chrome", locked_plain)
 
     def test_end4_btop_stays_visible_selected_in_system_admin(self) -> None:
-        """Locked dots packages show selected — not hidden (OI-86 / c5ab)."""
+        """Locked expert-dots packages show selected — not hidden (OI-86 / c5ab)."""
         cfg = InstallConfig()
         cfg.window_managers = ["gui-wm/hyprland"]
         cfg.shell = "none"
