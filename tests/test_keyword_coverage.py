@@ -199,7 +199,29 @@ class OfferableAtomKeywordTests(unittest.TestCase):
         self.assertIn("sys-apps/systemd", planned)
         self.assertIn("sys-apps/systemd ~amd64", _keyword_text(cfg))
 
-    def test_hyprland_dotfiles_keyword_curl(self) -> None:
+    def test_niri_upstream_dotfiles_keyword_curl(self) -> None:
+        cfg = _typical_niri(
+            window_managers=["gui-wm/niri"],
+            wm_dotfiles=["gui-wm/niri=upstream"],
+            gentoo_mirrors="https://distfiles.gentoo.org/",
+        )
+        planned = set(_atoms_to_unmask(cfg))
+        self.assertIn("net-misc/curl", planned)
+        self.assertIn("gui-apps/waybar", planned)
+
+    def test_hyprland_installer_dots_skip_curl(self) -> None:
+        cfg = _typical_niri(
+            window_managers=["gui-wm/hyprland"],
+            wm_dotfiles=["gui-wm/hyprland=installer"],
+            gentoo_mirrors="https://distfiles.gentoo.org/",
+        )
+        planned = set(_atoms_to_unmask(cfg))
+        self.assertNotIn("net-misc/curl", planned)
+        self.assertIn("gui-libs/xdg-desktop-portal-hyprland", planned)
+        self.assertIn("gui-apps/quickshell", planned)
+        self.assertNotIn("gui-apps/xdg-desktop-portal-hyprland", planned)
+
+    def test_hyprland_end4_profile_keywords_curl_and_qs_deps(self) -> None:
         cfg = _typical_niri(
             window_managers=["gui-wm/hyprland"],
             wm_dotfiles=["gui-wm/hyprland=end-4"],
@@ -207,8 +229,25 @@ class OfferableAtomKeywordTests(unittest.TestCase):
         )
         planned = set(_atoms_to_unmask(cfg))
         self.assertIn("net-misc/curl", planned)
-        self.assertIn("gui-libs/xdg-desktop-portal-hyprland", planned)
-        self.assertNotIn("gui-apps/xdg-desktop-portal-hyprland", planned)
+        self.assertIn("gui-apps/quickshell", planned)
+        self.assertIn("gui-apps/fuzzel", planned)
+        choice = catalog.selected_dotfile("gui-wm/hyprland", cfg.wm_dotfiles)
+        self.assertIsNotNone(choice)
+        assert choice is not None
+        self.assertEqual(choice.id, "end-4")
+
+    def test_stale_hyprland_ml4w_profile_skips_curl(self) -> None:
+        cfg = _typical_niri(
+            window_managers=["gui-wm/hyprland"],
+            wm_dotfiles=["gui-wm/hyprland=ml4w"],
+            gentoo_mirrors="https://distfiles.gentoo.org/",
+        )
+        planned = set(_atoms_to_unmask(cfg))
+        self.assertNotIn("net-misc/curl", planned)
+        choice = catalog.selected_dotfile("gui-wm/hyprland", cfg.wm_dotfiles)
+        self.assertIsNotNone(choice)
+        assert choice is not None
+        self.assertEqual(choice.id, "installer")
 
 
 if __name__ == "__main__":

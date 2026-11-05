@@ -1234,12 +1234,47 @@ def _dotfile_review(cfg: InstallConfig) -> str:
             if choice.id == ident:
                 label = choice.id
                 break
+        else:
+            # Removed catalogue ids (old ml4w hypr-only) show as installer default.
+            if catalog.dotfile_choices(atom):
+                label = catalog.dotfile_choices(atom)[0].id
         parts.append(f"{name}: {label}")
     return ", ".join(parts) or "installer default"
 
 
+def _ask_hyprland_own_import(cfg: InstallConfig) -> None:
+    """Collect GitHub owner/repo (+ optional quickshell tree) for Hyprland=own."""
+    ui.info(
+        "Import copies trees from a GitHub repo into your home. "
+        "Upstream install scripts are never run. Leave the quickshell path empty "
+        "to skip that tree (Hyprland still emerges gui-apps/quickshell)."
+    )
+    repo = ui.prompt(
+        "GitHub owner/repo (example: someone/dotfiles)",
+        cfg.wm_dotfile_import_repo or "",
+    ).strip().strip("/")
+    while not repo or "/" not in repo or repo.count("/") != 1:
+        ui.warn("Need exactly owner/repo (one slash).")
+        repo = ui.prompt("GitHub owner/repo", repo or "").strip().strip("/")
+    cfg.wm_dotfile_import_repo = repo
+    cfg.wm_dotfile_import_branch = (
+        ui.prompt("Branch", cfg.wm_dotfile_import_branch or "main").strip() or "main"
+    )
+    cfg.wm_dotfile_import_hypr = (
+        ui.prompt(
+            "Path to hypr config dir inside the repo",
+            cfg.wm_dotfile_import_hypr or ".config/hypr",
+        ).strip().lstrip("/")
+        or ".config/hypr"
+    )
+    cfg.wm_dotfile_import_quickshell = ui.prompt(
+        "Path to quickshell config dir (empty to skip)",
+        cfg.wm_dotfile_import_quickshell or "",
+    ).strip().lstrip("/")
+
+
 def _wm_dotfiles(cfg: InstallConfig) -> None:
-    """Ask for a GitHub config when Hyprland or Niri was selected."""
+    """Ask for a compositor config when Hyprland or Niri was selected."""
     if catalog.dotfiles_skipped(cfg.shell):
         cfg.wm_dotfiles = []
         return
@@ -1248,10 +1283,11 @@ def _wm_dotfiles(cfg: InstallConfig) -> None:
         cfg.wm_dotfiles = []
         return
     ui.info(
-        "Window manager dotfiles. Hyprland: installer Lua default, end-4, or ML4W. "
-        "Niri: installer or upstream default. "
-        "A GitHub choice is downloaded from the latest commit on that branch. "
-        "Only the compositor config is copied; upstream install scripts are not run. "
+        "Window manager dotfiles. Hyprland: installer Quickshell rice (default), "
+        "import your own GitHub trees, or full end-4–style (hypr + quickshell + "
+        "GURU qs deps). gui-apps/quickshell::guru is always emerged with Hyprland. "
+        "Broken hypr-only half-copies (old ML4W) are not offered. "
+        "Niri: installer or upstream default. Upstream install scripts are never run. "
         "Hyprland configs are Lua (hyproverlay tip is Lua-only from 0.57)."
     )
     current: dict[str, str] = {}
@@ -1260,21 +1296,40 @@ def _wm_dotfiles(cfg: InstallConfig) -> None:
         if key and value:
             current[key] = value
     kept: list[str] = []
+    picked_hypr = ""
     for atom in atoms:
         choices = catalog.dotfile_choices(atom)
         title = next((pkg.desc for pkg in catalog.WINDOW_MANAGERS if pkg.atom == atom), atom)
-        default = current.get(atom, "installer")
-        if default not in {choice.id for choice in choices}:
-            default = "installer"
-        picked = ui.menu(f"{title} dotfiles", [(choice.id, choice.label) for choice in choices], default)
+        if len(choices) == 1:
+            picked = choices[0].id
+            ui.info(f"{title}: {choices[0].label}")
+        else:
+            default = current.get(atom, "installer")
+            if default not in {choice.id for choice in choices}:
+                default = "installer"
+            picked = ui.menu(
+                f"{title} dotfiles",
+                [(choice.id, choice.label) for choice in choices],
+                default,
+            )
         kept.append(f"{atom}={picked}")
+        if atom == "gui-wm/hyprland":
+            picked_hypr = picked
     cfg.wm_dotfiles = kept
+    if picked_hypr == "own":
+        _ask_hyprland_own_import(cfg)
+    else:
+        # Clear stale import fields when not using own.
+        if picked_hypr and picked_hypr != "own":
+            cfg.wm_dotfile_import_repo = ""
+            cfg.wm_dotfile_import_quickshell = ""
     packages = catalog.dotfile_package_atoms(cfg.shell, cfg.window_managers, kept)
     if packages:
         ui.info("Gentoo packages from the chosen configs will be installed: " + ", ".join(packages))
+    if "gui-wm/hyprland" in cfg.window_managers:
         ui.info(
-            "Quickshell, fuzzel, cliphist, swaync, wlogout, and brightnessctl "
-            "are not in the Gentoo tree this installer uses, so they are not emerged."
+            "Hyprland always emerges gui-apps/quickshell::guru with USE=hyprland "
+            "(fail-closed if qs is missing)."
         )
 
 
@@ -1291,7 +1346,10 @@ def _finalize(cfg: InstallConfig) -> None:
         "Popular Wayland compositors (Hyprland, Sway, SwayFX, Niri, River, Wayfire, labwc, "
         "dwl, MangoWM, miracle-wm, Qtile, Gamescope, Weston) plus dwm and i3."
     )
-    ui.info("Noctalia and DMS are not offered as Portage shells; pick starred WM configs instead.")
+    ui.info(
+        "Noctalia and DMS are not offered as Portage shells. "
+        "Hyprland's default rice starts Quickshell (qs from ::guru)."
+    )
     cfg.window_managers = ui.paged_checklist(
         "Wayland compositors, dwl, dwm, and i3",
         catalog.wm_choices(),
@@ -1308,6 +1366,11 @@ def _finalize(cfg: InstallConfig) -> None:
             "GURU overlay compositors selected: "
             + ", ".join(guru_wms)
             + ". That overlay is enabled only because you chose them."
+        )
+    if "gui-wm/hyprland" in cfg.window_managers:
+        ui.info(
+            "Hyprland enables ::guru for gui-apps/quickshell (USE=hyprland) "
+            "and ::hyproverlay for Hyprland itself."
         )
     if "gui-wm/niri" in cfg.window_managers:
         ui.info(
@@ -1474,7 +1537,7 @@ def _packages(cfg: InstallConfig) -> None:
     )
     ui.info(
         "Packages already chosen earlier (compositors, deps, dotfiles) stay selected "
-        "and locked so you can see what will install (for example end-4 → btop)."
+        "and locked so you can see what will install (for example Niri upstream → waybar)."
     )
     ui.info("Each category: Space toggles, Enter continues to the next category.")
     ui.info("The top row, Select all, ticks every package in that section.")
@@ -1555,7 +1618,7 @@ def _packages(cfg: InstallConfig) -> None:
     claimed: set[str] = set()
     for index, (key, title, packages) in enumerate(steps, start=1):
         # Hide only exclusions and atoms already claimed in an earlier category.
-        # Dotfile/WM deps stay visible and pre-selected (e.g. end-4 → btop).
+        # Dotfile/WM deps stay visible and pre-selected (e.g. Niri upstream → waybar).
         hide = set(hide_always) | claimed
         visible = catalog.without_already_selected(packages, hide)
         locked_here = {atom for atom, _desc in visible if atom in show_locked}

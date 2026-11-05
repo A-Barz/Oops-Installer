@@ -292,7 +292,7 @@ class RandomComboGreeterTests(unittest.TestCase):
             selected_packages=["gui-apps/waybar", "sys-apps/flatpak", "www-client/qutebrowser"],
             init_system="systemd",
             kernel="cachyos-kernel-bin",
-            wm_dotfiles=["gui-wm/hyprland=end-4"],
+            wm_dotfiles=["gui-wm/hyprland=installer", "gui-wm/niri=upstream"],
         )
         self.assertEqual(greeter_boot_failures(minimal), [])
         self.assertEqual(greeter_boot_failures(rich), [])

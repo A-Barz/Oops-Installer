@@ -2433,7 +2433,11 @@ def _wm_exec_binary(cfg: InstallConfig, atom: str) -> str:
 
 
 def _required_window_manager_script(cfg: InstallConfig) -> str:
-    """Emerge selected WMs with emerge_checked (no --noreplace) before the greeter (H6/M3)."""
+    """Emerge selected WMs with emerge_checked (no --noreplace) before the greeter (H6/M3).
+
+    Hyprland always pulls gui-apps/quickshell::guru (USE=hyprland) and fail-closes
+    if the ``qs`` binary is missing after emerge.
+    """
     atoms = _window_managers(cfg)
     if not atoms:
         return ""
@@ -2444,6 +2448,13 @@ def _required_window_manager_script(cfg: InstallConfig) -> str:
             continue
         lines.append(
             _emerge_checked_call(atom, ("command", "-v", binary), required=True)
+        )
+    if "gui-wm/hyprland" in atoms:
+        lines.append('echo ">> required Quickshell (qs) for Hyprland"')
+        lines.append(
+            _emerge_checked_call(
+                "gui-apps/quickshell", ("command", "-v", "qs"), required=True
+            )
         )
     return "\n".join(lines) + "\n"
 
@@ -2840,6 +2851,13 @@ def _final_tool_checks(cfg: InstallConfig, loaders: list[str]) -> str:
                 + " || ".join(wm_probes)
                 + '; }; then echo ">> no selected window manager binary is installed" >&2; missing=1; fi'
             )
+    # Hyprland rice always starts qs — fail closed if Quickshell is missing.
+    if "gui-wm/hyprland" in wm_atoms:
+        lines.append(
+            'if ! command -v qs >/dev/null 2>&1; then '
+            'echo ">> required Quickshell (qs) missing after Hyprland install" >&2; '
+            "missing=1; fi"
+        )
     # Greeter presence is fatal when a greeter was requested — same as kernel/bootloader.
     greeter_fatal: list[tuple[str, str]] = []
     dm = _resolved_dm(cfg)
@@ -4259,6 +4277,9 @@ def _package_use_text(cfg: InstallConfig) -> str:
     if "gui-wm/niri" in queued and "gui-apps/waybar" in queued:
         # Waybar's niri module is a local USE flag. Without it the bar has no workspaces.
         lines.append("gui-apps/waybar niri")
+    if "gui-wm/hyprland" in queued or "gui-apps/quickshell" in queued:
+        # Hyprland IPC / shortcuts / focus grab — required for the Oops qs rice.
+        lines.append("gui-apps/quickshell hyprland")
     if "x11-misc/rofi" in queued:
         lines.append("x11-misc/rofi wayland")
     if "x11-misc/dunst" in queued:
@@ -4728,21 +4749,12 @@ def _chroot_helper_atoms(cfg: InstallConfig) -> list[str]:
         for atom in OVERLAY_HELPER_ATOMS:
             if atom not in atoms:
                 atoms.append(atom)
-    # Remote dotfile fetch uses curl from the chroot.
+    # Remote dotfile fetch uses curl from the chroot (Niri upstream, end-4, own import).
     for atom in cfg.window_managers or []:
-        choices = catalog.dotfile_choices(atom)
-        if not choices:
-            continue
-        wanted = "installer"
-        for item in cfg.wm_dotfiles or []:
-            key, _, value = str(item).partition("=")
-            if key == atom and value:
-                wanted = value
-                break
-        for choice in choices:
-            if choice.id == wanted and choice.repo:
-                atoms.append("net-misc/curl")
-                break
+        choice = _dotfile_for(cfg, atom)
+        if choice is not None and choice.repo:
+            atoms.append("net-misc/curl")
+            break
     return atoms
 
 
@@ -5019,7 +5031,11 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
         ui.warn("Not installing GURU packages: " + ", ".join(blocked))
     codec_atoms = catalog.nonfree_codec_atoms() if getattr(cfg, "nonfree_codecs", False) else []
     # Selected WMs are hard-required before the greeter (H6); keep them out of the soft late block.
+    # Quickshell is hard-required with Hyprland — also keep it out of the soft late block.
     required_wm_set = set(_window_managers(cfg))
+    hard_required_extra = set()
+    if "gui-wm/hyprland" in required_wm_set:
+        hard_required_extra.add("gui-apps/quickshell")
     late_atoms = [
         atom
         for atom in dict.fromkeys(
@@ -5036,6 +5052,7 @@ echo 'add_dracutmodules+=" crypt dm "' > /etc/dracut.conf.d/luks.conf
         and not atom.startswith("flatpak-app/")
         and atom not in required_set
         and atom not in required_wm_set
+        and atom not in hard_required_extra
         and atom not in set(theme_pkgs)
     ]
     fetch_atoms_extra = list(dict.fromkeys(required_atoms + missed + extra_fw + theme_pkgs + late_atoms))
@@ -6074,22 +6091,37 @@ def _atom_allowed(cfg: InstallConfig, atom: str) -> bool:
 
 
 def _dotfile_for(cfg: InstallConfig, atom: str) -> catalog.DotfileChoice | None:
-    """The saved config choice for this compositor, or the installer default."""
-    choices = catalog.dotfile_choices(atom)
-    if not choices:
-        return None
+    """The saved config choice for this compositor, or the installer default.
+
+    ``own`` is filled from ``wm_dotfile_import_*`` fields; empty repo falls back
+    to the installer Quickshell rice.
+    """
     if catalog.dotfiles_skipped(getattr(cfg, "shell", "") or ""):
-        return choices[0]
-    wanted = "installer"
-    for item in cfg.wm_dotfiles or []:
-        key, _, value = str(item).partition("=")
-        if key == atom and value:
-            wanted = value
-            break
-    for choice in choices:
-        if choice.id == wanted:
-            return choice
-    return choices[0]
+        safe = catalog.dotfile_choices(atom)
+        return safe[0] if safe else None
+    choice = catalog.selected_dotfile(atom, cfg.wm_dotfiles or [])
+    if choice is None:
+        return None
+    if choice.id != "own" or atom != "gui-wm/hyprland":
+        return choice
+    repo = (cfg.wm_dotfile_import_repo or "").strip().strip("/")
+    if not repo or "/" not in repo:
+        return catalog.selected_dotfile(atom, [])
+    branch = (cfg.wm_dotfile_import_branch or "main").strip() or "main"
+    hypr_src = (cfg.wm_dotfile_import_hypr or ".config/hypr").strip().lstrip("/") or ".config/hypr"
+    qs_src = (cfg.wm_dotfile_import_quickshell or "").strip().lstrip("/")
+    also: tuple[tuple[str, str], ...] = ((qs_src, ".config/quickshell"),) if qs_src else ()
+    return catalog.DotfileChoice(
+        "own",
+        choice.label,
+        repo,
+        branch,
+        hypr_src,
+        ".config/hypr",
+        "dir",
+        (),
+        also,
+    )
 
 
 def _wm_dotfile_fetch_lines() -> list[str]:
@@ -6153,8 +6185,15 @@ def _wm_dotfile_fetch_lines() -> list[str]:
     ]
 
 
-def _dotfile_attempt(choice: catalog.DotfileChoice, dest_shell: str, flag: str, title: str) -> list[str]:
-    """Try the GitHub copy. The flag stays 0 so the installer config can be written."""
+def _dotfile_attempt(
+    choice: catalog.DotfileChoice,
+    dest_shell: str,
+    flag: str,
+    title: str,
+    *,
+    require_also: bool = False,
+) -> list[str]:
+    """Try the GitHub copy (and optional ``also`` trees). Flag stays 0 on failure."""
     args = " ".join(
         [
             shlex.quote(choice.repo),
@@ -6164,14 +6203,85 @@ def _dotfile_attempt(choice: catalog.DotfileChoice, dest_shell: str, flag: str, 
             shlex.quote(choice.kind),
         ]
     )
-    return [
+    lines = [
         f"  {flag}=0",
         f"  if fetch_wm_dotfiles {args}; then",
         f"    {flag}=1",
         f'    echo ">> {title} dotfiles: {choice.id}"',
+    ]
+    for src, dest in choice.also:
+        dest_q = f'"$userhome/{dest}"'
+        also_args = " ".join(
+            [
+                shlex.quote(choice.repo),
+                shlex.quote(choice.branch),
+                shlex.quote(src),
+                dest_q,
+                shlex.quote("dir"),
+            ]
+        )
+        if require_also:
+            lines += [
+                f"    if ! fetch_wm_dotfiles {also_args}; then",
+                f'      echo ">> {title} required companion tree missing: {src}" >&2',
+                f"      {flag}=0",
+                "    fi",
+            ]
+        else:
+            lines += [
+                f"    if fetch_wm_dotfiles {also_args}; then",
+                f'      echo ">> {title} companion tree: {src}"',
+                "    else",
+                f'      echo ">> {title} companion tree skipped: {src}" >&2',
+                "    fi",
+            ]
+    lines += [
         "  else",
         f'    echo ">> {title} dotfiles were not copied; writing the installer config" >&2',
         "  fi",
+    ]
+    return lines
+
+
+def _installer_hyprland_lua_lines(keymap: str) -> list[str]:
+    """Minimal Hyprland Lua rice that starts Quickshell once at session start."""
+    return [
+        "hl.monitor({",
+        '    output = "",',
+        '    mode = "preferred",',
+        '    position = "auto",',
+        "    scale = 1,",
+        "})",
+        "hl.config({",
+        "    input = {",
+        f'        kb_layout = "{keymap}",',
+        "    },",
+        "})",
+        'hl.on("hyprland.start", function()',
+        '    hl.exec_cmd("qs")',
+        "end)",
+    ]
+
+
+def _installer_quickshell_shell_qml() -> list[str]:
+    """Tiny Quickshell shell so ``qs`` has a config to load on the default rice."""
+    return [
+        "import Quickshell",
+        "import Quickshell.Wayland",
+        "import QtQuick",
+        "",
+        "ShellRoot {",
+        "  PanelWindow {",
+        "    anchors { top: true; left: true; right: true }",
+        "    implicitHeight: 28",
+        '    color: "#1a1b26"',
+        "    Text {",
+        "      anchors.centerIn: parent",
+        '      color: "#c0caf5"',
+        '      text: "Oops · Quickshell"',
+        "    }",
+        "  }",
+        "}",
     ]
 
 
@@ -6223,33 +6333,45 @@ def _user_session_script(cfg: InstallConfig) -> str:
     if (hypr_choice and hypr_choice.repo) or (niri_choice and niri_choice.repo):
         lines += _wm_dotfile_fetch_lines()
     if "gui-wm/hyprland" in wms:
-        # hyproverlay tip is Lua-only from Hyprland 0.57; write hyprland.lua.
+        # hyproverlay tip is Lua-only from 0.57; default rice starts qs.
         lines.append('  hypr="$userhome/.config/hypr/hyprland.lua"')
-        if hypr_choice and hypr_choice.repo:
-            lines += _dotfile_attempt(hypr_choice, '"$userhome/.config/hypr"', "hypr_dots", "Hyprland")
+        lines.append('  qs_shell="$userhome/.config/quickshell/shell.qml"')
+        hypr_remote = bool(hypr_choice and hypr_choice.repo)
+        require_also = bool(hypr_choice and hypr_choice.id == "end-4" and hypr_choice.also)
+        if hypr_remote and hypr_choice is not None:
+            lines += _dotfile_attempt(
+                hypr_choice,
+                '"$userhome/.config/hypr"',
+                "hypr_dots",
+                "Hyprland",
+                require_also=require_also,
+            )
             lines.append('  if [ "$hypr_dots" != 1 ]; then')
         lines += [
             '  install -d -m 755 "$userhome/.config/hypr"',
+            '  install -d -m 755 "$userhome/.config/quickshell"',
             '  if [ ! -f "$hypr" ]; then',
             '    cat > "$hypr" << EOF',
-            "hl.monitor({",
-            '    output = "",',
-            '    mode = "preferred",',
-            '    position = "auto",',
-            "    scale = 1,",
-            "})",
-            "hl.config({",
-            "    input = {",
-            f'        kb_layout = "{keymap}",',
-            "    },",
-            "})",
-            "EOF",
-            f'    chown -R {user}:{user} "$userhome/.config/hypr" || true',
-            "  fi",
         ]
-        if hypr_choice and hypr_choice.repo:
+        lines += _installer_hyprland_lua_lines(keymap)
+        lines += [
+            "EOF",
+            "  fi",
+            '  if [ ! -f "$qs_shell" ]; then',
+            "    cat > \"$qs_shell\" << 'EOF'",
+        ]
+        lines += _installer_quickshell_shell_qml()
+        lines += [
+            "EOF",
+            "  fi",
+            f'  chown -R {user}:{user} "$userhome/.config/hypr" "$userhome/.config/quickshell" || true',
+        ]
+        if hypr_remote:
             lines.append("  fi")
-            lines.append(f'  chown -R {user}:{user} "$userhome/.config/hypr" || true')
+            lines.append(
+                f'  chown -R {user}:{user} "$userhome/.config/hypr" '
+                f'"$userhome/.config/quickshell" || true'
+            )
     if "gui-wm/sway" in wms:
         lines += [
             '  install -d -m 755 "$userhome/.config/sway"',

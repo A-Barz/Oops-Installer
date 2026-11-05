@@ -346,6 +346,8 @@ WM_REQUIREMENTS: dict[str, list[Pkg]] = {
         Pkg("gui-apps/hyprpaper", "Hyprpaper wallpaper", "hyproverlay"),
         Pkg("gui-apps/hypridle", "Hypridle", "hyproverlay"),
         Pkg("gui-apps/hyprlock", "Hyprlock", "hyproverlay"),
+        # Quickshell is mandatory for every Hyprland install (installer rice starts qs).
+        Pkg("gui-apps/quickshell", "Quickshell (qs) — Hyprland desktop shell", "guru"),
     ],
     "gui-wm/sway": [
         Pkg("gui-apps/swaybg", "SwayBG wallpaper"),
@@ -473,10 +475,22 @@ def shell_exec(shell: str) -> str:
     return SHELL_EXEC.get(shell, "")
 
 
+# GURU helpers for the Hyprland Quickshell rice / optional end-4–style path.
+# Always offerable when Hyprland pulls them via WM_REQUIREMENTS or DotfileChoice.
+HYPRLAND_QUICKSHELL_GURU: frozenset[str] = frozenset(
+    {
+        "gui-apps/quickshell",
+        "gui-apps/fuzzel",
+        "app-misc/cliphist",
+        "app-misc/brightnessctl",
+    }
+)
+
+
 def offered_guru_atoms(shell: str) -> set[str]:
-    """GURU atoms the wizard may emerge: offered GURU WMs (shells removed)."""
+    """GURU atoms the wizard may emerge: GURU WMs plus Hyprland Quickshell stack."""
     del shell  # Legacy profiles may still pass a shell id; shells are never emerged.
-    allowed: set[str] = set()
+    allowed: set[str] = set(HYPRLAND_QUICKSHELL_GURU)
     for pkg in WINDOW_MANAGERS:
         if pkg.overlay == "guru":
             allowed.add(pkg.atom)
@@ -1206,8 +1220,9 @@ CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
 class DotfileChoice:
     """One compositor config the installer can place in the user's home.
 
-    `repo` empty means the installer's own config. A GitHub choice copies
-    `source` only. The project's install script is never run.
+    `repo` empty means the installer's own config (or a wizard-filled import).
+    A GitHub choice copies `source` (and optional `also` trees). The project's
+    install script is never run.
     `kind` is "dir" (archive subdir) or "file" (one raw file).
     """
 
@@ -1221,22 +1236,36 @@ class DotfileChoice:
     # Gentoo atoms the config launches. Empty for the installer default.
     # Programs that are not in the Gentoo tree are omitted on purpose.
     packages: tuple[str, ...] = ()
+    # Extra (source, dest) trees from the same repo (e.g. Quickshell beside hypr).
+    also: tuple[tuple[str, str], ...] = ()
 
 
-# Hyprland choices are Lua-compatible with hyproverlay tip (0.55+; 0.57 Lua-only).
-# Paths are the compositor config only (not waybar, Quickshell, or upstream install.sh).
-# HyDE is omitted: its hyprland.lua hard-requires a full HyDE install under ~/.local/share/hypr.
+# Hyprland: installer Quickshell rice (default), import-your-own, or full end-4–
+# style (hypr + quickshell trees + GURU qs deps). Broken hypr-only ML4W half-copy
+# is gone. Stale ml4w profiles fall back to installer.
 WM_DOTFILES: dict[str, tuple[DotfileChoice, ...]] = {
     "gui-wm/hyprland": (
-        DotfileChoice("installer", "Installer default — keymap and a short Hyprland Lua config"),
+        DotfileChoice(
+            "installer",
+            "Installer default — Hyprland Lua rice that starts Quickshell (qs)",
+        ),
+        DotfileChoice(
+            "own",
+            "Import your own — GitHub hypr tree (optional quickshell tree)",
+        ),
         DotfileChoice(
             "end-4",
-            "end-4/dots-hyprland — most-starred Hyprland dots (Lua)",
+            "end-4 Illogical Impulse — hypr + quickshell configs (GURU qs + deps)",
             "end-4/dots-hyprland",
             "main",
             "dots/.config/hypr",
             ".config/hypr",
-            packages=(
+            "dir",
+            (
+                "gui-apps/quickshell",
+                "gui-apps/fuzzel",
+                "app-misc/cliphist",
+                "app-misc/brightnessctl",
                 "gnome-base/gnome-keyring",
                 "media-sound/easyeffects",
                 "media-sound/playerctl",
@@ -1252,22 +1281,7 @@ WM_DOTFILES: dict[str, tuple[DotfileChoice, ...]] = {
                 "sys-process/btop",
                 "app-misc/jq",
             ),
-        ),
-        DotfileChoice(
-            "ml4w",
-            "mylinuxforwork/dotfiles — ML4W Hyprland (Lua)",
-            "mylinuxforwork/dotfiles",
-            "main",
-            "dotfiles/.config/hypr",
-            ".config/hypr",
-            packages=(
-                "gui-apps/foot",
-                "gui-apps/waybar",
-                "gui-apps/hypridle",
-                "gui-apps/wl-clipboard",
-                "gnome-extra/polkit-gnome",
-                "media-fonts/jetbrains-mono",
-            ),
+            also=(("dots/.config/quickshell", ".config/quickshell"),),
         ),
     ),
     "gui-wm/niri": (
@@ -1289,12 +1303,12 @@ WM_DOTFILES: dict[str, tuple[DotfileChoice, ...]] = {
     ),
 }
 
-# Cap: installer + up to two starred GitHub configs for Hyprland.
+# Cap: Hyprland installer + own + end-4; Niri installer + upstream.
 _MAX_DOTFILE_CHOICES = 3
 
 
 def dotfile_choices(atom: str) -> list[DotfileChoice]:
-    """Top two config choices for this compositor, or none."""
+    """Config choices for this compositor, or none."""
     return list(WM_DOTFILES.get(atom, ()))[:_MAX_DOTFILE_CHOICES]
 
 
@@ -1386,7 +1400,12 @@ def dotfiles_skipped(shell: str) -> bool:
 
 
 def selected_dotfile(atom: str, wm_dotfiles: list[str]) -> DotfileChoice | None:
-    """The saved choice for this compositor, or the installer default."""
+    """The saved choice for this compositor, or the installer default.
+
+    Unknown or removed ids (for example old ml4w hypr-only half-copies) fall
+    back to the installer default. A saved ``end-4`` id selects the full
+    hypr+quickshell path (not the old hypr-dir-only clone).
+    """
     choices = dotfile_choices(atom)
     if not choices:
         return None
@@ -1409,7 +1428,10 @@ def dotfile_package_atoms(shell: str, window_managers: list[str], wm_dotfiles: l
     out: list[str] = []
     for atom in window_managers:
         choice = selected_dotfile(atom, wm_dotfiles)
-        if choice is None or not choice.repo:
+        if choice is None:
+            continue
+        # Installer / own without a filled repo: no extra dots packages.
+        if not choice.repo and choice.id != "end-4":
             continue
         for pkg in choice.packages:
             if pkg not in out:

@@ -19,7 +19,7 @@ Gentoo fits that intent:
 - **Control** — Portage profiles, USE flags, kernels (including stable LTS `gentoo-sources` or CachyOS), and overlays (`hyproverlay`, GURU when needed) stay explicit. Binary packages are optional so a desktop install need not compile everything.
 - **Minimalism** — Stage3 plus the session you chose. Shared Wayland utilities and suckless packages are offered; nothing assumes a full DE stack.
 - **Performance** — Dist-kernels and binhosts when you want speed; source builds and LTO when you want to tune. Hardware probed on the live USB seeds sensible USE and `VIDEO_CARDS` defaults you can change.
-- **Ownership** — Configs and emerges land on *your* disk. Hyprland/Niri can use the installer config or a top GitHub config (downloaded; upstream install scripts are never run). Dual boot is not set up: the default path wipes the disk you confirm.
+- **Ownership** — Configs and emerges land on *your* disk. Hyprland always emerges Quickshell (`gui-apps/quickshell::guru`, USE=hyprland); the default Lua rice starts `qs`. You can import your own GitHub trees or pick a full end-4–style path. Niri can use the installer or upstream default (downloaded; upstream install scripts are never run). Dual boot is not set up: the default path wipes the disk you confirm.
 
 Read **[HOWTO.txt](HOWTO.txt)** before a real install.
 
@@ -198,7 +198,7 @@ No desktop environment. Browsers are optional (Firefox ESR soft-default in chapt
 | Ask | Options / notes | Default |
 |-----|-----------------|---------|
 | Compositors / WMs | checklist (below) | empty / saved |
-| Dotfiles | Hyprland: `installer` (Lua) \| `end-4` \| `ml4w`; Niri: `installer` \| `upstream` | `installer` |
+| Dotfiles | Hyprland: `installer` (Quickshell rice) \| `own` \| `end-4` (hypr+qs). Niri: `installer` \| `upstream` | `installer` |
 | PipeWire | yes/no | Yes if WM |
 | Proprietary codecs | license accept for ugly/bad/libav, fdk-aac, faac, lame, ffmpeg | Off |
 
@@ -210,7 +210,7 @@ Optional **mise + small agent set** invite: first-login note only — no Quicksh
 
 | Atom | Notes |
 |------|--------|
-| `gui-wm/hyprland` | ::hyproverlay |
+| `gui-wm/hyprland` | ::hyproverlay (+ `gui-apps/quickshell` ::guru) |
 | `gui-wm/sway` | |
 | `gui-wm/swayfx` | ::guru |
 | `gui-wm/niri` | ::guru |
@@ -226,7 +226,7 @@ Optional **mise + small agent set** invite: first-login note only — no Quicksh
 | `x11-wm/dwm` | X11 |
 | `x11-wm/i3` | X11 |
 
-GURU is enabled when a GURU compositor is selected — not as a free overlay checklist row.
+GURU is enabled when a GURU compositor is selected, or when Hyprland pulls Quickshell — not as a free overlay checklist row.
 
 ### 12 — Suckless tools and popular apps
 
@@ -256,13 +256,13 @@ Summary table and time estimate → wipe warning → “Proceed?” → **re-typ
 
 **PipeWire** (if accepted): `media-video/pipewire`, `media-video/wireplumber`
 
-**Per-compositor requirements** (examples): Hyprland → portal-hyprland, hyprpaper, hypridle, hyprlock; Sway/SwayFX → swaybg, swayidle, swaylock, foot; Niri → xdg-desktop-portal-gnome, gnome-keyring, foot; dwm → xorg-server, xinit, dmenu, st, slstatus, slock; i3 → xorg-server, xinit, dmenu, i3status, st.
+**Per-compositor requirements** (examples): Hyprland → portal-hyprland, hyprpaper, hypridle, hyprlock, **quickshell::guru (USE=hyprland, fail-closed if `qs` missing)**; Sway/SwayFX → swaybg, swayidle, swaylock, foot; Niri → xdg-desktop-portal-gnome, gnome-keyring, foot; dwm → xorg-server, xinit, dmenu, st, slstatus, slock; i3 → xorg-server, xinit, dmenu, i3status, st.
 
 **Greeter:** `gui-libs/greetd` plus gtkgreet+labwc (plus greetd user/group / display-manager-init as needed).
 
-**Hyprland configs** are **Lua** (`hyprland.lua`) — hyproverlay tip tracks 0.55+ and 0.57 is Lua-only.
+**Hyprland configs** are **Lua** (`hyprland.lua`) — hyproverlay tip tracks 0.55+ and 0.57 is Lua-only. The installer default starts Quickshell (`qs`) and ships a tiny `~/.config/quickshell/shell.qml`.
 
-`nano` is installed on the new system. Dotfile choices may pull additional atoms the chosen config launches (upstream install scripts are not run).
+`nano` is installed on the new system. Niri upstream dots may pull additional atoms that config launches (upstream install scripts are not run).
 
 ### Proprietary codecs (only after explicit license accept)
 

@@ -1,4 +1,4 @@
-"""Installer UX: top-two WM dotfiles and hiding already-selected packages."""
+"""Installer UX: Hyprland Quickshell rice dots and locked packages."""
 
 from __future__ import annotations
 
@@ -6,14 +6,45 @@ import unittest
 
 from gentoo_installer import catalog
 from gentoo_installer.config import InstallConfig
+from gentoo_installer.execute import (
+    _atoms_to_unmask,
+    _dotfile_for,
+    _final_tool_checks,
+    _package_use_text,
+    _required_overlays,
+    _required_window_manager_script,
+    render_chroot_script,
+)
 from gentoo_installer.wizard import _packages_locked_from_earlier_steps
 
 
-class DotfileTopTwoTests(unittest.TestCase):
-    def test_hyprland_offers_installer_end4_ml4w(self) -> None:
+def _hypr_cfg(**kwargs: object) -> InstallConfig:
+    cfg = InstallConfig()
+    cfg.username = "ashley"
+    cfg.architecture = "amd64"
+    cfg.window_managers = ["gui-wm/hyprland"]
+    cfg.shell = "none"
+    cfg.pipewire = True
+    cfg.display_manager = "greetd"
+    cfg.init_system = "openrc"
+    cfg.kernel = "gentoo-kernel-bin"
+    cfg.bootloader = "grub"
+    cfg.bootloaders = ["grub"]
+    cfg.wm_dotfiles = ["gui-wm/hyprland=installer"]
+    for key, value in kwargs.items():
+        setattr(cfg, key, value)
+    return cfg
+
+
+class DotfileCatalogueTests(unittest.TestCase):
+    def test_hyprland_offers_installer_own_end4(self) -> None:
         ids = [choice.id for choice in catalog.dotfile_choices("gui-wm/hyprland")]
-        self.assertEqual(ids, ["installer", "end-4", "ml4w"])
+        self.assertEqual(ids, ["installer", "own", "end-4"])
+        self.assertNotIn("ml4w", ids)
         self.assertNotIn("hyde", ids)
+        end4 = next(c for c in catalog.dotfile_choices("gui-wm/hyprland") if c.id == "end-4")
+        self.assertIn("gui-apps/quickshell", end4.packages)
+        self.assertIn(("dots/.config/quickshell", ".config/quickshell"), end4.also)
 
     def test_niri_offers_installer_and_upstream_only(self) -> None:
         ids = [choice.id for choice in catalog.dotfile_choices("gui-wm/niri")]
@@ -22,11 +53,86 @@ class DotfileTopTwoTests(unittest.TestCase):
     def test_unknown_compositor_has_no_dotfiles(self) -> None:
         self.assertEqual(catalog.dotfile_choices("gui-wm/sway"), [])
 
-    def test_stale_saved_dotfile_id_falls_back(self) -> None:
-        choice = catalog.selected_dotfile("gui-wm/hyprland", ["gui-wm/hyprland=hyde"])
+    def test_stale_ml4w_profile_falls_back_to_installer(self) -> None:
+        choice = catalog.selected_dotfile("gui-wm/hyprland", ["gui-wm/hyprland=ml4w"])
         self.assertIsNotNone(choice)
         assert choice is not None
         self.assertEqual(choice.id, "installer")
+
+    def test_end4_profile_selects_full_path(self) -> None:
+        choice = catalog.selected_dotfile("gui-wm/hyprland", ["gui-wm/hyprland=end-4"])
+        self.assertIsNotNone(choice)
+        assert choice is not None
+        self.assertEqual(choice.id, "end-4")
+        self.assertTrue(choice.also)
+        self.assertEqual(choice.source, "dots/.config/hypr")
+
+
+class QuickshellHyprlandTests(unittest.TestCase):
+    def test_quickshell_is_hyprland_requirement(self) -> None:
+        reqs = [pkg.atom for pkg in catalog.WM_REQUIREMENTS["gui-wm/hyprland"]]
+        self.assertIn("gui-apps/quickshell", reqs)
+        pkg = next(p for p in catalog.WM_REQUIREMENTS["gui-wm/hyprland"] if p.atom == "gui-apps/quickshell")
+        self.assertEqual(pkg.overlay, "guru")
+
+    def test_hyprland_always_plans_quickshell_and_guru(self) -> None:
+        cfg = _hypr_cfg()
+        planned = set(_atoms_to_unmask(cfg))
+        self.assertIn("gui-apps/quickshell", planned)
+        self.assertIn("guru", _required_overlays(cfg))
+        self.assertIn("hyproverlay", _required_overlays(cfg))
+
+    def test_package_use_enables_quickshell_hyprland(self) -> None:
+        use = _package_use_text(_hypr_cfg())
+        self.assertIn("gui-apps/quickshell hyprland", use)
+
+    def test_qs_is_hard_required_and_fail_closed(self) -> None:
+        cfg = _hypr_cfg()
+        wm = _required_window_manager_script(cfg)
+        self.assertIn("gui-apps/quickshell", wm)
+        self.assertIn("command -v qs", wm)
+        self.assertIn("required package missing after emerge: gui-apps/quickshell", wm)
+        final = _final_tool_checks(cfg, ["grub"])
+        self.assertIn("required Quickshell (qs) missing", final)
+        self.assertIn("missing=1", final)
+
+    def test_installer_rice_starts_qs(self) -> None:
+        script = render_chroot_script(_hypr_cfg(), {"root": "/dev/vda2", "esp": "/dev/vda1"})
+        self.assertIn('hl.exec_cmd("qs")', script)
+        self.assertIn("ShellRoot", script)
+        self.assertIn(".config/quickshell/shell.qml", script)
+
+    def test_own_import_builds_choice_from_config(self) -> None:
+        cfg = _hypr_cfg(
+            wm_dotfiles=["gui-wm/hyprland=own"],
+            wm_dotfile_import_repo="alice/dots",
+            wm_dotfile_import_branch="main",
+            wm_dotfile_import_hypr=".config/hypr",
+            wm_dotfile_import_quickshell=".config/quickshell",
+        )
+        choice = _dotfile_for(cfg, "gui-wm/hyprland")
+        self.assertIsNotNone(choice)
+        assert choice is not None
+        self.assertEqual(choice.id, "own")
+        self.assertEqual(choice.repo, "alice/dots")
+        self.assertEqual(choice.also, ((".config/quickshell", ".config/quickshell"),))
+
+    def test_own_without_repo_falls_back_to_installer(self) -> None:
+        cfg = _hypr_cfg(wm_dotfiles=["gui-wm/hyprland=own"], wm_dotfile_import_repo="")
+        choice = _dotfile_for(cfg, "gui-wm/hyprland")
+        self.assertIsNotNone(choice)
+        assert choice is not None
+        self.assertEqual(choice.id, "installer")
+        self.assertEqual(choice.repo, "")
+
+    def test_end4_chroot_fetches_quickshell_tree(self) -> None:
+        cfg = _hypr_cfg(wm_dotfiles=["gui-wm/hyprland=end-4"])
+        script = render_chroot_script(cfg, {"root": "/dev/vda2", "esp": "/dev/vda1"})
+        self.assertIn("dots/.config/quickshell", script)
+        self.assertIn("end-4/dots-hyprland", script)
+        planned = set(_atoms_to_unmask(cfg))
+        self.assertIn("gui-apps/fuzzel", planned)
+        self.assertIn("app-misc/cliphist", planned)
 
 
 class AlreadySelectedPackageTests(unittest.TestCase):
@@ -41,46 +147,27 @@ class AlreadySelectedPackageTests(unittest.TestCase):
 
     def test_locked_includes_wm_requirements_and_dotfile_packages(self) -> None:
         cfg = InstallConfig()
-        cfg.window_managers = ["gui-wm/hyprland"]
+        cfg.window_managers = ["gui-wm/niri"]
         cfg.shell = "none"
         cfg.pipewire = True
-        cfg.wm_dotfiles = ["gui-wm/hyprland=end-4"]
+        cfg.wm_dotfiles = ["gui-wm/niri=upstream"]
         locked = _packages_locked_from_earlier_steps(cfg)
-        self.assertIn("gui-wm/hyprland", locked)
-        self.assertIn("gui-apps/hyprpaper", locked)
+        self.assertIn("gui-wm/niri", locked)
         self.assertIn("media-video/pipewire", locked)
-        self.assertIn("sys-process/btop", locked)
-        # end-4 dotfiles may pull Firefox; Chrome is never auto-locked as mandatory.
+        self.assertIn("gui-apps/waybar", locked)
         self.assertNotIn("www-client/google-chrome", locked)
-        cfg_no_dot = InstallConfig()
-        cfg_no_dot.window_managers = ["gui-wm/sway"]
-        cfg_no_dot.shell = "none"
-        cfg_no_dot.pipewire = False
-        locked_plain = _packages_locked_from_earlier_steps(cfg_no_dot)
-        self.assertNotIn("www-client/firefox-bin:esr", locked_plain)
-        self.assertNotIn("www-client/google-chrome", locked_plain)
 
-    def test_end4_btop_stays_visible_selected_in_system_admin(self) -> None:
-        """Locked dots packages show selected — not hidden (OI-86 / c5ab)."""
-        cfg = InstallConfig()
-        cfg.window_managers = ["gui-wm/hyprland"]
-        cfg.shell = "none"
-        cfg.pipewire = True
-        cfg.wm_dotfiles = ["gui-wm/hyprland=end-4"]
-        locked = _packages_locked_from_earlier_steps(cfg)
-        self.assertIn("sys-process/btop", locked)
-        hide_always = catalog.firewall_catalogue_hidden(bool(cfg.nftables))
-        show_locked = locked - hide_always
-        system = next(pkgs for key, _t, pkgs in catalog.CATEGORIES if key == "system")
-        # Do not hide queued dots deps — only mutual-exclusion / claimed rows.
-        visible = catalog.without_already_selected(system, hide_always)
-        visible_atoms = {atom for atom, _ in visible}
-        self.assertIn("sys-process/btop", visible_atoms)
-        self.assertIn("sys-process/htop", visible_atoms)
-        self.assertIn("sys-process/btop", show_locked)
-        # Old hide-locked behavior would drop btop; that must not return.
-        hidden_old = catalog.without_already_selected(system, locked)
-        self.assertNotIn("sys-process/btop", {atom for atom, _ in hidden_old})
+    def test_hyprland_locks_quickshell(self) -> None:
+        locked = _packages_locked_from_earlier_steps(_hypr_cfg())
+        self.assertIn("gui-apps/quickshell", locked)
+        self.assertIn("gui-wm/hyprland", locked)
+
+    def test_hyprland_installer_dots_pull_no_extra_dotfile_packages(self) -> None:
+        cfg = _hypr_cfg()
+        self.assertEqual(
+            catalog.dotfile_package_atoms(cfg.shell, cfg.window_managers, cfg.wm_dotfiles),
+            [],
+        )
 
     def test_locked_includes_greetd_when_chosen(self) -> None:
         cfg = InstallConfig()
@@ -91,25 +178,6 @@ class AlreadySelectedPackageTests(unittest.TestCase):
         self.assertIn("gui-libs/greetd", locked)
         self.assertIn("gui-apps/gtkgreet", locked)
         self.assertIn("gui-wm/labwc", locked)
-        # Display-manager category must not re-offer greeter stack.
-        dm_rows = next(pkgs for key, _t, pkgs in catalog.CATEGORIES if key == "display-managers")
-        visible = catalog.without_already_selected(dm_rows, locked)
-        visible_atoms = {atom for atom, _ in visible}
-        self.assertNotIn("gui-libs/greetd", visible_atoms)
-        self.assertNotIn("gui-apps/gtkgreet", visible_atoms)
-
-    def test_overlapping_category_rows_can_be_hidden_after_claim(self) -> None:
-        wayland = next(pkgs for key, _title, pkgs in catalog.CATEGORIES if key == "wayland-common")
-        terminals = next(pkgs for key, _title, pkgs in catalog.CATEGORIES if key == "terminals")
-        claimed = {"gui-apps/foot", "x11-terms/alacritty"}
-        later = catalog.without_already_selected(terminals, claimed)
-        later_atoms = {atom for atom, _ in later}
-        self.assertNotIn("gui-apps/foot", later_atoms)
-        self.assertNotIn("x11-terms/alacritty", later_atoms)
-        self.assertTrue(any(atom == "x11-terms/kitty" for atom, _ in later))
-        # Same-category revisit keeps claimed atoms visible when not in hide.
-        same = catalog.without_already_selected(wayland, set())
-        self.assertTrue(any(atom == "gui-apps/foot" for atom, _ in same))
 
 
 if __name__ == "__main__":

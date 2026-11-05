@@ -31,7 +31,7 @@ def _cfg(**kwargs) -> InstallConfig:
 
 class CatalogueAtomEmergeFixesTests(unittest.TestCase):
     def test_rev_bumped(self) -> None:
-        self.assertGreaterEqual(INSTALLER_REV, 86)
+        self.assertGreaterEqual(INSTALLER_REV, 92)
 
     def test_portage_shells_removed(self) -> None:
         choice_ids = {key for key, _ in catalog.SHELL_CHOICES}
@@ -66,6 +66,8 @@ class CatalogueAtomEmergeFixesTests(unittest.TestCase):
         planned = set(_atoms_to_unmask(_cfg(window_managers=["gui-wm/hyprland"])))
         self.assertIn("gui-libs/xdg-desktop-portal-hyprland", planned)
         self.assertNotIn("gui-apps/xdg-desktop-portal-hyprland", planned)
+        self.assertIn("gui-apps/quickshell", planned)
+        self.assertIn("gui-apps/quickshell", catalog.offered_guru_atoms("none"))
 
     def test_eselect_repository_uses_emerge_one(self) -> None:
         script = _overlay_script(_cfg(window_managers=["gui-wm/niri"]))
