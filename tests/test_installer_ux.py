@@ -1,35 +1,24 @@
-"""Installer UX: WM dotfiles (Hyprland safe default) and locked packages."""
+"""Installer UX: WM dotfiles (Hyprland installer-only) and locked packages."""
 
 from __future__ import annotations
 
 import unittest
-from unittest import mock
 
 from gentoo_installer import catalog
 from gentoo_installer.config import InstallConfig
-from gentoo_installer.wizard import _hyprland_dotfile_menu_choices, _packages_locked_from_earlier_steps
+from gentoo_installer.wizard import _packages_locked_from_earlier_steps
 
 
-class DotfileTopTwoTests(unittest.TestCase):
-    def test_hyprland_safe_menu_is_installer_only(self) -> None:
+class DotfileCatalogueTests(unittest.TestCase):
+    def test_hyprland_offers_installer_only(self) -> None:
         ids = [choice.id for choice in catalog.dotfile_choices("gui-wm/hyprland")]
         self.assertEqual(ids, ["installer"])
         self.assertNotIn("end-4", ids)
         self.assertNotIn("ml4w", ids)
         self.assertNotIn("hyde", ids)
-
-    def test_hyprland_expert_menu_keeps_third_party(self) -> None:
-        ids = [
-            choice.id
-            for choice in catalog.dotfile_choices("gui-wm/hyprland", include_expert=True)
-        ]
-        self.assertEqual(ids, ["installer", "end-4", "ml4w"])
-        experts = [
-            choice.id
-            for choice in catalog.dotfile_choices("gui-wm/hyprland", include_expert=True)
-            if choice.expert
-        ]
-        self.assertEqual(experts, ["end-4", "ml4w"])
+        # Removed from the catalogue entirely — not expert-gated.
+        all_ids = [choice.id for choice in catalog.WM_DOTFILES.get("gui-wm/hyprland", ())]
+        self.assertEqual(all_ids, ["installer"])
 
     def test_niri_offers_installer_and_upstream_only(self) -> None:
         ids = [choice.id for choice in catalog.dotfile_choices("gui-wm/niri")]
@@ -38,47 +27,18 @@ class DotfileTopTwoTests(unittest.TestCase):
     def test_unknown_compositor_has_no_dotfiles(self) -> None:
         self.assertEqual(catalog.dotfile_choices("gui-wm/sway"), [])
 
-    def test_stale_saved_dotfile_id_falls_back(self) -> None:
-        choice = catalog.selected_dotfile("gui-wm/hyprland", ["gui-wm/hyprland=hyde"])
-        self.assertIsNotNone(choice)
-        assert choice is not None
-        self.assertEqual(choice.id, "installer")
-
-    def test_selected_dotfile_still_resolves_expert_id(self) -> None:
+    def test_stale_end4_profile_falls_back_to_installer(self) -> None:
         choice = catalog.selected_dotfile("gui-wm/hyprland", ["gui-wm/hyprland=end-4"])
         self.assertIsNotNone(choice)
         assert choice is not None
-        self.assertEqual(choice.id, "end-4")
-        self.assertTrue(choice.expert)
+        self.assertEqual(choice.id, "installer")
+        self.assertEqual(choice.repo, "")
 
-
-class HyprlandExpertGateTests(unittest.TestCase):
-    def test_default_path_stays_installer_without_expert_yes(self) -> None:
-        with mock.patch("gentoo_installer.wizard.ui.info"), mock.patch(
-            "gentoo_installer.wizard.ui.ask_yes_no", return_value=False
-        ) as ask:
-            choices, default = _hyprland_dotfile_menu_choices("gui-wm/hyprland", "installer")
-        self.assertEqual([c.id for c in choices], ["installer"])
-        self.assertEqual(default, "installer")
-        self.assertEqual(ask.call_count, 1)
-
-    def test_expert_path_requires_two_confirms(self) -> None:
-        with mock.patch("gentoo_installer.wizard.ui.info"), mock.patch(
-            "gentoo_installer.wizard.ui.danger"
-        ), mock.patch(
-            "gentoo_installer.wizard.ui.ask_yes_no", side_effect=[True, True]
-        ):
-            choices, default = _hyprland_dotfile_menu_choices("gui-wm/hyprland", "installer")
-        self.assertEqual([c.id for c in choices], ["installer", "end-4", "ml4w"])
-        self.assertEqual(default, "installer")
-
-    def test_saved_expert_declined_falls_back_to_installer(self) -> None:
-        with mock.patch("gentoo_installer.wizard.ui.warn"), mock.patch(
-            "gentoo_installer.wizard.ui.ask_yes_no", return_value=False
-        ):
-            choices, default = _hyprland_dotfile_menu_choices("gui-wm/hyprland", "end-4")
-        self.assertEqual([c.id for c in choices], ["installer"])
-        self.assertEqual(default, "installer")
+    def test_stale_ml4w_profile_falls_back_to_installer(self) -> None:
+        choice = catalog.selected_dotfile("gui-wm/hyprland", ["gui-wm/hyprland=ml4w"])
+        self.assertIsNotNone(choice)
+        assert choice is not None
+        self.assertEqual(choice.id, "installer")
 
 
 class AlreadySelectedPackageTests(unittest.TestCase):
@@ -93,16 +53,14 @@ class AlreadySelectedPackageTests(unittest.TestCase):
 
     def test_locked_includes_wm_requirements_and_dotfile_packages(self) -> None:
         cfg = InstallConfig()
-        cfg.window_managers = ["gui-wm/hyprland"]
+        cfg.window_managers = ["gui-wm/niri"]
         cfg.shell = "none"
         cfg.pipewire = True
-        cfg.wm_dotfiles = ["gui-wm/hyprland=end-4"]
+        cfg.wm_dotfiles = ["gui-wm/niri=upstream"]
         locked = _packages_locked_from_earlier_steps(cfg)
-        self.assertIn("gui-wm/hyprland", locked)
-        self.assertIn("gui-apps/hyprpaper", locked)
+        self.assertIn("gui-wm/niri", locked)
         self.assertIn("media-video/pipewire", locked)
-        self.assertIn("sys-process/btop", locked)
-        # end-4 dotfiles may pull Firefox; Chrome is never auto-locked as mandatory.
+        self.assertIn("gui-apps/waybar", locked)
         self.assertNotIn("www-client/google-chrome", locked)
         cfg_no_dot = InstallConfig()
         cfg_no_dot.window_managers = ["gui-wm/sway"]
@@ -112,27 +70,38 @@ class AlreadySelectedPackageTests(unittest.TestCase):
         self.assertNotIn("www-client/firefox-bin:esr", locked_plain)
         self.assertNotIn("www-client/google-chrome", locked_plain)
 
-    def test_end4_btop_stays_visible_selected_in_system_admin(self) -> None:
-        """Locked expert-dots packages show selected — not hidden (OI-86 / c5ab)."""
+    def test_niri_upstream_waybar_stays_visible_selected(self) -> None:
+        """Locked dots packages show selected — not hidden (OI-86 / c5ab)."""
+        cfg = InstallConfig()
+        cfg.window_managers = ["gui-wm/niri"]
+        cfg.shell = "none"
+        cfg.pipewire = True
+        cfg.wm_dotfiles = ["gui-wm/niri=upstream"]
+        locked = _packages_locked_from_earlier_steps(cfg)
+        self.assertIn("gui-apps/waybar", locked)
+        hide_always = catalog.firewall_catalogue_hidden(bool(cfg.nftables))
+        show_locked = locked - hide_always
+        wayland = next(pkgs for key, _t, pkgs in catalog.CATEGORIES if key == "wayland-common")
+        visible = catalog.without_already_selected(wayland, hide_always)
+        visible_atoms = {atom for atom, _ in visible}
+        self.assertIn("gui-apps/waybar", visible_atoms)
+        self.assertIn("gui-apps/waybar", show_locked)
+        hidden_old = catalog.without_already_selected(wayland, locked)
+        self.assertNotIn("gui-apps/waybar", {atom for atom, _ in hidden_old})
+
+    def test_hyprland_installer_dots_pull_no_extra_packages(self) -> None:
         cfg = InstallConfig()
         cfg.window_managers = ["gui-wm/hyprland"]
         cfg.shell = "none"
-        cfg.pipewire = True
-        cfg.wm_dotfiles = ["gui-wm/hyprland=end-4"]
-        locked = _packages_locked_from_earlier_steps(cfg)
-        self.assertIn("sys-process/btop", locked)
-        hide_always = catalog.firewall_catalogue_hidden(bool(cfg.nftables))
-        show_locked = locked - hide_always
-        system = next(pkgs for key, _t, pkgs in catalog.CATEGORIES if key == "system")
-        # Do not hide queued dots deps — only mutual-exclusion / claimed rows.
-        visible = catalog.without_already_selected(system, hide_always)
-        visible_atoms = {atom for atom, _ in visible}
-        self.assertIn("sys-process/btop", visible_atoms)
-        self.assertIn("sys-process/htop", visible_atoms)
-        self.assertIn("sys-process/btop", show_locked)
-        # Old hide-locked behavior would drop btop; that must not return.
-        hidden_old = catalog.without_already_selected(system, locked)
-        self.assertNotIn("sys-process/btop", {atom for atom, _ in hidden_old})
+        cfg.wm_dotfiles = ["gui-wm/hyprland=installer"]
+        self.assertEqual(
+            catalog.dotfile_package_atoms(cfg.shell, cfg.window_managers, cfg.wm_dotfiles),
+            [],
+        )
+        stale = catalog.dotfile_package_atoms(
+            cfg.shell, cfg.window_managers, ["gui-wm/hyprland=end-4"]
+        )
+        self.assertEqual(stale, [])
 
     def test_locked_includes_greetd_when_chosen(self) -> None:
         cfg = InstallConfig()
@@ -143,7 +112,6 @@ class AlreadySelectedPackageTests(unittest.TestCase):
         self.assertIn("gui-libs/greetd", locked)
         self.assertIn("gui-apps/gtkgreet", locked)
         self.assertIn("gui-wm/labwc", locked)
-        # Display-manager category must not re-offer greeter stack.
         dm_rows = next(pkgs for key, _t, pkgs in catalog.CATEGORIES if key == "display-managers")
         visible = catalog.without_already_selected(dm_rows, locked)
         visible_atoms = {atom for atom, _ in visible}
@@ -159,7 +127,6 @@ class AlreadySelectedPackageTests(unittest.TestCase):
         self.assertNotIn("gui-apps/foot", later_atoms)
         self.assertNotIn("x11-terms/alacritty", later_atoms)
         self.assertTrue(any(atom == "x11-terms/kitty" for atom, _ in later))
-        # Same-category revisit keeps claimed atoms visible when not in hide.
         same = catalog.without_already_selected(wayland, set())
         self.assertTrue(any(atom == "gui-apps/foot" for atom, _ in same))
 

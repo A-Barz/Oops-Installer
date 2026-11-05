@@ -184,8 +184,8 @@ class InstallConfig:
     extra_packages: list[str] = field(default_factory=list)  # Final emerge set (atoms)
     selected_packages: list[str] = field(default_factory=list)  # Catalogue picks only
     window_managers: list[str] = field(default_factory=list)  # gui-wm/* and x11-wm/*
-    # "gui-wm/hyprland=installer" (default). Expert ids like end-4/ml4w need the
-    # wizard warn+confirm gate; missing or "installer" keeps the local Lua config.
+    # "gui-wm/hyprland=installer" or "gui-wm/niri=upstream". Missing / unknown /
+    # removed ids (old end-4/ml4w) fall back to the installer config.
     wm_dotfiles: list[str] = field(default_factory=list)
     overlays: list[str] = field(default_factory=list)  # eselect repository names
     kde_games: bool = False

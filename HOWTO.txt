@@ -24,13 +24,13 @@ Who should use it
 Use this if you want a guided Gentoo install with optional LUKS, LVM, RAID1,
 Btrfs, ZFS, several bootloaders, Plymouth, Wayland compositors (Hyprland,
 Sway, Wayfire, labwc, dwl, Qtile), suckless tools, and popular apps. Portage
-Wayland shells (Noctalia/DMS) are not offered. Hyprland uses the installer's
-own Lua config by default (safe greetd session). Third-party Hyprland GitHub
-rices that only copy ~/.config/hypr (end-4, ML4W) are expert-only after a
-warning — they often break sessions. Niri can use the installer config or the
-upstream default. A GitHub config is downloaded during the install from the
-latest commit on its branch, and the Gentoo packages that config starts are
-installed too. The project's install script is not run.
+Wayland shells (Noctalia/DMS) are not offered. Hyprland uses only the
+installer's Lua config (safe greetd session). Third-party Hyprland GitHub
+rices that only copy ~/.config/hypr are not offered. Niri can use the
+installer config or the upstream default. A GitHub config is downloaded
+during the install from the latest commit on its branch, and the Gentoo
+packages that config starts are installed too. The project's install script
+is not run.
 
 Do not use this as your first Linux install on a machine that holds unique
 data unless you have backups and have already practised in a virtual machine.

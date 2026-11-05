@@ -4728,7 +4728,7 @@ def _chroot_helper_atoms(cfg: InstallConfig) -> list[str]:
         for atom in OVERLAY_HELPER_ATOMS:
             if atom not in atoms:
                 atoms.append(atom)
-    # Remote dotfile fetch uses curl from the chroot (incl. expert Hyprland rices).
+    # Remote dotfile fetch uses curl from the chroot (e.g. Niri upstream).
     for atom in cfg.window_managers or []:
         choice = catalog.selected_dotfile(atom, cfg.wm_dotfiles or [])
         if choice is not None and choice.repo:
