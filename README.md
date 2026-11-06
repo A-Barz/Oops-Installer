@@ -12,14 +12,14 @@ The project is open for testing and bug reports. Try it in a virtual machine, or
 
 ## Why Gentoo for Wayland and suckless
 
-Oops-Installer aims at a **Wayland-first, compositor-centric** Gentoo system — not a GNOME or Plasma meta. You pick Hyprland, Sway, Niri, dwl, or similar; optional Noctalia or DMS; suckless tools; and a handbook-sized app catalogue. There is **no desktop-environment picker** and **no games category**.
+Oops-Installer aims at a **Wayland-first, compositor-centric** Gentoo system — not a GNOME or Plasma meta. You pick Hyprland, Sway, Niri, dwl, or similar; suckless tools; and a handbook-sized app catalogue. There is **no desktop-environment picker**, **no games category**, and **no Portage “session shells”** (Noctalia, DMS, and similar were dropped — the greeter is greetd + gtkgreet + labwc).
 
 Gentoo fits that intent:
 
 - **Control** — Portage profiles, USE flags, kernels (including stable LTS `gentoo-sources` or CachyOS), and overlays (`hyproverlay`, GURU when needed) stay explicit. Binary packages are optional so a desktop install need not compile everything.
-- **Minimalism** — Stage3 plus the session you chose. Shared Wayland utilities and suckless packages are offered; nothing assumes a full DE stack.
+- **Minimalism** — Stage3 plus the session you chose. Shared Wayland utilities and suckless packages are offered; nothing assumes a full DE stack. OpenRC is the default PID 1; udev still comes from `sys-apps/systemd-utils` on that path (not systemd-as-init, and not the without-systemd / eudev overlay).
 - **Performance** — Dist-kernels and binhosts when you want speed; source builds and LTO when you want to tune. Hardware probed on the live USB seeds sensible USE and `VIDEO_CARDS` defaults you can change.
-- **Ownership** — Configs and emerges land on *your* disk. Hyprland always emerges Quickshell (`gui-apps/quickshell::guru`, USE=hyprland); the default Lua rice starts `qs`. You can import your own GitHub trees or pick a full end-4–style path. Niri can use the installer or upstream default (downloaded; upstream install scripts are never run). Dual boot is not set up: the default path wipes the disk you confirm.
+- **Ownership** — Configs and emerges land on *your* disk. Hyprland always emerges Quickshell (`gui-apps/quickshell::guru`, USE=`hyprland`) and fail-closes if `qs` is missing; the default Lua rice starts `qs`. You can import your own GitHub hypr (+ optional quickshell) trees, or copy end-4 Illogical Impulse’s `hypr` + `quickshell` trees (configs only — never the Arch install script). ML4W’s old hypr-only half-copy is gone. Niri can use the installer or upstream default (downloaded; upstream install scripts are never run). Dual boot is not set up: the default path wipes the disk you confirm.
 
 Read **[HOWTO.txt](HOWTO.txt)** before a real install.
 
@@ -112,12 +112,14 @@ SSD detection enables weekly `fstrim`. Disks under ~40 GiB get a warning. Dual b
 
 | Ask | Options / notes | Default |
 |-----|-----------------|---------|
-| Stage level | `stage3` (default). `stage1`/`stage2` expert-gated then refused — public autobuilds are stage3-only | `stage3` |
-| Init system | `openrc`, `systemd` | `openrc` |
+| Stage level | `stage3` (default). `stage1`/`stage2` appear as expert choices then are refused — public autobuilds are **stage3-only** (latest-stage1/2 would 404 on every mirror) | `stage3` |
+| Init system | `openrc` (Gentoo default PID 1; udev via `sys-apps/systemd-utils`, not systemd-as-init), `systemd` (full PID 1) | `openrc` |
 | Install type | `desktop`, `server` (stage3 only) | `desktop` |
 | Variant | `standard`, `hardened`, `musl` | `standard` |
 | Verify stage GPG? | yes/no | Yes |
 | Testing keywords (`*/* ~arch`)? | yes/no | No |
+
+The **without-systemd** community overlay is **not offered** (and is refused if a saved profile still lists it): it wants eudev and conflicts with the OpenRC stage3 `systemd-utils` udev path.
 
 ### 6 — Base system (Portage)
 
@@ -125,12 +127,12 @@ SSD detection enables weekly `fstrim`. Disks under ~40 GiB get a warning. Dual b
 |-----|-----------------|---------|
 | Profile | Built from variant/init/arch (e.g. `…/23.0/desktop`) | desktop profile |
 | Sync | `webrsync`, `rsync`, `git` | `webrsync` |
-| Binary packages? | ABI `x86-64` / `x86-64-v3`; exact USE match? | Yes on standard; ABI from CPU |
+| Binary packages? | ABI `x86-64` / `x86-64-v3` (dual binhost repos when v3); `getuto` for signatures; handbook `FEATURES` (`getbinpkg` + `binpkg-request-signature`); `@world` uses `--newuse` with binhost or `--changed-use` without; exact USE match? | Yes on standard; ABI from CPU |
 | NVIDIA (if detected) | `nouveau`, `nvidia` | `nouveau` |
 | `VIDEO_CARDS` / `INPUT_DEVICES` | prompts from live probe | auto / `libinput` (+ wacom) |
 | Global USE | checklist (see below) | pre-ticks `dist-kernel`, `wayland`, … |
 | Extra USE / LTO / hardened CFLAGS | prompts | LTO No; hardened forced if variant hardened |
-| Mirrors / MAKEOPTS | empty = curated + deep mirrorselect | jobs `0` = CPU count |
+| Mirrors / MAKEOPTS | empty = curated multi-mirror `GENTOO_MIRRORS` (regional bases + distfiles fallback), then optional deep `mirrorselect -s3 -b10 -D`; soft-fail keeps curated mirrors | jobs `0` = CPU count |
 
 **USE checklist flags:** `X`, `wayland`, `gtk`, `qt5`, `qt6`, `opengl`, `vulkan`, `alsa`, `pulseaudio`, `pipewire`, `jack`, `bluetooth`, `networkmanager`, `wifi`, `dbus`, `udev`, `elogind`, `systemd`, `cups`, `pam`, `ssl`, `python`, `nls`, `dist-kernel`.
 
@@ -198,13 +200,13 @@ No desktop environment. Browsers are optional (Firefox ESR soft-default in chapt
 | Ask | Options / notes | Default |
 |-----|-----------------|---------|
 | Compositors / WMs | checklist (below) | empty / saved |
-| Dotfiles | Hyprland: `installer` (Quickshell rice) \| `own` \| `end-4` (hypr+qs). Niri: `installer` \| `upstream` | `installer` |
+| Dotfiles | Hyprland: `installer` (Lua rice that starts `qs`) \| `own` (GitHub hypr + optional qs tree) \| `end-4` (copies `dots/.config/hypr` **and** `dots/.config/quickshell`; GURU qs helpers). Niri: `installer` \| `upstream` | `installer` |
 | PipeWire | yes/no | Yes if WM |
 | Proprietary codecs | license accept for ugly/bad/libav, fdk-aac, faac, lame, ffmpeg | Off |
 
-**If a Wayland compositor is chosen**, login is **greetd** (gtkgreet+labwc). X11-only dwm/i3 → text console / startx (no greeter). Portage Wayland shells (Noctalia/DMS) are not offered.
+**If a Wayland compositor is chosen**, login is **greetd** (gtkgreet+labwc). X11-only dwm/i3 → text console / startx (no greeter). Portage Wayland shells (Noctalia, DMS, …) are **not** a shell step — they were removed from the catalogue.
 
-Optional **mise + small agent set** invite: first-login note only — no Quickshell panel, no passwordless sudo. `dev-util/mise` is not emerged from ::gentoo; the invite documents a user install.
+Optional **mise + small agent set** invite: first-login note only — no Quickshell agents panel, no passwordless sudo. `dev-util/mise` is not emerged from ::gentoo; the invite documents a user install.
 
 **Compositors / WMs offered**
 
@@ -230,10 +232,11 @@ GURU is enabled when a GURU compositor is selected, or when Hyprland pulls Quick
 
 ### 12 — Suckless tools and popular apps
 
-1. Optional **extra Portage overlays** (featured + community list; GURU not listed here).
+1. Optional **extra Portage overlays** (featured + community list; GURU not listed here; **without-systemd** refused).
 2. If Niri: **Niri apps** checklist (preticks waybar/wofi/mako/swaybg/swayidle/swaylock).
-3. Linear category walk (Space toggle, Enter next, Select all), including **Browsers** — Firefox ESR soft-default (untick to skip); Google Chrome opt-in. Categories already decided earlier are skipped: window-managers, display-managers (and there is no games / DE category).
-4. Extra free-typed emerge atoms.
+3. Linear category walk (Space toggle, Enter next, Select all), including **Browsers** — Firefox ESR soft-default (untick to skip); Google Chrome opt-in. Categories already decided earlier are skipped: window-managers, display-managers, wayland-utils (and there is no games / DE category).
+4. Atoms already queued by compositors or **dotfile deps** (for example end-4 → `sys-process/btop`, terminals, fonts) stay **visible and selected** with an `[already queued]` mark — locked, not hidden.
+5. Extra free-typed emerge atoms.
 
 ### Review → confirm → nap
 
@@ -256,11 +259,11 @@ Summary table and time estimate → wipe warning → “Proceed?” → **re-typ
 
 **PipeWire** (if accepted): `media-video/pipewire`, `media-video/wireplumber`
 
-**Per-compositor requirements** (examples): Hyprland → portal-hyprland, hyprpaper, hypridle, hyprlock, **quickshell::guru (USE=hyprland, fail-closed if `qs` missing)**; Sway/SwayFX → swaybg, swayidle, swaylock, foot; Niri → xdg-desktop-portal-gnome, gnome-keyring, foot; dwm → xorg-server, xinit, dmenu, st, slstatus, slock; i3 → xorg-server, xinit, dmenu, i3status, st.
+**Per-compositor requirements** (examples): Hyprland → portal-hyprland, hyprpaper, hypridle, hyprlock, **`gui-apps/quickshell::guru` (USE=`hyprland`, fail-closed if `qs` missing)**; Sway/SwayFX → swaybg, swayidle, swaylock, foot; Niri → xdg-desktop-portal-gnome, gnome-keyring, foot; dwm → xorg-server, xinit, dmenu, st, slstatus, slock; i3 → xorg-server, xinit, dmenu, i3status, st.
 
 **Greeter:** `gui-libs/greetd` plus gtkgreet+labwc (plus greetd user/group / display-manager-init as needed).
 
-**Hyprland configs** are **Lua** (`hyprland.lua`) — hyproverlay tip tracks 0.55+ and 0.57 is Lua-only. The installer default starts Quickshell (`qs`) and ships a tiny `~/.config/quickshell/shell.qml`.
+**Hyprland configs** are **Lua** (`hyprland.lua`) — hyproverlay tip is Lua-only from 0.57. The installer default starts Quickshell (`qs`) and ships a tiny `~/.config/quickshell/shell.qml`. The **end-4** choice copies Illogical Impulse’s hypr **and** quickshell trees and queues declared Gentoo helpers (fuzzel, cliphist, brightnessctl, btop, …); it does **not** run upstream `setup` / Arch install scripts, so a full rice may still need further emerges on an already-installed system. Quickshell/Qt builds are **heavy** even with a binhost.
 
 `nano` is installed on the new system. Niri upstream dots may pull additional atoms that config launches (upstream install scripts are not run).
 
@@ -368,8 +371,9 @@ The wizard follows handbook order. Places where Arch is stricter and this instal
 
 - `/etc/fstab` names a plain partition by PARTUUID on GPT, or by filesystem UUID otherwise. LVM, LUKS, and ZFS stay on `/dev/mapper` names. ESP at `/efi` with `umask=0077`.
 - GRUB keeps the kernel on `/boot`. systemd-boot and EFI stub install the kernel onto `/efi`.
-- Empty mirror answer → curated `GENTOO_MIRRORS` (multi-base + distfiles) then optional deep `mirrorselect -D`.
-- Console keymap before LUKS passphrase; SSD → weekly `fstrim`; nftables offered (default yes); SSH opened only when sshd is selected.
+- Empty mirror answer → curated multi-mirror `GENTOO_MIRRORS` (regional bases + distfiles) written first, then optional deep `mirrorselect -s3 -b10 -D`; if the probe fails, curated mirrors stay.
+- Binhost path follows the Handbook Binary Host Quickstart: dual ABI repos when you pick x86-64-v3, `getuto` signatures, `FEATURES` with `getbinpkg` / `binpkg-request-signature`, and `@world --newuse` (or `--changed-use` without binhost).
+- Console keymap before LUKS passphrase; SSD → weekly `fstrim`; nftables offered (default yes); SSH opened only when sshd is selected. LUKS defaults **Yes** on wipe/full-disk paths (clear opt-out).
 - Small-disk warning; 32-bit UEFI limited to GRUB `i386-efi`; declining `linux-firmware` notes AMD microcode lives there.
 - After install: power down; remove USB only when the machine is off.
 
@@ -381,12 +385,38 @@ Live `lspci` / `lsusb` / `/proc/cpuinfo` / `ld.so --help` seed defaults only (bi
 
 ## Limits (also shown in the wizard)
 
-- The package catalogue is handbook-sized plus overlays, not the entire Portage tree.
+- The package catalogue is handbook-sized plus overlays, not the entire Portage tree. Catalogue atoms can drift from GURU tip; refuse lists (`REMOVED_GURU_ATOMS`, refused overlays) stay honest over aspirational menus.
 - **Encrypted swap** is a separate LUKS2 volume when using a swap partition/LV. LVM-on-LUKS does not wrap swap twice. A **swap file** is not LUKS-wrapped.
 - **LUKS + GRUB (UEFI):** kernels stay on encrypted `/boot`; the installer sets `GRUB_ENABLE_CRYPTODISK=y` so GRUB can unlock and load them. First unlock is at the GRUB prompt; the initramfs may ask again until single-pass unlock is designed.
 - **TPM2** only writes a helper script; enroll after first boot.
 - **Limine** needs `limine.conf` / `vmlinuz` refreshed on kernel upgrades.
 - **netifrc** uses the NIC you pick, not a hardcoded `eth0`.
+
+### What still hurts
+
+- **end-4 Illogical Impulse** is a large Quickshell rice. The installer copies the hypr + quickshell config trees and emerges declared helpers + required `qs`; it does not claim a complete one-shot Arch-parity setup. Expect more emerges (and long Qt/Quickshell compiles) if something the rice launches is missing.
+- **Hyprland → greeter bounce:** if the greeter comes back after you pick Hyprland, drop to a TTY (Ctrl+Alt+F2), log in as your user, and check before re-running the installer:
+
+```bash
+Hyprland --version
+command -v Hyprland qs
+ls -la ~/.config/hypr/ ~/.config/quickshell/
+test -f ~/.config/hypr/hyprland.lua && head -20 ~/.config/hypr/hyprland.lua
+echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
+```
+
+  Missing `qs`, a partial hypr tree, or a Lua load error is more likely than a broken greeter when gtkgreet already rendered.
+
+## Possible next changes
+
+Useful, ethos-aligned ideas only (not a roadmap promise):
+
+- Harden end-4 / Quickshell deps so greeter → session is reliable out of the box more often.
+- Optional curated Caelestia (or other Quickshell) rice **if** packaging exists and stays Wayland-first — no DE metas.
+- Keep this README’s post-install “Hyprland exits to greeter” TTY checklist short and accurate as hyproverlay / end-4 tip move.
+- Keep catalogue atoms honest against `::guru` / hyproverlay drift; refuse stale shells and overlays rather than re-adding them.
+
+Not planned: Omarchy-style live UX sync, without-systemd / eudev migration, DE pickers, or games.
 
 ## Layout
 
@@ -398,5 +428,9 @@ Live `lspci` / `lsusb` / `/proc/cpuinfo` / `ld.so --help` seed defaults only (bi
 | `gentoo_installer/estimate.py` | Spoken pre-install time estimate |
 | `gentoo_installer/ui.py` | Colours, menus, passwords, nap notice, banner |
 | `gentoo_installer/catalog.py` | Package categories, WMs, overlays, Plymouth themes |
+
+## Inspiration
+
+Thanks to the projects that keep source, choice, and compositors interesting — **Gentoo**, **Funtoo**, **Omarchy**, **Garuda**, **Void**, and **Aeryn OS** — and to people whose work or stubbornness still matters here: **Richard Stallman**, **Jono Bacon**, **Bryan Lunduke**, **Terry Fox**, and **Noah Chelliah**. Inspiration is not affiliation; this installer is its own small thing.
 
 $\scriptsize\textcolor{purple}{\textsf{Y}}\textcolor{green}{\textsf{o}}\textcolor{purple}{\textsf{u}}\textcolor{green}{\textsf{'}}\textcolor{purple}{\textsf{r}}\textcolor{green}{\textsf{e}}\ \textcolor{purple}{\textsf{W}}\textcolor{green}{\textsf{e}}\textcolor{purple}{\textsf{l}}\textcolor{green}{\textsf{c}}\textcolor{purple}{\textsf{o}}\textcolor{green}{\textsf{m}}\textcolor{purple}{\textsf{e}}$ 😈
