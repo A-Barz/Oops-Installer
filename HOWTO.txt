@@ -45,6 +45,9 @@ What you need
   * Root / sudo
   * A target disk you are willing to erase, unless you choose "existing
     partitions" and point the installer at partitions you already made
+  * Optional but recommended for stage3 GPG: Ubuntu package ntpsec-ntpdate
+    on the live host (Gentoo may still use chrony on the installed system —
+    do not unmerge it)
 
 Recommended first run
 ---------------------
@@ -63,13 +66,14 @@ Get the installer onto the live system
 Boot Ubuntu live. Open a terminal. Then:
 
   sudo apt-get update
-  sudo apt-get install -y python3 git
+  sudo apt-get install -y python3 git ntpsec-ntpdate
   git clone <this-repository-url>
-  cd gentoo-live-installer
+  cd Oops-Installer
 
-If you copied the folder onto a USB already:
+If you copied the folder onto a USB already (or an older clone still named
+gentoo-live-installer):
 
-  cd /path/to/gentoo-live-installer
+  cd /path/to/Oops-Installer
 
 Read this file on the live system with:
 
@@ -131,18 +135,32 @@ disk until the review at the end.
                     sudo apt-get install -y ntpsec-ntpdate
   4. Disks        Target disk, wipe, layout, filesystem, swap, LUKS
                   (wipe/full-disk paths default LUKS on; clear opt-out)
-  5. Stage3       OpenRC or systemd, desktop / hardened / musl
-                  (stage tarball only — no kernel image; pick the kernel in step 7)
-  6. Base         Profile, sync method, binhost, USE flags
+  5. Stage3       OpenRC or systemd, desktop / hardened / musl.
+                  Public autobuilds are stage3-only: stage1/stage2 appear as
+                  expert choices then are refused (latest-stage1/2 would 404).
+                  OpenRC is Gentoo's default PID 1; udev still comes from
+                  sys-apps/systemd-utils (not systemd-as-init). The
+                  without-systemd overlay is not offered (eudev conflict).
+                  Stage tarball only — no kernel image; pick the kernel in
+                  step 7.
+  6. Base         Profile, sync method, binhost, USE flags, mirrors.
+                  Empty mirror URL → curated multi-mirror GENTOO_MIRRORS
+                  (regional bases + distfiles), then optional deep
+                  mirrorselect -s3 -b10 -D; soft-fail keeps curated mirrors.
   7. Kernel       gentoo-kernel-bin (fastest), gentoo-kernel, gentoo-sources,
                   CachyOS binary/source via CachyOS-kernels, firmware, dracut
   8. System       Hostname, locale, timezone, root and user passwords
   9. Tools        NetworkManager / dhcpcd / netifrc, sshd, cron, CUPS,
                   nftables or UFW (deny-in/allow-out; LocalSend ports opt-in)
  10. Bootloader   GRUB (handbook default) and optional extras, Plymouth
- 11. Session      Wayland compositors, Noctalia or DMS, greetd;
-                  optional mise/agent first-login invite
- 12. Packages     Shared Wayland utilities, suckless tools, popular apps
+ 11. Session      Wayland compositors and greetd (gtkgreet + labwc).
+                  No Portage shells (Noctalia/DMS). Hyprland requires
+                  Quickshell (qs from ::guru); dots are installer / own /
+                  end-4 (no ML4W). Optional mise/agent first-login invite.
+ 12. Packages     Shared Wayland utilities, suckless tools, popular apps.
+                  Atoms already queued by compositors or dotfile deps
+                  (for example end-4 → sys-process/btop) stay visible and
+                  selected as [already queued] — locked, not hidden.
 
 Menus (shown again at the start of the installer):
 
@@ -183,8 +201,10 @@ How long it takes
 Downloading stage3 is minutes on a decent link. Emerging a full desktop
 can take many hours, especially without binary packages.
 
-The install prints a one-line progress bar with the estimate and the time
-remaining. apt, wget, and emerge output keeps scrolling above that line.
+After you re-type the disk path, the installer shows a full-width nap
+banner ("Take a nice relaxing nap"). There is no progress bar or percent.
+Come back after the time estimate; apt, wget, and emerge output keep
+scrolling in the meantime.
 
 For a first install, prefer:
 
@@ -199,12 +219,10 @@ If /var/tmp is not writable, a log is created in the current directory.
 
 After the installer finishes
 ----------------------------
-It will tell you to unmount and reboot. Typical last steps on the live USB:
-
-  umount -R /mnt/gentoo
-  reboot
-
-Remove the Ubuntu live USB so firmware boots the Gentoo disk.
+It congratulates you and tells you to power down the device. After the
+machine has shut down, remove the Ubuntu live USB so firmware boots the
+Gentoo disk. Do not unmount/reboot from the live session as the finish
+step — power down first, then pull the USB.
 
 When a login manager was selected, that boot opens it as soon as the system
 is ready. Sign in with the username from the install. The window managers
@@ -238,15 +256,15 @@ You can also start that choice yourself:
 
 The first line of the installer is `Oops Installer  rev N`. That number
 must match `INSTALLER_REV` in gentoo_installer/rev.py and the chroot
-script banner. This tree is rev 16:
+script banner. This tree is rev 92:
 
   grep "INSTALLER_REV" gentoo_installer/rev.py
-  grep "rev 16" /mnt/gentoo/root/chroot-install.sh
+  grep "rev 92" /mnt/gentoo/root/chroot-install.sh
 
 `--config` without `--resume` used to re-run wipefs/mount and crash with
 "target is busy" / "already mounted" if /mnt/gentoo was still mounted.
-Rev 15 asks to resume when a state file or mount exists, reopens LUKS
-without formatting, and makes bind-mounts idempotent.
+Current revisions ask to resume when a state file or mount exists, reopen
+LUKS without formatting, and make bind-mounts idempotent.
 
 Resume skips phases already marked done. If disks were only half-written,
 do not resume blindly; start a new wipe in a VM, or inspect partitions
@@ -256,6 +274,10 @@ Limits you should know
 ----------------------
   * The package list is a handbook-sized catalogue plus overlays, not
     every ebuild in Portage. You can type extra atoms such as app-misc/jq.
+  * Public mirrors publish stage3 only; stage1/stage2 are refused before wget.
+  * OpenRC installs still use systemd-utils for udev; without-systemd is refused.
+  * Hyprland always needs Quickshell (qs); end-4 may need further emerges
+    beyond the declared helpers. ML4W is not offered.
   * LUKS defaults to Yes on wipe/full-disk paths; say No to opt out.
     Mount-existing / open-only paths still default to No.
   * Encrypted swap is a separate LUKS volume (/dev/mapper/swap) when you
